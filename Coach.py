@@ -259,9 +259,10 @@ class Coach():
         if not os.path.exists(folder):
             os.makedirs(folder)
         filename = os.path.join(folder, examples_filename)
-        with open(filename, "wb+") as f:
+        temp_filename = filename + ".tmp"
+        with open(temp_filename, "wb+") as f:
             Pickler(f).dump(self.trainExamplesHistory)
-        f.closed
+        os.replace(temp_filename, filename)
 
     def _examplesCandidates(self, examplesFile=None):
         load_folder, load_file = self.args.load_folder_file
