@@ -39,10 +39,23 @@ def sample_book_payload():
                         "id": 2,
                         "player2": ["E1", "A2"],
                         "player2_response_rank": 2,
-                        "value_mean": 0.9,
+                        "value_mean": 0.25,
                         "pieces": [
                             [1, 2, 0, 0, -1],
                             [-2, 0, 0, 0, 0],
+                            [0, 0, 0, 0, 0],
+                            [0, 0, 0, 0, 0],
+                            [0, 0, 0, 0, 0],
+                        ],
+                    },
+                    {
+                        "id": 4,
+                        "player2": ["A2", "E2"],
+                        "player2_response_rank": 3,
+                        "value_mean": 0.9,
+                        "pieces": [
+                            [1, 2, 0, 0, -1],
+                            [0, 0, 0, 0, -2],
                             [0, 0, 0, 0, 0],
                             [0, 0, 0, 0, 0],
                             [0, 0, 0, 0, 0],
@@ -86,7 +99,7 @@ class TestSantoriniOpeningSampler(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             book = SantoriniOpeningBook.load(self.write_book(folder))
 
-            self.assertEqual(len(book.positions), 3)
+            self.assertEqual(len(book.positions), 4)
             self.assertEqual(len(book.best_response_positions), 2)
 
     def test_self_play_sampling_filters_lopsided_positions(self):
@@ -101,9 +114,12 @@ class TestSantoriniOpeningSampler(unittest.TestCase):
 
             for _ in range(20):
                 board = sampler.sample_self_play_board()
-                self.assertFalse(np.array_equal(board[0], np.array(sample_book_payload()["player1_choices"][0]["responses"][1]["pieces"])))
+                self.assertFalse(np.array_equal(
+                    board[0],
+                    np.array(sample_book_payload()["player1_choices"][0]["responses"][2]["pieces"]),
+                ))
 
-    def test_arena_suite_prefers_best_responses_from_top_choices(self):
+    def test_arena_suite_allows_non_best_responses_from_top_choices(self):
         with tempfile.TemporaryDirectory() as folder:
             sampler = SantoriniOpeningSampler.load(
                 self.write_book(folder),
@@ -112,6 +128,9 @@ class TestSantoriniOpeningSampler(unittest.TestCase):
                 random_orientation=False,
                 rng=np.random.RandomState(4),
             )
+
+            candidate_ids = [position["id"] for position in sampler._arena_candidates()]
+            self.assertEqual(candidate_ids, [1, 2])
 
             suite = sampler.sample_arena_suite(3)
 

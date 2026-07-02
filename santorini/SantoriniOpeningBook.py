@@ -52,10 +52,10 @@ class SantoriniOpeningSampler:
     def __init__(
         self,
         book,
-        self_play_max_abs_value=0.35,
+        self_play_max_abs_value=0.30,
         self_play_tail_probability=0.05,
         arena_top_fraction=0.50,
-        arena_max_abs_value=0.15,
+        arena_max_abs_value=0.14,
         random_orientation=True,
         rng=None,
     ):
@@ -93,7 +93,7 @@ class SantoriniOpeningSampler:
 
         candidates = self._arena_candidates()
         if not candidates:
-            candidates = self.book.best_response_positions or self.book.positions
+            candidates = self.book.positions
 
         replace = count > len(candidates)
         probabilities = self._arena_probabilities(candidates)
@@ -106,12 +106,11 @@ class SantoriniOpeningSampler:
         return [self._board_from_position(candidates[int(index)]) for index in indices]
 
     def _arena_candidates(self):
-        best_positions = self.book.best_response_positions or self.book.positions
-        max_rank = max(position["player1_rank"] for position in best_positions)
+        max_rank = max(position["player1_rank"] for position in self.book.positions)
         rank_cutoff = max(1, int(math.ceil(max_rank * self.arena_top_fraction)))
         return [
             position
-            for position in best_positions
+            for position in self.book.positions
             if position["player1_rank"] <= rank_cutoff
             and position["value_abs"] <= self.arena_max_abs_value
         ]

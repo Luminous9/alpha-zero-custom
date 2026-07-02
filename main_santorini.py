@@ -1,5 +1,5 @@
-import logging
 import argparse
+import logging
 import os
 import random
 
@@ -8,9 +8,11 @@ import numpy as np
 import torch
 
 from Coach import Coach
+from santorini.pytorch.NNet import NNetWrapper as nn
+from santorini.pytorch.NNet import args as nnet_args
 from santorini.SantoriniGame import SantoriniGame as Game
-from santorini.SantoriniOpeningBook import SantoriniOpeningSampler, find_opening_book
-from santorini.pytorch.NNet import NNetWrapper as nn, args as nnet_args
+from santorini.SantoriniOpeningBook import (SantoriniOpeningSampler,
+                                            find_opening_book)
 from utils import dotdict
 
 log = logging.getLogger(__name__)
@@ -72,10 +74,10 @@ def parse_args():
     parser.add_argument('--arena-batch-size', type=int)
     parser.add_argument('--opening-book', type=str)
     parser.add_argument('--no-opening-book', action='store_true')
-    parser.add_argument('--self-play-opening-max-abs-value', type=float, default=0.75)
+    parser.add_argument('--self-play-opening-max-abs-value', type=float, default=0.30)
     parser.add_argument('--self-play-opening-tail-probability', type=float, default=0.05)
-    parser.add_argument('--arena-opening-top-fraction', type=float, default=0.35)
-    parser.add_argument('--arena-opening-max-abs-value', type=float, default=0.75)
+    parser.add_argument('--arena-opening-top-fraction', type=float, default=0.50)
+    parser.add_argument('--arena-opening-max-abs-value', type=float, default=0.14)
     parser.add_argument('--no-opening-random-orientation', action='store_true')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--quiet', action='store_true')
