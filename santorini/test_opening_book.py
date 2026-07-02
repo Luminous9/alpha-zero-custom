@@ -4,6 +4,7 @@ from generate_santorini_opening_book import (
     board_record,
     build_minimax_book_records,
     canonical_key,
+    checkpoint_output_dir,
     evaluate_openings,
     format_json,
     iter_player1_choices,
@@ -70,13 +71,42 @@ class TestSantoriniOpeningBook(unittest.TestCase):
 
     def test_evaluate_openings_returns_minimax_tree_and_flat_positions(self):
         class FakeNNet:
+            def __init__(self):
+                self.batch_sizes = []
+
             def predict_batch(self, boards):
+                self.batch_sizes.append(len(boards))
                 return None, [0.0 for _ in boards]
 
-        choices = evaluate_openings(FakeNNet(), board_size=3, batch_size=8, max_positions=2)
+        fake_nnet = FakeNNet()
+        choices = evaluate_openings(fake_nnet, board_size=3, batch_size=8, max_positions=2)
 
         self.assertGreaterEqual(len(choices), 1)
         self.assertIn("responses", choices[0])
+        self.assertEqual(sum(fake_nnet.batch_sizes), 2)
+        self.assertFalse(choices[0]["responses"][0]["label_invariance_checked"])
+
+    def test_evaluate_openings_can_check_label_invariance(self):
+        class FakeNNet:
+            def __init__(self):
+                self.batch_sizes = []
+
+            def predict_batch(self, boards):
+                self.batch_sizes.append(len(boards))
+                return None, [0.0 for _ in boards]
+
+        fake_nnet = FakeNNet()
+        choices = evaluate_openings(
+            fake_nnet,
+            board_size=3,
+            batch_size=8,
+            max_positions=2,
+            check_label_invariance=True,
+        )
+
+        self.assertEqual(sum(fake_nnet.batch_sizes), 8)
+        self.assertTrue(choices[0]["responses"][0]["label_invariance_checked"])
+        self.assertEqual(len(choices[0]["responses"][0]["label_values"]), 4)
 
     def test_minimax_book_sorts_p2_low_and_p1_high(self):
         p1_a = ((0, 0), (0, 1))
@@ -115,6 +145,16 @@ class TestSantoriniOpeningBook(unittest.TestCase):
 
         self.assertIn("[1, 2, 0, 0, 0]", text)
         self.assertNotIn("        1,\n        2,", text)
+
+    def test_checkpoint_output_dir_uses_checkpoint_folder_name(self):
+        self.assertEqual(
+            checkpoint_output_dir("temp/santorini_opening_books", "./temp/santorini_kaggle_training5"),
+            "temp/santorini_opening_books/santorini_kaggle_training5",
+        )
+        self.assertEqual(
+            checkpoint_output_dir("temp/santorini_opening_books", "/kaggle/input/run/checkpoints/"),
+            "temp/santorini_opening_books/checkpoints",
+        )
 
 
 if __name__ == "__main__":

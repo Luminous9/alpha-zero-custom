@@ -10,7 +10,7 @@ class BatchedMCTSArena:
     active game/player while batching neural-network leaf evaluations.
     """
 
-    def __init__(self, game, player1_nnet, player2_nnet, args, batch_size=1, quiet=False):
+    def __init__(self, game, player1_nnet, player2_nnet, args, batch_size=1, quiet=False, opening_boards=None):
         self.game = game
         self.nnets = {
             1: player1_nnet,
@@ -19,6 +19,7 @@ class BatchedMCTSArena:
         self.args = args
         self.batch_size = max(1, int(batch_size))
         self.quiet = quiet
+        self.opening_boards = opening_boards
 
     def playGames(self, num):
         num = int(num / 2)
@@ -48,7 +49,8 @@ class BatchedMCTSArena:
         try:
             while completed < num:
                 while launched < num and len(active) < self.batch_size:
-                    active.append(self._newGame(side_to_player))
+                    opening_board = self.opening_boards[launched] if self.opening_boards is not None else None
+                    active.append(self._newGame(side_to_player, opening_board=opening_board))
                     launched += 1
 
                 for game_state in active:
@@ -96,9 +98,9 @@ class BatchedMCTSArena:
 
         return oneWon, twoWon, draws
 
-    def _newGame(self, side_to_player):
+    def _newGame(self, side_to_player, opening_board=None):
         return {
-            'board': self.game.getInitBoard(),
+            'board': opening_board.copy() if opening_board is not None else self.game.getInitBoard(),
             'curPlayer': 1,
             'side_to_player': side_to_player,
             'mcts_by_player': {

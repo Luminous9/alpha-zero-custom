@@ -10,7 +10,7 @@ class Arena():
     An Arena class where any 2 agents can be pit against each other.
     """
 
-    def __init__(self, player1, player2, game, display=None):
+    def __init__(self, player1, player2, game, display=None, opening_boards=None):
         """
         Input:
             player 1,2: two functions that takes board as input, return action
@@ -26,8 +26,9 @@ class Arena():
         self.player2 = player2
         self.game = game
         self.display = display
+        self.opening_boards = opening_boards
 
-    def playGame(self, verbose=False):
+    def playGame(self, verbose=False, opening_board=None):
         """
         Executes one episode of a game.
 
@@ -39,7 +40,7 @@ class Arena():
         """
         players = [self.player2, None, self.player1]
         curPlayer = 1
-        board = self.game.getInitBoard()
+        board = opening_board.copy() if opening_board is not None else self.game.getInitBoard()
         it = 0
 
         for player in players[0], players[2]:
@@ -90,11 +91,13 @@ class Arena():
         """
 
         num = int(num / 2)
+        opening_boards = self.opening_boards
         oneWon = 0
         twoWon = 0
         draws = 0
-        for _ in tqdm(range(num), desc="Arena.playGames (1)"):
-            gameResult = self.playGame(verbose=verbose)
+        for i in tqdm(range(num), desc="Arena.playGames (1)"):
+            opening_board = opening_boards[i] if opening_boards is not None else None
+            gameResult = self.playGame(verbose=verbose, opening_board=opening_board)
             if gameResult == 1:
                 oneWon += 1
             elif gameResult == -1:
@@ -104,8 +107,9 @@ class Arena():
 
         self.player1, self.player2 = self.player2, self.player1
 
-        for _ in tqdm(range(num), desc="Arena.playGames (2)"):
-            gameResult = self.playGame(verbose=verbose)
+        for i in tqdm(range(num), desc="Arena.playGames (2)"):
+            opening_board = opening_boards[i] if opening_boards is not None else None
+            gameResult = self.playGame(verbose=verbose, opening_board=opening_board)
             if gameResult == -1:
                 oneWon += 1
             elif gameResult == 1:

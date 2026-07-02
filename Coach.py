@@ -21,11 +21,12 @@ class Coach():
     in Game and NeuralNet. args are specified in main.py.
     """
 
-    def __init__(self, game, nnet, args):
+    def __init__(self, game, nnet, args, opening_sampler=None):
         self.game = game
         self.nnet = nnet
         self.pnet = self.nnet.__class__(self.game)  # the competitor network
         self.args = args
+        self.opening_sampler = opening_sampler
         self.mcts = MCTS(self.game, self.nnet, self.args)
         self.trainExamplesHistory = []  # history of examples from args.numItersForTrainExamplesHistory latest iterations
         self.skipFirstSelfPlay = False  # can be overriden in loadTrainExamples()
@@ -38,6 +39,16 @@ class Coach():
 
     def _arena_batch_size(self):
         return max(1, int(getattr(self.args, 'arenaBatchSize', 1)))
+
+    def _initial_board(self):
+        if self.opening_sampler is not None:
+            return self.opening_sampler.sample_self_play_board()
+        return self.game.getInitBoard()
+
+    def _arena_opening_suite(self):
+        if self.opening_sampler is None:
+            return None
+        return self.opening_sampler.sample_arena_suite(int(self.args.arenaCompare / 2))
 
     def executeEpisode(self):
         """
@@ -56,7 +67,7 @@ class Coach():
                            the player eventually won the game, else -1.
         """
         trainExamples = []
-        board = self.game.getInitBoard()
+        board = self._initial_board()
         self.curPlayer = 1
         episodeStep = 0
 
@@ -95,7 +106,7 @@ class Coach():
             while completed < numEpisodes:
                 while launched < numEpisodes and len(activeEpisodes) < batch_size:
                     activeEpisodes.append({
-                        'board': self.game.getInitBoard(),
+                        'board': self._initial_board(),
                         'curPlayer': 1,
                         'episodeStep': 0,
                         'trainExamples': [],
@@ -220,6 +231,7 @@ class Coach():
             self.nnet.train(trainExamples)
 
             log.info('PITTING AGAINST PREVIOUS VERSION')
+            arena_opening_suite = self._arena_opening_suite()
             if self._arena_batch_size() > 1:
                 arena = BatchedMCTSArena(
                     self.game,
@@ -228,13 +240,15 @@ class Coach():
                     self.args,
                     batch_size=self._arena_batch_size(),
                     quiet=self._quiet(),
+                    opening_boards=arena_opening_suite,
                 )
                 pwins, nwins, draws = arena.playGames(self.args.arenaCompare)
             else:
                 pmcts = MCTS(self.game, self.pnet, self.args)
                 nmcts = MCTS(self.game, self.nnet, self.args)
                 arena = Arena(lambda x: np.argmax(pmcts.getActionProb(x, temp=0)),
-                              lambda x: np.argmax(nmcts.getActionProb(x, temp=0)), self.game)
+                              lambda x: np.argmax(nmcts.getActionProb(x, temp=0)), self.game,
+                              opening_boards=arena_opening_suite)
                 pwins, nwins, draws = arena.playGames(self.args.arenaCompare)
 
             log.info('NEW/PREV WINS : %d / %d ; DRAWS : %d' % (nwins, pwins, draws))

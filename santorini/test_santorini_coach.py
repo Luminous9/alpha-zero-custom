@@ -52,6 +52,19 @@ class BatchCountingNNet:
         return policies, values
 
 
+class FixedOpeningSampler:
+    def __init__(self, board):
+        self.board = board
+        self.self_play_calls = 0
+
+    def sample_self_play_board(self):
+        self.self_play_calls += 1
+        return self.board.copy()
+
+    def sample_arena_suite(self, count):
+        return [self.board.copy() for _ in range(count)]
+
+
 class TestSantoriniCoachExamples(unittest.TestCase):
     def make_coach_shell(self, load_folder, load_file='best.pth.tar'):
         coach = object.__new__(Coach)
@@ -109,6 +122,25 @@ class TestSantoriniCoachBatchedSelfPlay(unittest.TestCase):
             self.assertEqual(board.shape, (1,))
             self.assertAlmostEqual(float(sum(pi)), 1.0, places=5)
             self.assertIn(value, [-1, 1])
+
+    def test_batched_self_play_uses_opening_sampler(self):
+        np.random.seed(13)
+        game = TinyGame()
+        nnet = BatchCountingNNet(game)
+        args = dotdict({
+            'numMCTSSims': 2,
+            'cpuct': 1.0,
+            'tempThreshold': 10,
+            'selfPlayBatchSize': 2,
+            'quiet': True,
+        })
+        sampler = FixedOpeningSampler(np.array([1], dtype=np.int64))
+        coach = Coach(game, nnet, args, opening_sampler=sampler)
+
+        examples = coach.executeEpisodesBatched(2)
+
+        self.assertEqual(sampler.self_play_calls, 2)
+        self.assertEqual(len(examples), 2)
 
 
 if __name__ == "__main__":

@@ -6,13 +6,12 @@ from itertools import combinations
 
 import numpy as np
 
+from santorini.pytorch.NNet import NNetWrapper
 from santorini.SantoriniGame import SantoriniGame
 from santorini.SantoriniPlayers import coordinate_label
-from santorini.pytorch.NNet import NNetWrapper
 
-
-DEFAULT_CHECKPOINT_FOLDER = "./temp/santorini_kaggle_training5"
-DEFAULT_OUTPUT_DIR = "./santorini/opening_books"
+DEFAULT_CHECKPOINT_FOLDER = "./temp/santorini_bootstrap_result"
+DEFAULT_OUTPUT_DIR = "./temp/santorini_opening_books"
 LABELINGS = ((False, False), (False, True), (True, False), (True, True))
 
 
@@ -135,14 +134,26 @@ def location_labels(locations):
     return [coordinate_label(location) for location in locations]
 
 
-def board_record(position_id, p1_locations, p2_locations, values, board_size):
-    values = np.asarray(values, dtype=np.float32)
+def board_record(position_id, p1_locations, p2_locations, value, board_size, label_values=None):
+    if label_values is None:
+        raw_value = np.asarray(value, dtype=np.float32)
+        if raw_value.ndim == 0:
+            values = np.asarray([float(raw_value)], dtype=np.float32)
+        else:
+            values = raw_value.reshape(-1)
+            label_values = values
+    else:
+        values = np.asarray(label_values, dtype=np.float32)
+
     value_mean = float(np.mean(values))
     value_std = float(np.std(values))
     value_abs = abs(value_mean)
     score = value_abs + value_std
     selected_label_index = int(np.argmin(np.abs(values - value_mean)))
-    selected_p1_swap, selected_p2_swap = LABELINGS[selected_label_index]
+    if len(values) == len(LABELINGS):
+        selected_p1_swap, selected_p2_swap = LABELINGS[selected_label_index]
+    else:
+        selected_p1_swap, selected_p2_swap = False, False
     selected_value = float(values[selected_label_index])
     return {
         "id": position_id,
@@ -164,11 +175,12 @@ def board_record(position_id, p1_locations, p2_locations, values, board_size):
         "value_abs": value_abs,
         "value_std": value_std,
         "score": score,
+        "label_invariance_checked": label_values is not None,
         "label_values": [float(value) for value in values],
     }
 
 
-def evaluate_openings(nnet, board_size, batch_size, max_positions=None):
+def evaluate_openings(nnet, board_size, batch_size, max_positions=None, check_label_invariance=False):
     records_by_player1 = {}
     pending_boards = []
     pending_specs = []
@@ -179,12 +191,18 @@ def evaluate_openings(nnet, board_size, batch_size, max_positions=None):
 
         _, values = nnet.predict_batch(pending_boards)
         offset = 0
-        while offset < len(values):
-            position_id, p1_locations, p2_locations = pending_specs[offset // 4]
-            label_values = values[offset:offset + 4]
-            record = board_record(position_id, p1_locations, p2_locations, label_values, board_size)
+        for position_id, p1_locations, p2_locations, label_count in pending_specs:
+            position_values = values[offset:offset + label_count]
+            offset += label_count
+            record = board_record(
+                position_id,
+                p1_locations,
+                p2_locations,
+                float(position_values[0]),
+                board_size,
+                label_values=position_values if check_label_invariance else None,
+            )
             records_by_player1.setdefault(p1_locations, []).append(record)
-            offset += 4
 
         pending_boards.clear()
         pending_specs.clear()
@@ -193,8 +211,9 @@ def evaluate_openings(nnet, board_size, batch_size, max_positions=None):
         if max_positions is not None and position_id > max_positions:
             break
 
-        pending_specs.append((position_id, p1_locations, p2_locations))
-        for p1_swap, p2_swap in LABELINGS:
+        labelings = LABELINGS if check_label_invariance else ((False, False),)
+        pending_specs.append((position_id, p1_locations, p2_locations, len(labelings)))
+        for p1_swap, p2_swap in labelings:
             pending_boards.append(
                 make_board(
                     p1_locations,
@@ -242,6 +261,14 @@ def write_json(path, payload):
         os.makedirs(folder, exist_ok=True)
     with open(path, "w") as f:
         f.write(format_json(payload))
+
+
+def checkpoint_output_dir(output_dir, checkpoint_folder):
+    normalized = os.path.normpath(checkpoint_folder)
+    checkpoint_name = os.path.basename(normalized)
+    if checkpoint_name in ("", os.curdir, os.pardir):
+        checkpoint_name = "checkpoint"
+    return os.path.join(output_dir, checkpoint_name)
 
 
 def format_json(payload):
@@ -300,6 +327,11 @@ def parse_args():
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--max-positions", type=int, help="Optional smoke-test limit.")
+    parser.add_argument(
+        "--check-label-invariance",
+        action="store_true",
+        help="Evaluate all four same-color worker labelings and report value variance.",
+    )
     return parser.parse_args()
 
 
@@ -318,6 +350,7 @@ def main():
         board_size=args.board_size,
         batch_size=args.batch_size,
         max_positions=args.max_positions,
+        check_label_invariance=args.check_label_invariance,
     )
 
     metadata = {
@@ -334,14 +367,24 @@ def main():
             "Player 2 responses sort by value_mean ascending. Player 1 choices sort by minimax_value descending."
         ),
         "value_perspective": "player +1 after both players have placed workers",
-        "label_value_policy": "value_mean averages the four same-color worker labelings",
+        "label_value_policy": (
+            "V2 default evaluates one anonymous-worker canonical labeling. "
+            "Use --check-label-invariance to evaluate all four same-color worker labelings."
+        ),
+        "label_invariance_checked": args.check_label_invariance,
+        "recommended_use": (
+            "Use high-minimax openings for strong-player-like self-play sampling. "
+            "For arena suites, sample from this book while filtering out very lopsided values, "
+            "then play each selected opening once from each side."
+        ),
     }
     full_book = {
         "metadata": metadata,
         "player1_choices": player1_choices,
     }
 
-    full_book_path = os.path.join(args.output_dir, "opening_book.json")
+    book_output_dir = checkpoint_output_dir(args.output_dir, args.checkpoint_folder)
+    full_book_path = os.path.join(book_output_dir, "opening_book.json")
     write_json(full_book_path, full_book)
 
     print(
