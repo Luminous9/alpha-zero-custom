@@ -93,11 +93,20 @@
 
 10. Run #10 - 2026/06/30
     Platform: Kaggle (GPU)
-    Iterations: 1 hour 38 minutes
+    Iterations: 40
     Time: 1 hour 45 minutes
     Notes: increased epochs to 6
     Results:
     - vs previous run best, 128 sims: 67-33
     - vs greedy, 128 sims: 100-0
     - against run 8 it went 56-44 and 52-48 in two 100 game matches, so not significantly better as the record against run 9 might suggest
+    - _promoted as new baseline_
+
+11. !! Transition to V2 architecture - 2026/07/01
+    Platform: Kaggle (GPU)
+    Notes: see santorini_ai_architecture_v2.md
+    Results:
+    - vs previous run best (V1 run 10), 128 sims: 82-18
+    - vs greedy, 128 sims: 100-0
+    - Surprising jump in strength, beats previous models easily
     - _promoted as new baseline_

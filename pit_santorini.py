@@ -8,14 +8,23 @@ import Arena
 from MCTS import MCTS
 from santorini.SantoriniGame import SantoriniGame
 from santorini.SantoriniPlayers import GreedySantoriniPlayer, RandomPlayer
+from santorini.pytorch.LegacyNNet import LegacyNNetWrapper
 from santorini.pytorch.NNet import NNetWrapper
 from utils import dotdict
 
 
+def build_nnet(game, architecture):
+    if architecture == 'v2':
+        return NNetWrapper(game)
+    if architecture == 'v1':
+        return LegacyNNetWrapper(game)
+    raise ValueError("Unknown architecture: {}".format(architecture))
+
+
 class NeuralMCTSPlayer:
-    def __init__(self, game, checkpoint_folder, checkpoint_file, sims):
+    def __init__(self, game, checkpoint_folder, checkpoint_file, sims, architecture='v2'):
         self.game = game
-        self.nnet = NNetWrapper(game)
+        self.nnet = build_nnet(game, architecture)
         self.nnet.load_checkpoint(checkpoint_folder, checkpoint_file)
         self.mcts_args = dotdict({'numMCTSSims': sims, 'cpuct': 1.0})
         self.mcts = None
@@ -55,8 +64,10 @@ def main():
     parser.add_argument('--sims', type=int, default=25)
     parser.add_argument('--checkpoint-folder', default='./temp/santorini_quick/')
     parser.add_argument('--checkpoint-file', default='best.pth.tar')
+    parser.add_argument('--architecture', choices=['v1', 'v2'], default='v2')
     parser.add_argument('--opponent-checkpoint-folder')
     parser.add_argument('--opponent-checkpoint-file', default='best.pth.tar')
+    parser.add_argument('--opponent-architecture', choices=['v1', 'v2'], default='v2')
     parser.add_argument('--opponent-sims', type=int)
     parser.add_argument('--fresh', action='store_true', help='Use an untrained network even if a checkpoint exists.')
     parser.add_argument('--json-out', help='Optional path to write evaluation results as JSON.')
@@ -74,21 +85,32 @@ def main():
 
         print("Loaded checkpoint: {}".format(checkpoint_path))
         print("Loaded opponent checkpoint: {}".format(opponent_checkpoint_path))
-        nnet_player_obj = NeuralMCTSPlayer(game, args.checkpoint_folder, args.checkpoint_file, args.sims)
+        print("Architecture: {}; opponent architecture: {}".format(
+            args.architecture,
+            args.opponent_architecture,
+        ))
+        nnet_player_obj = NeuralMCTSPlayer(
+            game,
+            args.checkpoint_folder,
+            args.checkpoint_file,
+            args.sims,
+            architecture=args.architecture,
+        )
         opponent_player_obj = NeuralMCTSPlayer(
             game,
             args.opponent_checkpoint_folder,
             args.opponent_checkpoint_file,
             args.opponent_sims or args.sims,
+            architecture=args.opponent_architecture,
         )
         player1 = nnet_player_obj
         player2 = opponent_player_obj
         opponent_name = 'opponent'
     else:
-        nnet = NNetWrapper(game)
+        nnet = build_nnet(game, args.architecture)
         if not args.fresh and os.path.exists(checkpoint_path):
             nnet.load_checkpoint(args.checkpoint_folder, args.checkpoint_file)
-            print("Loaded checkpoint: {}".format(checkpoint_path))
+            print("Loaded checkpoint: {} ({})".format(checkpoint_path, args.architecture))
         else:
             print("Using fresh untrained network.")
 
@@ -112,8 +134,10 @@ def main():
             'sims': args.sims,
             'checkpoint_folder': args.checkpoint_folder,
             'checkpoint_file': args.checkpoint_file,
+            'architecture': args.architecture,
             'opponent_checkpoint_folder': args.opponent_checkpoint_folder,
             'opponent_checkpoint_file': args.opponent_checkpoint_file,
+            'opponent_architecture': args.opponent_architecture,
             'opponent_sims': args.opponent_sims or args.sims,
             'fresh': args.fresh,
             'neural_mcts_wins': int(nnet_wins),
