@@ -99,6 +99,32 @@ class TestSantoriniCoachExamples(unittest.TestCase):
             self.assertEqual(coach.trainExamplesHistory, examples)
             self.assertFalse(coach.skipFirstSelfPlay)
 
+    def test_prune_checkpoint_examples_keeps_resume_anchors(self):
+        with tempfile.TemporaryDirectory() as folder:
+            coach = object.__new__(Coach)
+            coach.args = dotdict({
+                'checkpoint': folder,
+                'checkpointExamplesToKeep': 2,
+            })
+
+            for filename in [
+                'checkpoint_0.pth.tar.examples',
+                'checkpoint_1.pth.tar.examples',
+                'checkpoint_2.pth.tar.examples',
+                'latest.examples',
+                'best.pth.tar.examples',
+            ]:
+                with open(os.path.join(folder, filename), 'wb') as examples_file:
+                    examples_file.write(b'examples')
+
+            coach._pruneCheckpointExampleFiles()
+
+            self.assertFalse(os.path.exists(os.path.join(folder, 'checkpoint_0.pth.tar.examples')))
+            self.assertTrue(os.path.exists(os.path.join(folder, 'checkpoint_1.pth.tar.examples')))
+            self.assertTrue(os.path.exists(os.path.join(folder, 'checkpoint_2.pth.tar.examples')))
+            self.assertTrue(os.path.exists(os.path.join(folder, 'latest.examples')))
+            self.assertTrue(os.path.exists(os.path.join(folder, 'best.pth.tar.examples')))
+
 
 class TestSantoriniCoachBatchedSelfPlay(unittest.TestCase):
     def test_batched_self_play_uses_batched_prediction(self):

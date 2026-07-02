@@ -277,6 +277,49 @@ class Coach():
         with open(temp_filename, "wb+") as f:
             Pickler(f).dump(self.trainExamplesHistory)
         os.replace(temp_filename, filename)
+        self._pruneCheckpointExampleFiles()
+
+    def _checkpointExamplesToKeep(self):
+        return getattr(self.args, 'checkpointExamplesToKeep', None)
+
+    def _checkpointExampleIteration(self, filename):
+        prefix = 'checkpoint_'
+        suffix = '.pth.tar.examples'
+        if not filename.startswith(prefix) or not filename.endswith(suffix):
+            return None
+
+        iteration = filename[len(prefix):-len(suffix)]
+        if not iteration.isdigit():
+            return None
+        return int(iteration)
+
+    def _pruneCheckpointExampleFiles(self):
+        keep_count = self._checkpointExamplesToKeep()
+        if keep_count is None:
+            return
+
+        keep_count = int(keep_count)
+        if keep_count < 0:
+            return
+
+        folder = self.args.checkpoint
+        if not os.path.isdir(folder):
+            return
+
+        checkpoint_examples = []
+        for filename in os.listdir(folder):
+            iteration = self._checkpointExampleIteration(filename)
+            if iteration is None:
+                continue
+            path = os.path.join(folder, filename)
+            checkpoint_examples.append((iteration, os.path.getmtime(path), path))
+
+        checkpoint_examples.sort(reverse=True)
+        for _, _, path in checkpoint_examples[keep_count:]:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
 
     def _examplesCandidates(self, examplesFile=None):
         load_folder, load_file = self.args.load_folder_file

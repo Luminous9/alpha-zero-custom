@@ -30,6 +30,7 @@ PRESETS = {
         'arenaCompare': 40,
         'checkpoint': './temp/santorini/',
         'numItersForTrainExamplesHistory': 20,
+        'checkpointExamplesToKeep': 2,
         'epochs': 10,
         'batch_size': 64,
     },
@@ -43,6 +44,7 @@ PRESETS = {
         'arenaCompare': 10,
         'checkpoint': './temp/santorini_local/',
         'numItersForTrainExamplesHistory': 5,
+        'checkpointExamplesToKeep': 2,
         'epochs': 2,
         'batch_size': 64,
     },
@@ -68,6 +70,11 @@ def parse_args():
     parser.add_argument('--examples-file', type=str)
     parser.add_argument('--skip-first-self-play', action='store_true')
     parser.add_argument('--history-iters', type=int)
+    parser.add_argument(
+        '--checkpoint-examples-to-keep',
+        type=int,
+        help='Keep only this many checkpoint_*.pth.tar.examples snapshots. latest.examples and best.pth.tar.examples are always kept.',
+    )
     parser.add_argument('--epochs', type=int)
     parser.add_argument('--batch-size', type=int)
     parser.add_argument('--self-play-batch-size', type=int, default=1)
@@ -103,6 +110,11 @@ def build_coach_args(parsed_args):
         'load_model': parsed_args.load_model,
         'load_folder_file': (load_folder, parsed_args.load_file),
         'numItersForTrainExamplesHistory': parsed_args.history_iters or preset['numItersForTrainExamplesHistory'],
+        'checkpointExamplesToKeep': (
+            parsed_args.checkpoint_examples_to_keep
+            if parsed_args.checkpoint_examples_to_keep is not None
+            else preset['checkpointExamplesToKeep']
+        ),
         'selfPlayBatchSize': parsed_args.self_play_batch_size,
         'arenaBatchSize': arena_batch_size,
         'quiet': parsed_args.quiet,
