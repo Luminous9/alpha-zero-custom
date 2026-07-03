@@ -125,6 +125,43 @@ class TestSantoriniCoachExamples(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(folder, 'latest.examples')))
             self.assertTrue(os.path.exists(os.path.join(folder, 'best.pth.tar.examples')))
 
+    def test_prune_checkpoint_examples_reserves_slot_for_pending_save(self):
+        with tempfile.TemporaryDirectory() as folder:
+            coach = object.__new__(Coach)
+            coach.args = dotdict({
+                'checkpoint': folder,
+                'checkpointExamplesToKeep': 1,
+            })
+
+            with open(os.path.join(folder, 'checkpoint_12.pth.tar.examples'), 'wb') as examples_file:
+                examples_file.write(b'examples')
+
+            coach._pruneCheckpointExampleFiles(
+                pending_filename='checkpoint_13.pth.tar.examples',
+            )
+
+            self.assertFalse(os.path.exists(os.path.join(folder, 'checkpoint_12.pth.tar.examples')))
+
+    def test_delete_loaded_examples_preserves_current_resume_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            coach = object.__new__(Coach)
+            coach.args = dotdict({'checkpoint': folder})
+
+            merged_examples = os.path.join(folder, 'merged_20.examples')
+            latest_examples = os.path.join(folder, 'latest.examples')
+            with open(merged_examples, 'wb') as examples_file:
+                examples_file.write(b'examples')
+            with open(latest_examples, 'wb') as examples_file:
+                examples_file.write(b'examples')
+
+            coach.loadedTrainExamplesFile = merged_examples
+            coach._deleteLoadedTrainExamplesFile()
+            self.assertFalse(os.path.exists(merged_examples))
+
+            coach.loadedTrainExamplesFile = latest_examples
+            coach._deleteLoadedTrainExamplesFile()
+            self.assertTrue(os.path.exists(latest_examples))
+
 
 class TestSantoriniCoachBatchedSelfPlay(unittest.TestCase):
     def test_batched_self_play_uses_batched_prediction(self):

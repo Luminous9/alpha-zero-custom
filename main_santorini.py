@@ -24,13 +24,14 @@ PRESETS = {
         'numIters': 1000,
         'numEps': 100,
         'tempThreshold': 15,
-        'updateThreshold': 0.55,
+        'updateThreshold': 0.52,
         'maxlenOfQueue': 200000,
         'numMCTSSims': 50,
         'arenaCompare': 40,
         'checkpoint': './temp/santorini/',
         'numItersForTrainExamplesHistory': 20,
         'checkpointExamplesToKeep': 2,
+        'deleteLoadedExamplesAfterFirstIteration': True,
         'epochs': 10,
         'batch_size': 64,
     },
@@ -38,13 +39,14 @@ PRESETS = {
         'numIters': 10,
         'numEps': 10,
         'tempThreshold': 10,
-        'updateThreshold': 0.55,
+        'updateThreshold': 0.52,
         'maxlenOfQueue': 50000,
         'numMCTSSims': 16,
         'arenaCompare': 10,
         'checkpoint': './temp/santorini_local/',
         'numItersForTrainExamplesHistory': 5,
         'checkpointExamplesToKeep': 2,
+        'deleteLoadedExamplesAfterFirstIteration': True,
         'epochs': 2,
         'batch_size': 64,
     },
@@ -74,6 +76,11 @@ def parse_args():
         '--checkpoint-examples-to-keep',
         type=int,
         help='Keep only this many checkpoint_*.pth.tar.examples snapshots. latest.examples and best.pth.tar.examples are always kept.',
+    )
+    parser.add_argument(
+        '--keep-loaded-examples',
+        action='store_true',
+        help='Do not delete the examples file loaded at startup after the first completed iteration.',
     )
     parser.add_argument('--epochs', type=int)
     parser.add_argument('--batch-size', type=int)
@@ -114,6 +121,10 @@ def build_coach_args(parsed_args):
             parsed_args.checkpoint_examples_to_keep
             if parsed_args.checkpoint_examples_to_keep is not None
             else preset['checkpointExamplesToKeep']
+        ),
+        'deleteLoadedExamplesAfterFirstIteration': (
+            preset['deleteLoadedExamplesAfterFirstIteration']
+            and not parsed_args.keep_loaded_examples
         ),
         'selfPlayBatchSize': parsed_args.self_play_batch_size,
         'arenaBatchSize': arena_batch_size,
