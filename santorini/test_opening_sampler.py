@@ -8,6 +8,8 @@ import numpy as np
 from santorini.SantoriniOpeningBook import (
     SantoriniOpeningBook,
     SantoriniOpeningSampler,
+    SantoriniOpeningSuite,
+    passes_old_opening_filter,
     random_board_orientation,
 )
 
@@ -107,6 +109,8 @@ class TestSantoriniOpeningSampler(unittest.TestCase):
             sampler = SantoriniOpeningSampler.load(
                 self.write_book(folder),
                 self_play_max_abs_value=0.3,
+                self_play_old_filter_probability=0.0,
+                self_play_value_probability=1.0,
                 self_play_tail_probability=0.0,
                 random_orientation=False,
                 rng=np.random.RandomState(3),
@@ -118,6 +122,21 @@ class TestSantoriniOpeningSampler(unittest.TestCase):
                     board[0],
                     np.array(sample_book_payload()["player1_choices"][0]["responses"][2]["pieces"]),
                 ))
+
+    def test_self_play_sampling_can_use_old_filter_bucket(self):
+        with tempfile.TemporaryDirectory() as folder:
+            sampler = SantoriniOpeningSampler.load(
+                self.write_book(folder),
+                self_play_old_filter_probability=1.0,
+                self_play_value_probability=0.0,
+                self_play_tail_probability=0.0,
+                random_orientation=False,
+                rng=np.random.RandomState(5),
+            )
+
+            for _ in range(20):
+                board = sampler.sample_self_play_board()
+                self.assertTrue(passes_old_opening_filter(board[0]))
 
     def test_arena_suite_allows_non_best_responses_from_top_choices(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -138,6 +157,43 @@ class TestSantoriniOpeningSampler(unittest.TestCase):
             for board in suite:
                 self.assertEqual(board.shape, (2, 5, 5))
                 self.assertEqual(int(np.count_nonzero(board[0])), 4)
+
+    def test_arena_suite_overrides_book_candidates(self):
+        with tempfile.TemporaryDirectory() as folder:
+            book_path = self.write_book(folder)
+            suite_path = os.path.join(folder, "suite.json")
+            suite_payload = {
+                "metadata": {"name": "test_suite"},
+                "positions": [
+                    {
+                        "id": 4,
+                        "player1": ["A1", "B1"],
+                        "player2": ["A2", "E2"],
+                        "player1_rank": 1,
+                        "player2_response_rank": 3,
+                        "value_mean": 0.9,
+                        "pieces": sample_book_payload()["player1_choices"][0]["responses"][2]["pieces"],
+                    },
+                ],
+            }
+            with open(suite_path, "w") as suite_file:
+                json.dump(suite_payload, suite_file)
+
+            sampler = SantoriniOpeningSampler.load(
+                book_path,
+                arena_suite=SantoriniOpeningSuite.load(suite_path),
+                random_orientation=False,
+                rng=np.random.RandomState(4),
+            )
+
+            suite = sampler.sample_arena_suite(3)
+
+            self.assertEqual(len(suite), 3)
+            for board in suite:
+                self.assertTrue(np.array_equal(
+                    board[0],
+                    np.array(sample_book_payload()["player1_choices"][0]["responses"][2]["pieces"]),
+                ))
 
     def test_random_orientation_preserves_piece_multiset(self):
         board = np.zeros((2, 5, 5), dtype=int)

@@ -48,11 +48,43 @@ class SantoriniOpeningBook:
         return positions
 
 
+class SantoriniOpeningSuite:
+    def __init__(self, path, metadata, positions):
+        self.path = path
+        self.metadata = metadata
+        self.positions = positions
+
+        if not self.positions:
+            raise ValueError("Opening suite contains no positions.")
+
+    @classmethod
+    def load(cls, path):
+        with open(path) as suite_file:
+            payload = json.load(suite_file)
+
+        if "positions" not in payload:
+            raise ValueError("Opening suite is missing positions.")
+
+        positions = []
+        for position in payload["positions"]:
+            record = dict(position)
+            record["pieces"] = np.array(record["pieces"], dtype=int)
+            record["value_mean"] = float(record["value_mean"])
+            record["value_abs"] = abs(float(record["value_mean"]))
+            record["player1_rank"] = int(record["player1_rank"])
+            positions.append(record)
+
+        return cls(path, payload.get("metadata", {}), positions)
+
+
 class SantoriniOpeningSampler:
     def __init__(
         self,
         book,
+        arena_suite=None,
         self_play_max_abs_value=0.30,
+        self_play_old_filter_probability=0.70,
+        self_play_value_probability=0.25,
         self_play_tail_probability=0.05,
         arena_top_fraction=0.50,
         arena_max_abs_value=0.14,
@@ -60,27 +92,43 @@ class SantoriniOpeningSampler:
         rng=None,
     ):
         self.book = book
+        self.arena_suite = arena_suite
         self.self_play_max_abs_value = self_play_max_abs_value
+        self.self_play_old_filter_probability = self_play_old_filter_probability
+        self.self_play_value_probability = self_play_value_probability
         self.self_play_tail_probability = self_play_tail_probability
         self.arena_top_fraction = arena_top_fraction
         self.arena_max_abs_value = arena_max_abs_value
         self.random_orientation = random_orientation
         self.rng = rng if rng is not None else np.random
+        self._self_play_value_candidates_cache = None
+        self._old_filter_candidates_cache = None
+        self._arena_candidates_cache = None
 
     @classmethod
     def load(cls, path, **kwargs):
         return cls(SantoriniOpeningBook.load(path), **kwargs)
 
     def sample_self_play_board(self):
-        candidates = [
-            position
-            for position in self.book.positions
-            if position["value_abs"] <= self.self_play_max_abs_value
-        ]
-        if not candidates:
+        total_probability = (
+            self.self_play_old_filter_probability
+            + self.self_play_value_probability
+            + self.self_play_tail_probability
+        )
+        roll = self.rng.random() * total_probability if total_probability > 0 else 0.0
+        old_filter_cutoff = self.self_play_old_filter_probability
+        value_cutoff = old_filter_cutoff + self.self_play_value_probability
+
+        if roll < old_filter_cutoff:
+            candidates = self._old_filter_candidates()
+        elif roll < value_cutoff:
+            candidates = self._self_play_value_candidates()
+        else:
             candidates = self.book.positions
 
-        if self.self_play_tail_probability > 0 and self.rng.random() < self.self_play_tail_probability:
+        if not candidates:
+            candidates = self._self_play_value_candidates()
+        if not candidates:
             candidates = self.book.positions
 
         position = candidates[int(self.rng.randint(len(candidates)))]
@@ -105,17 +153,45 @@ class SantoriniOpeningSampler:
         )
         return [self._board_from_position(candidates[int(index)]) for index in indices]
 
+    def _self_play_value_candidates(self):
+        if self._self_play_value_candidates_cache is None:
+            self._self_play_value_candidates_cache = [
+                position
+                for position in self.book.positions
+                if position["value_abs"] <= self.self_play_max_abs_value
+            ]
+        return self._self_play_value_candidates_cache
+
+    def _old_filter_candidates(self):
+        if self._old_filter_candidates_cache is None:
+            self._old_filter_candidates_cache = [
+                position
+                for position in self.book.positions
+                if passes_old_opening_filter(position["pieces"])
+            ]
+        return self._old_filter_candidates_cache
+
     def _arena_candidates(self):
+        if self.arena_suite is not None:
+            return self.arena_suite.positions
+
+        if self._arena_candidates_cache is not None:
+            return self._arena_candidates_cache
+
         max_rank = max(position["player1_rank"] for position in self.book.positions)
         rank_cutoff = max(1, int(math.ceil(max_rank * self.arena_top_fraction)))
-        return [
+        self._arena_candidates_cache = [
             position
             for position in self.book.positions
             if position["player1_rank"] <= rank_cutoff
             and position["value_abs"] <= self.arena_max_abs_value
         ]
+        return self._arena_candidates_cache
 
     def _arena_probabilities(self, candidates):
+        if self.arena_suite is not None:
+            return None
+
         ranks = np.array([position["player1_rank"] for position in candidates], dtype=np.float64)
         weights = 1.0 / ranks
         return weights / np.sum(weights)
@@ -126,6 +202,24 @@ class SantoriniOpeningSampler:
         if self.random_orientation:
             board = random_board_orientation(board, self.rng)
         return board
+
+
+def is_outer_square(location, board_size):
+    row, col = location
+    return row == 0 or col == 0 or row == board_size - 1 or col == board_size - 1
+
+
+def worker_locations(pieces, player):
+    return list(zip(*np.where(np.sign(pieces) == player)))
+
+
+def passes_old_opening_filter(pieces):
+    board_size = pieces.shape[0]
+    for player in (1, -1):
+        locations = worker_locations(pieces, player)
+        if len(locations) == 2 and all(is_outer_square(location, board_size) for location in locations):
+            return False
+    return True
 
 
 def random_board_orientation(board, rng=None):

@@ -12,12 +12,16 @@ from santorini.pytorch.NNet import NNetWrapper as nn
 from santorini.pytorch.NNet import args as nnet_args
 from santorini.SantoriniGame import SantoriniGame as Game
 from santorini.SantoriniOpeningBook import (SantoriniOpeningSampler,
+                                            SantoriniOpeningSuite,
                                             find_opening_book)
 from utils import dotdict
 
 log = logging.getLogger(__name__)
 
 coloredlogs.install(level='INFO')
+
+DEFAULT_ARENA_OPENING_SUITE = './santorini/opening_suites/bootstrap_arena_suite.json'
+DEFAULT_OPENING_BOOK = './santorini/opening_books/bootstrap_result/opening_book.json'
 
 PRESETS = {
     'full': {
@@ -101,8 +105,11 @@ def parse_args():
     parser.add_argument('--self-play-batch-size', type=int, default=1)
     parser.add_argument('--arena-batch-size', type=int)
     parser.add_argument('--opening-book', type=str)
+    parser.add_argument('--arena-opening-suite', type=str, default=DEFAULT_ARENA_OPENING_SUITE)
     parser.add_argument('--no-opening-book', action='store_true')
     parser.add_argument('--self-play-opening-max-abs-value', type=float, default=0.30)
+    parser.add_argument('--self-play-old-filter-probability', type=float, default=0.70)
+    parser.add_argument('--self-play-value-probability', type=float, default=0.25)
     parser.add_argument('--self-play-opening-tail-probability', type=float, default=0.05)
     parser.add_argument('--arena-opening-top-fraction', type=float, default=0.50)
     parser.add_argument('--arena-opening-max-abs-value', type=float, default=0.14)
@@ -155,6 +162,7 @@ def opening_book_candidates(parsed_args, coach_args):
     load_folder_name = os.path.basename(os.path.normpath(load_folder))
     return [
         parsed_args.opening_book,
+        DEFAULT_OPENING_BOOK,
         os.path.join(checkpoint, 'opening_book.json'),
         os.path.join(checkpoint, 'opening_books', 'opening_book.json'),
         os.path.join(os.path.dirname(checkpoint), 'opening_books', checkpoint_name, 'opening_book.json'),
@@ -174,9 +182,18 @@ def build_opening_sampler(parsed_args, coach_args):
         log.warning('No opening book found; using game random starts.')
         return None
 
+    arena_suite = None
+    if parsed_args.arena_opening_suite:
+        if not os.path.isfile(parsed_args.arena_opening_suite):
+            raise FileNotFoundError("No arena opening suite found at {}".format(parsed_args.arena_opening_suite))
+        arena_suite = SantoriniOpeningSuite.load(parsed_args.arena_opening_suite)
+
     sampler = SantoriniOpeningSampler.load(
         opening_book,
+        arena_suite=arena_suite,
         self_play_max_abs_value=parsed_args.self_play_opening_max_abs_value,
+        self_play_old_filter_probability=parsed_args.self_play_old_filter_probability,
+        self_play_value_probability=parsed_args.self_play_value_probability,
         self_play_tail_probability=parsed_args.self_play_opening_tail_probability,
         arena_top_fraction=parsed_args.arena_opening_top_fraction,
         arena_max_abs_value=parsed_args.arena_opening_max_abs_value,
@@ -188,6 +205,8 @@ def build_opening_sampler(parsed_args, coach_args):
         len(sampler.book.positions),
         len(sampler._arena_candidates()),
     )
+    if arena_suite is not None:
+        log.info('Loaded arena opening suite "%s" (%s positions)', parsed_args.arena_opening_suite, len(arena_suite.positions))
     return sampler
 
 
