@@ -10,7 +10,17 @@ class BatchedMCTSArena:
     active game/player while batching neural-network leaf evaluations.
     """
 
-    def __init__(self, game, player1_nnet, player2_nnet, args, batch_size=1, quiet=False, opening_boards=None):
+    def __init__(
+        self,
+        game,
+        player1_nnet,
+        player2_nnet,
+        args,
+        batch_size=1,
+        quiet=False,
+        opening_boards=None,
+        progress_file=None,
+    ):
         self.game = game
         self.nnets = {
             1: player1_nnet,
@@ -20,6 +30,7 @@ class BatchedMCTSArena:
         self.batch_size = max(1, int(batch_size))
         self.quiet = quiet
         self.opening_boards = opening_boards
+        self.progress_file = progress_file
 
     def playGames(self, num):
         num = int(num / 2)
@@ -44,7 +55,13 @@ class BatchedMCTSArena:
         launched = 0
         completed = 0
         active = []
-        progress = tqdm(total=num, desc=desc, disable=self.quiet)
+        progress = tqdm(
+            total=num,
+            desc=desc,
+            disable=self.quiet,
+            file=self.progress_file,
+            dynamic_ncols=True,
+        )
 
         try:
             while completed < num:

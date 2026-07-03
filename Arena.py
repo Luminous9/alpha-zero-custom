@@ -10,7 +10,7 @@ class Arena():
     An Arena class where any 2 agents can be pit against each other.
     """
 
-    def __init__(self, player1, player2, game, display=None, opening_boards=None):
+    def __init__(self, player1, player2, game, display=None, opening_boards=None, progress_file=None):
         """
         Input:
             player 1,2: two functions that takes board as input, return action
@@ -27,6 +27,7 @@ class Arena():
         self.game = game
         self.display = display
         self.opening_boards = opening_boards
+        self.progress_file = progress_file
 
     def playGame(self, verbose=False, opening_board=None):
         """
@@ -95,7 +96,7 @@ class Arena():
         oneWon = 0
         twoWon = 0
         draws = 0
-        for i in tqdm(range(num), desc="Arena.playGames (1)"):
+        for i in tqdm(range(num), desc="Arena.playGames (1)", file=self.progress_file, dynamic_ncols=True):
             opening_board = opening_boards[i] if opening_boards is not None else None
             gameResult = self.playGame(verbose=verbose, opening_board=opening_board)
             if gameResult == 1:
@@ -107,7 +108,7 @@ class Arena():
 
         self.player1, self.player2 = self.player2, self.player1
 
-        for i in tqdm(range(num), desc="Arena.playGames (2)"):
+        for i in tqdm(range(num), desc="Arena.playGames (2)", file=self.progress_file, dynamic_ncols=True):
             opening_board = opening_boards[i] if opening_boards is not None else None
             gameResult = self.playGame(verbose=verbose, opening_board=opening_board)
             if gameResult == -1:

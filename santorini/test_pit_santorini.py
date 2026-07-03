@@ -8,12 +8,15 @@ from io import StringIO
 import numpy as np
 
 from pit_santorini import (
+    batched_arena_requested,
     build_opening_suite,
     display_name_from_folder,
+    format_seat_record,
     load_opening_board,
     opening_book_candidates,
     play_opening_games_by_seat,
     select_legal_action,
+    validate_batched_arena_args,
 )
 from utils import dotdict
 
@@ -40,6 +43,11 @@ class FirstPlayerWinsGame:
 class TinyActionGame:
     def getValidMoves(self, board, player):
         return np.array([1, 1, 0], dtype=int)
+
+
+class ErrorParser:
+    def error(self, message):
+        raise ValueError(message)
 
 
 class TestPitSantoriniOpening(unittest.TestCase):
@@ -81,6 +89,9 @@ class TestPitSantoriniOpening(unittest.TestCase):
             'arena_opening_max_abs_value': 0.14,
             'no_opening_random_orientation': True,
             'games': 4,
+            'arena_batch_size': 1,
+            'action_temp': 0.0,
+            'opponent_sims': None,
         })
         args.update(overrides)
         return args
@@ -179,6 +190,12 @@ class TestPitSantoriniOpening(unittest.TestCase):
         self.assertEqual(seat_stats["contestant2"]["first_player"], {"wins": 2, "losses": 0, "draws": 0})
         self.assertEqual(seat_stats["contestant2"]["second_player"], {"wins": 0, "losses": 2, "draws": 0})
 
+    def test_format_seat_record_can_hide_draws(self):
+        record = {"wins": 2, "losses": 1, "draws": 0}
+
+        self.assertEqual(format_seat_record(record, include_draws=False), {"wins": 2, "losses": 1})
+        self.assertEqual(format_seat_record(record, include_draws=True), record)
+
     def test_display_name_from_folder_uses_trailing_folder_name(self):
         self.assertEqual(
             display_name_from_folder("./temp/santorini-kaggle-training6/"),
@@ -191,6 +208,35 @@ class TestPitSantoriniOpening(unittest.TestCase):
 
         self.assertEqual(select_legal_action(game, board, [0.1, 0.9, 1.0]), 1)
         self.assertEqual(select_legal_action(game, board, [0.0, 1.0, 0.0], sample=True), 1)
+
+    def test_batched_arena_validation_requires_two_checkpoint_pit(self):
+        args = self.make_opening_args(arena_batch_size=4)
+
+        with self.assertRaisesRegex(ValueError, "opponent-checkpoint-folder"):
+            validate_batched_arena_args(ErrorParser(), args)
+
+    def test_batched_arena_validation_requires_deterministic_matching_sims(self):
+        parser = ErrorParser()
+        args = self.make_opening_args(
+            arena_batch_size=4,
+            opponent_checkpoint_folder="./temp/opponent",
+            action_temp=0.5,
+        )
+        with self.assertRaisesRegex(ValueError, "action-temp 0"):
+            validate_batched_arena_args(parser, args)
+
+        args = self.make_opening_args(
+            arena_batch_size=4,
+            opponent_checkpoint_folder="./temp/opponent",
+            sims=25,
+            opponent_sims=50,
+        )
+        with self.assertRaisesRegex(ValueError, "opponent-sims"):
+            validate_batched_arena_args(parser, args)
+
+    def test_batched_arena_requested_accepts_batch_sizes_above_one(self):
+        self.assertFalse(batched_arena_requested(self.make_opening_args(arena_batch_size=1)))
+        self.assertTrue(batched_arena_requested(self.make_opening_args(arena_batch_size=2)))
 
 
 if __name__ == "__main__":

@@ -10,6 +10,8 @@ class SantoriniGame(Game):
     Many of thes functions are based on those from OthelloGame.py:
         https://github.com/suragnair/alpha-zero-general/blob/master/othello/OthelloGame.py
     """
+    supports_draws = False
+
     square_content = {
         -2: 'Y',
         -1: 'X',

@@ -1,10 +1,12 @@
 import argparse
 import json
 import os
+import sys
 
 import numpy as np
 
 import Arena
+from BatchedArena import BatchedMCTSArena
 from MCTS import MCTS
 from santorini.SantoriniGame import SantoriniGame
 from santorini.SantoriniOpeningBook import (
@@ -66,6 +68,21 @@ def build_baseline(game, name):
     if name == 'greedy':
         return GreedySantoriniPlayer(game).play
     raise ValueError("Unknown baseline: {}".format(name))
+
+
+def batched_arena_requested(args):
+    return int(getattr(args, 'arena_batch_size', 1)) > 1
+
+
+def validate_batched_arena_args(parser, args):
+    if not batched_arena_requested(args):
+        return
+    if not args.opponent_checkpoint_folder:
+        parser.error('--arena-batch-size > 1 currently requires --opponent-checkpoint-folder.')
+    if args.action_temp != 0:
+        parser.error('--arena-batch-size > 1 requires deterministic play with --action-temp 0.')
+    if args.opponent_sims is not None and args.opponent_sims != args.sims:
+        parser.error('--arena-batch-size > 1 requires --opponent-sims to match --sims.')
 
 
 def load_opening_board(opening_book_path, opening_id):
@@ -170,6 +187,15 @@ def record_seat_result(seat_stats, first_contestant, second_contestant, game_res
         seat_stats[second_contestant]["second_player"]["draws"] += 1
 
 
+def format_seat_record(record, include_draws=True):
+    if include_draws:
+        return record
+    return {
+        "wins": record["wins"],
+        "losses": record["losses"],
+    }
+
+
 def play_opening_games_by_seat(
     player1,
     player2,
@@ -194,6 +220,8 @@ def play_opening_games_by_seat(
         range(games_per_seat),
         desc="Opening pit ({} first)".format(contestant1_name),
         disable=not show_progress,
+        file=sys.stdout,
+        dynamic_ncols=True,
     ):
         game_result = arena.playGame(verbose=False, opening_board=opening_board)
         record_seat_result(seat_stats, "contestant1", "contestant2", game_result)
@@ -209,6 +237,8 @@ def play_opening_games_by_seat(
         range(games_per_seat),
         desc="Opening pit ({} first)".format(contestant2_name),
         disable=not show_progress,
+        file=sys.stdout,
+        dynamic_ncols=True,
     ):
         game_result = arena.playGame(verbose=False, opening_board=opening_board)
         record_seat_result(seat_stats, "contestant2", "contestant1", game_result)
@@ -235,6 +265,12 @@ def main():
     parser.add_argument('--opponent-architecture', choices=['v1', 'v2'], default='v2')
     parser.add_argument('--opponent-sims', type=int)
     parser.add_argument(
+        '--arena-batch-size',
+        type=int,
+        default=1,
+        help='Batch this many simultaneous games for two-checkpoint deterministic pits.',
+    )
+    parser.add_argument(
         '--action-temp',
         type=float,
         default=0.0,
@@ -254,6 +290,9 @@ def main():
         parser.error('--opening-id cannot be used with --no-opening-book.')
     if args.action_temp < 0:
         parser.error('--action-temp must be non-negative.')
+    if args.arena_batch_size < 1:
+        parser.error('--arena-batch-size must be at least 1.')
+    validate_batched_arena_args(parser, args)
 
     game = SantoriniGame(5, true_random_placement=True)
     opening_book_path, opening_boards, opening_position = build_opening_suite(args)
@@ -326,7 +365,20 @@ def main():
         print("Sampling neural MCTS actions with temperature {}.".format(args.action_temp))
 
     seat_stats = None
-    if opening_position is not None:
+    use_batched_arena = batched_arena_requested(args)
+    if use_batched_arena:
+        print("Using batched arena with batch size {}.".format(args.arena_batch_size))
+        arena = BatchedMCTSArena(
+            game,
+            player1.nnet,
+            player2.nnet,
+            dotdict({'numMCTSSims': args.sims, 'cpuct': 1.0}),
+            batch_size=args.arena_batch_size,
+            opening_boards=opening_boards,
+            progress_file=sys.stdout,
+        )
+        nnet_wins, opponent_wins, draws = arena.playGames(args.games)
+    elif opening_position is not None:
         nnet_wins, opponent_wins, draws, seat_stats = play_opening_games_by_seat(
             player1,
             player2,
@@ -343,18 +395,33 @@ def main():
             game,
             display=SantoriniGame.display,
             opening_boards=opening_boards,
+            progress_file=sys.stdout,
         )
         nnet_wins, opponent_wins, draws = arena.playGames(args.games, verbose=False)
 
     print("{} wins: {}".format(contestant1_name, nnet_wins))
     print("{} wins: {}".format(contestant2_name, opponent_wins))
-    print("Draws: {}".format(draws))
+    include_draws = bool(getattr(game, 'supports_draws', True))
+    if include_draws:
+        print("Draws: {}".format(draws))
     if seat_stats is not None:
         print("Seat breakdown:")
-        print("  {} as first player: {}".format(contestant1_name, seat_stats["contestant1"]["first_player"]))
-        print("  {} as second player: {}".format(contestant1_name, seat_stats["contestant1"]["second_player"]))
-        print("  {} as first player: {}".format(contestant2_name, seat_stats["contestant2"]["first_player"]))
-        print("  {} as second player: {}".format(contestant2_name, seat_stats["contestant2"]["second_player"]))
+        print("  {} as first player: {}".format(
+            contestant1_name,
+            format_seat_record(seat_stats["contestant1"]["first_player"], include_draws=include_draws),
+        ))
+        print("  {} as second player: {}".format(
+            contestant1_name,
+            format_seat_record(seat_stats["contestant1"]["second_player"], include_draws=include_draws),
+        ))
+        print("  {} as first player: {}".format(
+            contestant2_name,
+            format_seat_record(seat_stats["contestant2"]["first_player"], include_draws=include_draws),
+        ))
+        print("  {} as second player: {}".format(
+            contestant2_name,
+            format_seat_record(seat_stats["contestant2"]["second_player"], include_draws=include_draws),
+        ))
 
     if args.json_out:
         result = {
@@ -369,6 +436,7 @@ def main():
             'opponent_checkpoint_file': args.opponent_checkpoint_file,
             'opponent_architecture': args.opponent_architecture,
             'opponent_sims': args.opponent_sims or args.sims,
+            'arena_batch_size': args.arena_batch_size,
             'fresh': args.fresh,
             'contestant1_name': contestant1_name,
             'contestant2_name': contestant2_name,
@@ -391,8 +459,9 @@ def main():
                 'opening_player1': opening_position["player1"],
                 'opening_player2': opening_position["player2"],
                 'opening_player2_response_rank': int(opening_position["player2_response_rank"]),
-                'seat_stats': seat_stats,
             })
+            if seat_stats is not None:
+                result['seat_stats'] = seat_stats
         json_dir = os.path.dirname(args.json_out)
         if json_dir:
             os.makedirs(json_dir, exist_ok=True)

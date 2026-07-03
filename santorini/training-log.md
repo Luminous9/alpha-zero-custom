@@ -110,3 +110,12 @@
     - vs greedy, 128 sims: 100-0
     - Surprising jump in strength, beats previous models easily
     - _promoted as new baseline_
+
+12. Run #12 - 2026/07/02
+    Platform: Kaggle (GPU)
+    Iterations: 13
+    Time:
+    Notes: opening position changes
+    Results:
+    - vs previous run best, 128 sims:
+    - _promoted as new baseline_

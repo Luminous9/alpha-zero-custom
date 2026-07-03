@@ -51,6 +51,9 @@ class Coach():
             return None
         return self.opening_sampler.sample_arena_suite(int(self.args.arenaCompare / 2))
 
+    def _game_supports_draws(self):
+        return bool(getattr(self.game, 'supports_draws', True))
+
     def executeEpisode(self):
         """
         This function executes one episode of self-play, starting with player 1.
@@ -254,7 +257,10 @@ class Coach():
                               opening_boards=arena_opening_suite)
                 pwins, nwins, draws = arena.playGames(self.args.arenaCompare)
 
-            log.info('NEW/PREV WINS : %d / %d ; DRAWS : %d' % (nwins, pwins, draws))
+            if self._game_supports_draws():
+                log.info('NEW/PREV WINS : %d / %d ; DRAWS : %d' % (nwins, pwins, draws))
+            else:
+                log.info('NEW/PREV WINS : %d / %d' % (nwins, pwins))
             if pwins + nwins == 0 or float(nwins) / (pwins + nwins) < self.args.updateThreshold:
                 log.info('REJECTING NEW MODEL')
                 self.nnet.load_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
