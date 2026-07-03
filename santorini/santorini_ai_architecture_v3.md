@@ -85,6 +85,46 @@ For a faster smoke run:
   --timed-steps 5
 ```
 
+P100 benchmark result:
+
+- Hardware: **Tesla P100-PCIE-16GB**
+- Raw inference speed penalty for V3 vs V2: about **1.2x to 1.7x**, depending on batch size.
+- Batched MCTS speed penalty for V3 vs V2: about **1.1x to 1.2x** over tested batch sizes.
+- Training speed penalty for V3 vs V2: about **1.4x to 3.0x**, with the penalty increasing at larger batch sizes.
+- GPU memory is not a concern for either architecture in these microbenchmarks.
+
+Best measured settings from `santorini/benchmark.json`:
+
+- **Inference:** throughput keeps improving through batch `256` for both V2 and V3.
+- **Training:** throughput is best at batch `512` for both models, though V3 gains only modestly from `256` to `512`.
+
+Follow-up MCTS sweep from `santorini/benchmark2.json`:
+
+- Tested MCTS batch sizes: `64, 96, 128, 192`.
+- Best V2 result: batch `192`, about **5,371 sims/sec**.
+- Best V3 result: batch `192`, about **4,967 sims/sec**.
+- V3 was about **1.08x** slower than V2 at batch `192`.
+- There is visible run-to-run noise, especially at batch `64`, so use the broad trend rather than a single row.
+
+Local M1 CPU benchmark from `santorini/benchmark_m1_cpu.json`:
+
+- Raw inference speed penalty for V3 vs V2: about **1.8x to 2.3x**.
+- MCTS speed penalty for V3 vs V2: about **1.7x to 2.0x**.
+- Best tested local MCTS throughput:
+  - V2: batch `32`, about **2,727 sims/sec**.
+  - V3: batch `32`, about **1,383 sims/sec**.
+- Single-game interactive speed is still comfortable:
+  - V2 batch `1`: about **647 sims/sec**, so 64 sims is about **0.10s/turn**.
+  - V3 batch `1`: about **377 sims/sec**, so 64 sims is about **0.17s/turn**.
+
+Implications:
+
+- The old **3.6x equal-time penalty** is too pessimistic for batched MCTS on the P100.
+- For evaluation, start with **equal sims**, then try a measured time-odds approximation around **V2 64 sims vs V3 59 sims** when using large-batch play, because V3 is about **1.08x** slower than V2 at MCTS batch `192`.
+- For self-play and arena batching, use at least batch `64` on this hardware. Prefer batch `192` when enough parallel games are available to keep it fed; otherwise use the largest batch the run can naturally fill.
+- For local CPU-only play, use smaller expectations: V3 is closer to **2x** slower than V2, but still fast enough for interactive 64-sim games.
+- For supervised V3 bootstrap, start with training batch `512`; a follow-up sweep at `768, 1024, 1536` may be worthwhile before the long run.
+
 ---
 
 ## Phase 1: Codebase Updates
@@ -105,6 +145,14 @@ V3 should be implemented as a parallel architecture, not as a hard replacement f
    - Create a small benchmark script for inference throughput and MCTS simulations/sec.
    - Use the measured speed ratio later when choosing fixed-sim and time-odds evaluation settings.
 
+Implementation status:
+
+- `santorini.pytorch.NNet` now exposes V2 and V3 wrappers through `build_nnet(game, architecture)`.
+- V2 remains the default `NNetWrapper`; V3 uses `V3NNetWrapper` with 8 residual blocks and 96 channels.
+- New checkpoints save architecture metadata so V2/V3 mismatches fail clearly.
+- `main_santorini.py` accepts `--architecture v2|v3`.
+- `pit_santorini.py` accepts `--architecture v1|v2|v3` and `--opponent-architecture v1|v2|v3`.
+
 ---
 
 ## Phase 2: Offline Bootstrapping (Pure Distillation)
@@ -112,6 +160,8 @@ V3 should be implemented as a parallel architecture, not as a hard replacement f
 We will bypass the slow, erratic random-weights phase by training the fresh 8x96 model on the best available V2 replay buffer.
 
 Dataset choice should be explicit. At the time this draft was written, `./temp/santorini_kaggle_training6_v2/latest.examples` was the safer known-good dataset. If a newer run produces stronger examples, use that instead. Do not blindly use the newest buffer if the run went in a bad strategic direction.
+
+For the first V3 bootstrap run, use the known-good `training6_v2/latest.examples` dataset rather than `training7`.
 
 Create a new supervised bootstrap script with:
 
@@ -135,6 +185,43 @@ Create a new supervised bootstrap script with:
    - Train up to roughly **10 to 15 epochs** initially.
    - Stop early if validation loss flatlines or worsens for a configured patience window.
    - If validation loss improves but arena strength does not, treat that as evidence that imitation quality is not enough and self-play continuation is required.
+
+Implementation status:
+
+- `bootstrap_santorini_v3.py` performs supervised V3 bootstrapping from a `.examples` replay buffer.
+- It defaults to `temp/santorini_kaggle_training6_v2/latest.examples`.
+- It creates a deterministic train/validation split, saves the best checkpoint by validation loss, saves a final checkpoint, and writes `bootstrap_metadata.json`.
+- It supports `--max-examples` for smoke runs and `--cpu` for local testing.
+- `santorini/bootstrap_v3_kaggle.ipynb` provides the Kaggle workflow for the first V3 bootstrap run.
+
+Recommended Kaggle command:
+
+```bash
+.venv/bin/python bootstrap_santorini_v3.py \
+  --examples-file /kaggle/input/<dataset-containing-training6-v2>/latest.examples \
+  --output-folder /kaggle/working/Santorini-AZ/v3_bootstrap \
+  --architecture v3 \
+  --epochs 15 \
+  --batch-size 512 \
+  --validation-fraction 0.10 \
+  --patience 3 \
+  --seed 7 \
+  --quiet
+```
+
+Local smoke command:
+
+```bash
+.venv/bin/python bootstrap_santorini_v3.py \
+  --examples-file temp/santorini_kaggle_training6_v2/latest.examples \
+  --output-folder temp/santorini_v3_bootstrap_smoke \
+  --architecture v3 \
+  --epochs 1 \
+  --batch-size 32 \
+  --max-examples 256 \
+  --cpu \
+  --quiet
+```
 
 ---
 

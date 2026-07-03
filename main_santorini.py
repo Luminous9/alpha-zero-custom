@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from Coach import Coach
-from santorini.pytorch.NNet import NNetWrapper as nn
+from santorini.pytorch.NNet import build_nnet
 from santorini.pytorch.NNet import args as nnet_args
 from santorini.SantoriniGame import SantoriniGame as Game
 from santorini.SantoriniOpeningBook import (SantoriniOpeningSampler,
@@ -64,6 +64,7 @@ PRESETS = {
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a Santorini AlphaZero model.')
     parser.add_argument('--preset', choices=sorted(PRESETS.keys()), default='full')
+    parser.add_argument('--architecture', choices=['v2', 'v3'], default='v2')
     parser.add_argument('--num-iters', type=int)
     parser.add_argument('--num-eps', type=int)
     parser.add_argument('--temp-threshold', type=int)
@@ -226,8 +227,8 @@ def main():
     log.info('Loading %s...', Game.__name__)
     game = Game(5, true_random_placement=True)
 
-    log.info('Loading %s...', nn.__name__)
-    nnet = nn(game)
+    log.info('Loading Santorini network architecture %s...', parsed_args.architecture)
+    nnet = build_nnet(game, parsed_args.architecture)
 
     if coach_args.load_model:
         log.info('Loading checkpoint "%s/%s"...', coach_args.load_folder_file[0], coach_args.load_folder_file[1])
@@ -249,7 +250,8 @@ def main():
         )
 
     log.info(
-        'Config: preset=%s iters=%s eps=%s sims=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s batch=%s checkpoint=%s',
+        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s batch=%s checkpoint=%s',
+        parsed_args.architecture,
         parsed_args.preset,
         coach_args.numIters,
         coach_args.numEps,

@@ -18,14 +18,16 @@ from santorini.SantoriniOpeningBook import (
 )
 from santorini.SantoriniPlayers import GreedySantoriniPlayer, RandomPlayer
 from santorini.pytorch.LegacyNNet import LegacyNNetWrapper
-from santorini.pytorch.NNet import NNetWrapper
+from santorini.pytorch.NNet import build_nnet as build_santorini_nnet
 from tqdm import tqdm
 from utils import dotdict
 
 
 def build_nnet(game, architecture):
     if architecture == 'v2':
-        return NNetWrapper(game)
+        return build_santorini_nnet(game, architecture)
+    if architecture == 'v3':
+        return build_santorini_nnet(game, architecture)
     if architecture == 'v1':
         return LegacyNNetWrapper(game)
     raise ValueError("Unknown architecture: {}".format(architecture))
@@ -329,10 +331,10 @@ def main():
     parser.add_argument('--sims', type=int, default=25)
     parser.add_argument('--checkpoint-folder', default='./temp/santorini_quick/')
     parser.add_argument('--checkpoint-file', default='best.pth.tar')
-    parser.add_argument('--architecture', choices=['v1', 'v2'], default='v2')
+    parser.add_argument('--architecture', choices=['v1', 'v2', 'v3'], default='v2')
     parser.add_argument('--opponent-checkpoint-folder')
     parser.add_argument('--opponent-checkpoint-file', default='best.pth.tar')
-    parser.add_argument('--opponent-architecture', choices=['v1', 'v2'], default='v2')
+    parser.add_argument('--opponent-architecture', choices=['v1', 'v2', 'v3'], default='v2')
     parser.add_argument('--opponent-sims', type=int)
     parser.add_argument(
         '--arena-batch-size',

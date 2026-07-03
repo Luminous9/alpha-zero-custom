@@ -1,10 +1,11 @@
 import unittest
+import tempfile
 
 import numpy as np
 
 from MCTS import MCTS
 from santorini.SantoriniGame import SantoriniGame
-from santorini.pytorch.NNet import NNetWrapper, args as nnet_args
+from santorini.pytorch.NNet import NNetWrapper, V3NNetWrapper, args as nnet_args, build_nnet
 from utils import dotdict
 
 
@@ -80,6 +81,28 @@ class TestSantoriniNNet(unittest.TestCase):
             self.assertAlmostEqual(float(pi.sum()), 1.0, places=5)
         self.assertTrue(np.all(vs >= -1.0))
         self.assertTrue(np.all(vs <= 1.0))
+
+    def test_build_nnet_can_select_v2_and_v3_architectures(self):
+        v2 = build_nnet(self.game, 'v2')
+        v3 = build_nnet(self.game, 'v3')
+
+        self.assertIsInstance(v2, NNetWrapper)
+        self.assertIsInstance(v3, V3NNetWrapper)
+        self.assertEqual(v2.net_args.num_residual_blocks, 5)
+        self.assertEqual(v2.net_args.num_channels, 64)
+        self.assertEqual(v3.net_args.num_residual_blocks, 8)
+        self.assertEqual(v3.net_args.num_channels, 96)
+        self.assertEqual(v2.action_size, self.game.getActionSize())
+        self.assertEqual(v3.action_size, self.game.getActionSize())
+
+    def test_checkpoint_metadata_rejects_wrong_architecture(self):
+        v3 = V3NNetWrapper(self.game)
+
+        with tempfile.TemporaryDirectory() as folder:
+            v3.save_checkpoint(folder, 'v3.pth.tar')
+
+            with self.assertRaisesRegex(ValueError, 'Checkpoint architecture "v3"'):
+                self.nnet.load_checkpoint(folder, 'v3.pth.tar')
 
     def test_single_training_step_runs(self):
         old_epochs = nnet_args.epochs
