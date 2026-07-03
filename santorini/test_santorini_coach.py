@@ -142,6 +142,42 @@ class TestSantoriniCoachExamples(unittest.TestCase):
 
             self.assertFalse(os.path.exists(os.path.join(folder, 'checkpoint_12.pth.tar.examples')))
 
+    def test_non_atomic_examples_save_does_not_leave_tmp_copy(self):
+        with tempfile.TemporaryDirectory() as folder:
+            coach = object.__new__(Coach)
+            coach.args = dotdict({
+                'checkpoint': folder,
+                'atomicExamplesSave': False,
+            })
+            coach.trainExamplesHistory = [[('board', 'policy', 1)]]
+            tmp_path = os.path.join(folder, 'latest.examples.tmp')
+            stale_checkpoint_tmp_path = os.path.join(folder, 'checkpoint_6.pth.tar.examples.tmp')
+            with open(tmp_path, 'wb') as examples_file:
+                examples_file.write(b'stale')
+            with open(stale_checkpoint_tmp_path, 'wb') as examples_file:
+                examples_file.write(b'stale')
+
+            coach.saveTrainExamplesFile('latest.examples')
+
+            self.assertFalse(os.path.exists(tmp_path))
+            self.assertFalse(os.path.exists(stale_checkpoint_tmp_path))
+            with open(os.path.join(folder, 'latest.examples'), 'rb') as examples_file:
+                self.assertEqual(pickle.load(examples_file), coach.trainExamplesHistory)
+
+    def test_checkpoint_examples_to_keep_zero_skips_numbered_examples(self):
+        with tempfile.TemporaryDirectory() as folder:
+            coach = object.__new__(Coach)
+            coach.args = dotdict({
+                'checkpoint': folder,
+                'checkpointExamplesToKeep': 0,
+                'atomicExamplesSave': False,
+            })
+            coach.trainExamplesHistory = [[('board', 'policy', 1)]]
+
+            coach.saveTrainExamples(6)
+
+            self.assertFalse(os.path.exists(os.path.join(folder, 'checkpoint_6.pth.tar.examples')))
+
     def test_delete_loaded_examples_preserves_current_resume_files(self):
         with tempfile.TemporaryDirectory() as folder:
             coach = object.__new__(Coach)

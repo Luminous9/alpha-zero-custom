@@ -218,6 +218,8 @@ class Coach():
             # NB! the examples were collected using the model from the previous iteration, so (i-1)  
             self.saveTrainExamples(i - 1)
             self.saveTrainExamplesFile('latest.examples')
+            if not self._saveBestTrainExamples():
+                self._deleteExamplesFile('best.pth.tar.examples')
 
             # shuffle examples before training
             trainExamples = []
@@ -261,31 +263,58 @@ class Coach():
                 self.nnet.save_checkpoint(folder=self.args.checkpoint, filename=self.getCheckpointFile(i))
                 self.saveTrainExamplesFile(self.getCheckpointFile(i) + ".examples")
                 self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='best.pth.tar')
-                self.saveTrainExamplesFile('best.pth.tar.examples')
+                if self._saveBestTrainExamples():
+                    self.saveTrainExamplesFile('best.pth.tar.examples')
+                else:
+                    self._deleteExamplesFile('best.pth.tar.examples')
 
-            if i == 1 and getattr(self.args, 'deleteLoadedExamplesAfterFirstIteration', False):
+            if i == 1 and self._arg('deleteLoadedExamplesAfterFirstIteration', False):
                 self._deleteLoadedTrainExamplesFile()
 
     def getCheckpointFile(self, iteration):
         return 'checkpoint_' + str(iteration) + '.pth.tar'
 
     def saveTrainExamples(self, iteration):
+        if self._checkpointExamplesToKeep() == 0:
+            return
         self.saveTrainExamplesFile(self.getCheckpointFile(iteration) + ".examples")
 
     def saveTrainExamplesFile(self, examples_filename):
+        if self._checkpointExampleIteration(examples_filename) is not None and self._checkpointExamplesToKeep() == 0:
+            return
+
         folder = self.args.checkpoint
         if not os.path.exists(folder):
             os.makedirs(folder)
         filename = os.path.join(folder, examples_filename)
         temp_filename = filename + ".tmp"
+        self._deleteStaleExampleTempFiles()
         self._pruneCheckpointExampleFiles(pending_filename=examples_filename)
-        with open(temp_filename, "wb+") as f:
-            Pickler(f).dump(self.trainExamplesHistory)
-        os.replace(temp_filename, filename)
+
+        if self._atomicExamplesSave():
+            with open(temp_filename, "wb+") as f:
+                Pickler(f).dump(self.trainExamplesHistory)
+            os.replace(temp_filename, filename)
+        else:
+            self._deleteFile(temp_filename)
+            with open(filename, "wb+") as f:
+                Pickler(f).dump(self.trainExamplesHistory)
+
         self._pruneCheckpointExampleFiles()
 
     def _checkpointExamplesToKeep(self):
-        return getattr(self.args, 'checkpointExamplesToKeep', None)
+        return self._arg('checkpointExamplesToKeep', None)
+
+    def _atomicExamplesSave(self):
+        return self._arg('atomicExamplesSave', True)
+
+    def _saveBestTrainExamples(self):
+        return self._arg('saveBestTrainExamples', True)
+
+    def _arg(self, name, default=None):
+        if hasattr(self.args, 'get'):
+            return self.args.get(name, default)
+        return getattr(self.args, name, default)
 
     def _checkpointExampleIteration(self, filename):
         filename = os.path.basename(filename)
@@ -342,6 +371,24 @@ class Coach():
             os.path.join(folder, 'latest.examples'),
             os.path.join(folder, 'best.pth.tar.examples'),
         }
+
+    def _deleteFile(self, path):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+    def _deleteExamplesFile(self, examples_filename):
+        self._deleteFile(os.path.join(self.args.checkpoint, examples_filename))
+
+    def _deleteStaleExampleTempFiles(self):
+        folder = self.args.checkpoint
+        if not os.path.isdir(folder):
+            return
+
+        for filename in os.listdir(folder):
+            if filename.endswith('.examples.tmp'):
+                self._deleteFile(os.path.join(folder, filename))
 
     def _deleteLoadedTrainExamplesFile(self):
         loaded_examples_file = getattr(self, 'loadedTrainExamplesFile', None)

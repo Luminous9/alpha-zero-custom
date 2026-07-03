@@ -2,15 +2,20 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 
 import numpy as np
 
 from pit_santorini import (
+    build_opening_suite,
     display_name_from_folder,
     load_opening_board,
+    opening_book_candidates,
     play_opening_games_by_seat,
     select_legal_action,
 )
+from utils import dotdict
 
 
 class FirstPlayerWinsGame:
@@ -38,20 +43,20 @@ class TinyActionGame:
 
 
 class TestPitSantoriniOpening(unittest.TestCase):
-    def test_load_opening_board_uses_response_id(self):
-        payload = {
+    def make_opening_payload(self):
+        return {
             "metadata": {"board_size": 5},
             "player1_choices": [
                 {
                     "player1": ["A1", "B1"],
                     "player1_rank": 1,
-                    "minimax_value": 0.2,
+                    "minimax_value": 0.1,
                     "responses": [
                         {
                             "id": 7,
                             "player2": ["C1", "D1"],
                             "player2_response_rank": 1,
-                            "value_mean": 0.2,
+                            "value_mean": 0.1,
                             "pieces": [
                                 [1, 2, -1, -2, 0],
                                 [0, 0, 0, 0, 0],
@@ -65,6 +70,24 @@ class TestPitSantoriniOpening(unittest.TestCase):
             ],
         }
 
+    def make_opening_args(self, **overrides):
+        args = dotdict({
+            'checkpoint_folder': './temp/checkpoints',
+            'opponent_checkpoint_folder': None,
+            'opening_book_path': None,
+            'opening_id': None,
+            'no_opening_book': False,
+            'arena_opening_top_fraction': 0.50,
+            'arena_opening_max_abs_value': 0.14,
+            'no_opening_random_orientation': True,
+            'games': 4,
+        })
+        args.update(overrides)
+        return args
+
+    def test_load_opening_board_uses_response_id(self):
+        payload = self.make_opening_payload()
+
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "opening_book.json")
             with open(path, "w") as book_file:
@@ -76,6 +99,33 @@ class TestPitSantoriniOpening(unittest.TestCase):
         self.assertEqual(board.shape, (2, 5, 5))
         self.assertTrue(np.array_equal(board[0], np.array(payload["player1_choices"][0]["responses"][0]["pieces"])))
         self.assertEqual(int(np.sum(board[1])), 0)
+
+    def test_opening_book_candidates_include_checkpoint_relative_book(self):
+        args = self.make_opening_args(checkpoint_folder="/kaggle/working/Santorini-AZ/checkpoints")
+
+        candidates = opening_book_candidates(args)
+
+        self.assertIn(
+            "/kaggle/working/Santorini-AZ/opening_books/checkpoints/opening_book.json",
+            candidates,
+        )
+
+    def test_build_opening_suite_samples_paired_book_openings(self):
+        payload = self.make_opening_payload()
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "opening_book.json")
+            with open(path, "w") as book_file:
+                json.dump(payload, book_file)
+
+            args = self.make_opening_args(opening_book_path=path, games=4)
+            with redirect_stdout(StringIO()):
+                opening_book_path, opening_boards, opening_position = build_opening_suite(args)
+
+        self.assertEqual(opening_book_path, path)
+        self.assertEqual(len(opening_boards), 2)
+        self.assertIsNone(opening_position)
+        self.assertEqual(opening_boards[0].shape, (2, 5, 5))
 
     def test_load_opening_board_rejects_unknown_id(self):
         payload = {

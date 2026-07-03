@@ -7,7 +7,11 @@ import numpy as np
 import Arena
 from MCTS import MCTS
 from santorini.SantoriniGame import SantoriniGame
-from santorini.SantoriniOpeningBook import SantoriniOpeningBook
+from santorini.SantoriniOpeningBook import (
+    SantoriniOpeningBook,
+    SantoriniOpeningSampler,
+    find_opening_book,
+)
 from santorini.SantoriniPlayers import GreedySantoriniPlayer, RandomPlayer
 from santorini.pytorch.LegacyNNet import LegacyNNetWrapper
 from santorini.pytorch.NNet import NNetWrapper
@@ -75,6 +79,71 @@ def load_opening_board(opening_book_path, opening_id):
     raise ValueError(
         "Opening id {} was not found in {}".format(opening_id, opening_book_path)
     )
+
+
+def opening_book_candidates(args):
+    checkpoint = args.checkpoint_folder
+    checkpoint_name = os.path.basename(os.path.normpath(checkpoint))
+    candidates = [
+        args.opening_book_path,
+        os.path.join(checkpoint, 'opening_book.json'),
+        os.path.join(checkpoint, 'opening_books', 'opening_book.json'),
+        os.path.join(os.path.dirname(checkpoint), 'opening_books', checkpoint_name, 'opening_book.json'),
+        os.path.join('temp', 'santorini_opening_books', checkpoint_name, 'opening_book.json'),
+    ]
+
+    if args.opponent_checkpoint_folder:
+        opponent_checkpoint = args.opponent_checkpoint_folder
+        opponent_checkpoint_name = os.path.basename(os.path.normpath(opponent_checkpoint))
+        candidates.extend([
+            os.path.join(opponent_checkpoint, 'opening_book.json'),
+            os.path.join(opponent_checkpoint, 'opening_books', 'opening_book.json'),
+            os.path.join(
+                os.path.dirname(opponent_checkpoint),
+                'opening_books',
+                opponent_checkpoint_name,
+                'opening_book.json',
+            ),
+            os.path.join('temp', 'santorini_opening_books', opponent_checkpoint_name, 'opening_book.json'),
+        ])
+
+    return candidates
+
+
+def build_opening_suite(args):
+    if args.no_opening_book:
+        return None, None, None
+
+    opening_book_path = find_opening_book(opening_book_candidates(args))
+    if opening_book_path is None:
+        if args.opening_book_path:
+            raise FileNotFoundError("No opening book found at {}".format(args.opening_book_path))
+        print("No opening book found; using game random starts.")
+        return None, None, None
+
+    if args.opening_id is not None:
+        opening_board, opening_position = load_opening_board(
+            opening_book_path,
+            args.opening_id,
+        )
+        opening_boards = [opening_board for _ in range(max(1, int(args.games / 2)))]
+        return opening_book_path, opening_boards, opening_position
+
+    sampler = SantoriniOpeningSampler.load(
+        opening_book_path,
+        arena_top_fraction=args.arena_opening_top_fraction,
+        arena_max_abs_value=args.arena_opening_max_abs_value,
+        random_orientation=not args.no_opening_random_orientation,
+    )
+    opening_boards = sampler.sample_arena_suite(int(args.games / 2))
+    print(
+        'Loaded opening book "{}" ({} positions, {} arena candidates).'.format(
+            opening_book_path,
+            len(sampler.book.positions),
+            len(sampler._arena_candidates()),
+        )
+    )
+    return opening_book_path, opening_boards, None
 
 
 def display_name_from_folder(folder):
@@ -173,24 +242,23 @@ def main():
     )
     parser.add_argument('--fresh', action='store_true', help='Use an untrained network even if a checkpoint exists.')
     parser.add_argument('--opening-book-path', help='Optional opening book JSON path.')
-    parser.add_argument('--opening-id', type=int, help='Opening response id to use for every game.')
+    parser.add_argument('--opening-id', type=int, help='Opening response id to use for every paired seat game.')
+    parser.add_argument('--no-opening-book', action='store_true', help='Use game random starts instead of paired book openings.')
+    parser.add_argument('--arena-opening-top-fraction', type=float, default=0.50)
+    parser.add_argument('--arena-opening-max-abs-value', type=float, default=0.14)
+    parser.add_argument('--no-opening-random-orientation', action='store_true')
     parser.add_argument('--json-out', help='Optional path to write evaluation results as JSON.')
     args = parser.parse_args()
 
-    if (args.opening_book_path is None) != (args.opening_id is None):
-        parser.error('--opening-book-path and --opening-id must be supplied together.')
+    if args.opening_id is not None and args.no_opening_book:
+        parser.error('--opening-id cannot be used with --no-opening-book.')
     if args.action_temp < 0:
         parser.error('--action-temp must be non-negative.')
 
     game = SantoriniGame(5, true_random_placement=True)
-    opening_boards = None
-    opening_position = None
-    if args.opening_book_path is not None:
-        opening_board, opening_position = load_opening_board(
-            args.opening_book_path,
-            args.opening_id,
-        )
-        opening_boards = [opening_board for _ in range(int(args.games / 2))]
+    opening_book_path, opening_boards, opening_position = build_opening_suite(args)
+    if opening_position is not None:
+        opening_board = opening_boards[0]
         print(
             "Loaded opening id {}: P1 rank {} P1={} P2={} response rank {}".format(
                 opening_position["id"],
@@ -304,8 +372,13 @@ def main():
             'fresh': args.fresh,
             'contestant1_name': contestant1_name,
             'contestant2_name': contestant2_name,
-            'opening_book_path': args.opening_book_path,
+            'opening_book_path': opening_book_path,
             'opening_id': args.opening_id,
+            'opening_mode': (
+                'fixed_id'
+                if opening_position is not None
+                else ('sampled_book' if opening_boards is not None else 'random_start')
+            ),
             'contestant1_wins': int(nnet_wins),
             'contestant2_wins': int(opponent_wins),
             'neural_mcts_wins': int(nnet_wins),

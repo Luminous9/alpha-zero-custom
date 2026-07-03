@@ -30,8 +30,10 @@ PRESETS = {
         'arenaCompare': 40,
         'checkpoint': './temp/santorini/',
         'numItersForTrainExamplesHistory': 20,
-        'checkpointExamplesToKeep': 2,
+        'checkpointExamplesToKeep': 1,
         'deleteLoadedExamplesAfterFirstIteration': True,
+        'atomicExamplesSave': False,
+        'saveBestTrainExamples': False,
         'epochs': 10,
         'batch_size': 64,
     },
@@ -45,8 +47,10 @@ PRESETS = {
         'arenaCompare': 10,
         'checkpoint': './temp/santorini_local/',
         'numItersForTrainExamplesHistory': 5,
-        'checkpointExamplesToKeep': 2,
+        'checkpointExamplesToKeep': 1,
         'deleteLoadedExamplesAfterFirstIteration': True,
+        'atomicExamplesSave': False,
+        'saveBestTrainExamples': False,
         'epochs': 2,
         'batch_size': 64,
     },
@@ -81,6 +85,16 @@ def parse_args():
         '--keep-loaded-examples',
         action='store_true',
         help='Do not delete the examples file loaded at startup after the first completed iteration.',
+    )
+    parser.add_argument(
+        '--atomic-examples-save',
+        action='store_true',
+        help='Write replay examples through a .tmp file before replacing the target. Safer on crash, but briefly needs one extra full replay file of storage.',
+    )
+    parser.add_argument(
+        '--save-best-examples',
+        action='store_true',
+        help='Also save best.pth.tar.examples. By default Santorini keeps latest.examples plus the retained checkpoint examples to save disk.',
     )
     parser.add_argument('--epochs', type=int)
     parser.add_argument('--batch-size', type=int)
@@ -126,6 +140,8 @@ def build_coach_args(parsed_args):
             preset['deleteLoadedExamplesAfterFirstIteration']
             and not parsed_args.keep_loaded_examples
         ),
+        'atomicExamplesSave': parsed_args.atomic_examples_save or preset['atomicExamplesSave'],
+        'saveBestTrainExamples': parsed_args.save_best_examples or preset['saveBestTrainExamples'],
         'selfPlayBatchSize': parsed_args.self_play_batch_size,
         'arenaBatchSize': arena_batch_size,
         'quiet': parsed_args.quiet,
