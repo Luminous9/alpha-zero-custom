@@ -83,6 +83,7 @@ class TestPitSantoriniOpening(unittest.TestCase):
             'checkpoint_folder': './temp/checkpoints',
             'opponent_checkpoint_folder': None,
             'opening_book_path': None,
+            'arena_opening_suite': None,
             'opening_id': None,
             'no_opening_book': False,
             'arena_opening_top_fraction': 0.50,
@@ -131,12 +132,79 @@ class TestPitSantoriniOpening(unittest.TestCase):
 
             args = self.make_opening_args(opening_book_path=path, games=4)
             with redirect_stdout(StringIO()):
-                opening_book_path, opening_boards, opening_position = build_opening_suite(args)
+                opening_book_path, opening_boards, opening_position, opening_mode = build_opening_suite(args)
 
         self.assertEqual(opening_book_path, path)
         self.assertEqual(len(opening_boards), 2)
         self.assertIsNone(opening_position)
+        self.assertEqual(opening_mode, 'sampled_book')
         self.assertEqual(opening_boards[0].shape, (2, 5, 5))
+
+    def test_build_opening_suite_samples_explicit_arena_suite(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "arena_suite.json")
+            with open(path, "w") as suite_file:
+                json.dump({
+                    "metadata": {"name": "test"},
+                    "positions": [
+                        {
+                            "id": 7,
+                            "player1": ["A1", "B1"],
+                            "player2": ["C1", "D1"],
+                            "player1_rank": 1,
+                            "player2_response_rank": 1,
+                            "value_mean": 0.1,
+                            "pieces": [
+                                [1, 2, -1, -2, 0],
+                                [0, 0, 0, 0, 0],
+                                [0, 0, 0, 0, 0],
+                                [0, 0, 0, 0, 0],
+                                [0, 0, 0, 0, 0],
+                            ],
+                        },
+                    ],
+                }, suite_file)
+
+            args = self.make_opening_args(arena_opening_suite=path, games=4)
+            with redirect_stdout(StringIO()):
+                opening_book_path, opening_boards, opening_position, opening_mode = build_opening_suite(args)
+
+        self.assertEqual(opening_book_path, path)
+        self.assertEqual(len(opening_boards), 2)
+        self.assertIsNone(opening_position)
+        self.assertEqual(opening_mode, 'sampled_suite')
+        self.assertEqual(opening_boards[0].shape, (2, 5, 5))
+
+    def test_build_opening_suite_accepts_suite_via_opening_book_path(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "arena_suite.json")
+            with open(path, "w") as suite_file:
+                json.dump({
+                    "positions": [
+                        {
+                            "id": 7,
+                            "player1": ["A1", "B1"],
+                            "player2": ["C1", "D1"],
+                            "player1_rank": 1,
+                            "player2_response_rank": 1,
+                            "value_mean": 0.1,
+                            "pieces": [
+                                [1, 2, -1, -2, 0],
+                                [0, 0, 0, 0, 0],
+                                [0, 0, 0, 0, 0],
+                                [0, 0, 0, 0, 0],
+                                [0, 0, 0, 0, 0],
+                            ],
+                        },
+                    ],
+                }, suite_file)
+
+            args = self.make_opening_args(opening_book_path=path, games=4)
+            with redirect_stdout(StringIO()):
+                _, opening_boards, _, opening_mode = build_opening_suite(args)
+
+        self.assertEqual(len(opening_boards), 2)
+        self.assertEqual(opening_mode, 'sampled_suite')
 
     def test_load_opening_board_rejects_unknown_id(self):
         payload = {

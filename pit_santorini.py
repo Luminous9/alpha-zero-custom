@@ -12,7 +12,9 @@ from santorini.SantoriniGame import SantoriniGame
 from santorini.SantoriniOpeningBook import (
     SantoriniOpeningBook,
     SantoriniOpeningSampler,
+    SantoriniOpeningSuite,
     find_opening_book,
+    random_board_orientation,
 )
 from santorini.SantoriniPlayers import GreedySantoriniPlayer, RandomPlayer
 from santorini.pytorch.LegacyNNet import LegacyNNetWrapper
@@ -98,6 +100,43 @@ def load_opening_board(opening_book_path, opening_id):
     )
 
 
+def opening_json_kind(path):
+    with open(path) as opening_file:
+        payload = json.load(opening_file)
+    if "player1_choices" in payload:
+        return "book"
+    if "positions" in payload:
+        return "suite"
+    return "unknown"
+
+
+def board_from_opening_position(position, random_orientation_enabled=True):
+    pieces = np.array(position["pieces"], dtype=int)
+    heights = np.zeros_like(pieces, dtype=int)
+    board = np.array([pieces, heights], dtype=int)
+    if random_orientation_enabled:
+        board = random_board_orientation(board)
+    return board
+
+
+def sample_opening_suite(opening_suite_path, count, random_orientation_enabled=True):
+    suite = SantoriniOpeningSuite.load(opening_suite_path)
+    count = int(count)
+    if count <= 0:
+        return suite, []
+
+    replace = count > len(suite.positions)
+    indices = np.random.choice(len(suite.positions), size=count, replace=replace)
+    boards = [
+        board_from_opening_position(
+            suite.positions[int(index)],
+            random_orientation_enabled=random_orientation_enabled,
+        )
+        for index in indices
+    ]
+    return suite, boards
+
+
 def opening_book_candidates(args):
     checkpoint = args.checkpoint_folder
     checkpoint_name = os.path.basename(os.path.normpath(checkpoint))
@@ -129,14 +168,45 @@ def opening_book_candidates(args):
 
 def build_opening_suite(args):
     if args.no_opening_book:
-        return None, None, None
+        return None, None, None, 'random_start'
+
+    if args.opening_id is not None and getattr(args, 'arena_opening_suite', None):
+        raise ValueError('--opening-id cannot be used with --arena-opening-suite.')
+
+    if getattr(args, 'arena_opening_suite', None):
+        suite, opening_boards = sample_opening_suite(
+            args.arena_opening_suite,
+            int(args.games / 2),
+            random_orientation_enabled=not args.no_opening_random_orientation,
+        )
+        print(
+            'Loaded opening suite "{}" ({} positions).'.format(
+                args.arena_opening_suite,
+                len(suite.positions),
+            )
+        )
+        return args.arena_opening_suite, opening_boards, None, 'sampled_suite'
 
     opening_book_path = find_opening_book(opening_book_candidates(args))
     if opening_book_path is None:
         if args.opening_book_path:
             raise FileNotFoundError("No opening book found at {}".format(args.opening_book_path))
         print("No opening book found; using game random starts.")
-        return None, None, None
+        return None, None, None, 'random_start'
+
+    if args.opening_id is None and opening_json_kind(opening_book_path) == 'suite':
+        suite, opening_boards = sample_opening_suite(
+            opening_book_path,
+            int(args.games / 2),
+            random_orientation_enabled=not args.no_opening_random_orientation,
+        )
+        print(
+            'Loaded opening suite "{}" ({} positions).'.format(
+                opening_book_path,
+                len(suite.positions),
+            )
+        )
+        return opening_book_path, opening_boards, None, 'sampled_suite'
 
     if args.opening_id is not None:
         opening_board, opening_position = load_opening_board(
@@ -144,7 +214,7 @@ def build_opening_suite(args):
             args.opening_id,
         )
         opening_boards = [opening_board for _ in range(max(1, int(args.games / 2)))]
-        return opening_book_path, opening_boards, opening_position
+        return opening_book_path, opening_boards, opening_position, 'fixed_id'
 
     sampler = SantoriniOpeningSampler.load(
         opening_book_path,
@@ -160,7 +230,7 @@ def build_opening_suite(args):
             len(sampler._arena_candidates()),
         )
     )
-    return opening_book_path, opening_boards, None
+    return opening_book_path, opening_boards, None, 'sampled_book'
 
 
 def display_name_from_folder(folder):
@@ -278,6 +348,7 @@ def main():
     )
     parser.add_argument('--fresh', action='store_true', help='Use an untrained network even if a checkpoint exists.')
     parser.add_argument('--opening-book-path', help='Optional opening book JSON path.')
+    parser.add_argument('--arena-opening-suite', help='Optional fixed opening suite JSON path to sample paired arena openings from.')
     parser.add_argument('--opening-id', type=int, help='Opening response id to use for every paired seat game.')
     parser.add_argument('--no-opening-book', action='store_true', help='Use game random starts instead of paired book openings.')
     parser.add_argument('--arena-opening-top-fraction', type=float, default=0.50)
@@ -288,6 +359,8 @@ def main():
 
     if args.opening_id is not None and args.no_opening_book:
         parser.error('--opening-id cannot be used with --no-opening-book.')
+    if args.opening_id is not None and args.arena_opening_suite:
+        parser.error('--opening-id cannot be used with --arena-opening-suite.')
     if args.action_temp < 0:
         parser.error('--action-temp must be non-negative.')
     if args.arena_batch_size < 1:
@@ -295,7 +368,7 @@ def main():
     validate_batched_arena_args(parser, args)
 
     game = SantoriniGame(5, true_random_placement=True)
-    opening_book_path, opening_boards, opening_position = build_opening_suite(args)
+    opening_book_path, opening_boards, opening_position, opening_mode = build_opening_suite(args)
     if opening_position is not None:
         opening_board = opening_boards[0]
         print(
@@ -441,12 +514,9 @@ def main():
             'contestant1_name': contestant1_name,
             'contestant2_name': contestant2_name,
             'opening_book_path': opening_book_path,
+            'arena_opening_suite': args.arena_opening_suite,
             'opening_id': args.opening_id,
-            'opening_mode': (
-                'fixed_id'
-                if opening_position is not None
-                else ('sampled_book' if opening_boards is not None else 'random_start')
-            ),
+            'opening_mode': opening_mode,
             'contestant1_wins': int(nnet_wins),
             'contestant2_wins': int(opponent_wins),
             'neural_mcts_wins': int(nnet_wins),
