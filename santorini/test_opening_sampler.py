@@ -7,10 +7,12 @@ import numpy as np
 
 from santorini.SantoriniOpeningBook import (
     SantoriniOpeningBook,
+    SantoriniRandomOpeningSampler,
     SantoriniOpeningSampler,
     SantoriniOpeningSuite,
     passes_old_opening_filter,
     random_board_orientation,
+    unique_opening_positions,
 )
 
 
@@ -103,6 +105,27 @@ class TestSantoriniOpeningSampler(unittest.TestCase):
 
             self.assertEqual(len(book.positions), 4)
             self.assertEqual(len(book.best_response_positions), 2)
+
+    def test_unique_opening_positions_match_symmetry_reduced_count(self):
+        self.assertEqual(len(unique_opening_positions(5)), 9664)
+
+    def test_random_opening_sampler_draws_unique_starting_boards(self):
+        sampler = SantoriniRandomOpeningSampler(
+            board_size=5,
+            random_orientation=False,
+            rng=np.random.RandomState(1),
+        )
+
+        board = sampler.sample_self_play_board()
+        suite = sampler.sample_arena_suite(3)
+
+        self.assertEqual(board.shape, (2, 5, 5))
+        self.assertEqual(int(np.count_nonzero(board[0])), 4)
+        self.assertEqual(int(np.sum(board[1])), 0)
+        self.assertEqual(len(suite), 3)
+        for opening_board in suite:
+            self.assertEqual(opening_board.shape, (2, 5, 5))
+            self.assertEqual(int(np.count_nonzero(opening_board[0])), 4)
 
     def test_self_play_sampling_filters_lopsided_positions(self):
         with tempfile.TemporaryDirectory() as folder:

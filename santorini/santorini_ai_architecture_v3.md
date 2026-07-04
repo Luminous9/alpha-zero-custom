@@ -209,6 +209,28 @@ Recommended Kaggle command:
   --quiet
 ```
 
+First Kaggle bootstrap result:
+
+- Dataset: `training6_v2/latest.examples`
+- Train examples: **359,431**
+- Validation examples: **39,937**
+- Architecture: V3, 8 residual blocks, 96 channels
+- Hardware: CUDA on Kaggle P100
+- Batch size: `512`
+- Early stopping: stopped after epoch 9 because validation loss did not improve for 3 epochs
+- Best checkpoint: **epoch 6**
+- Best validation total loss: **2.8370**
+- Best validation policy loss: **2.0447**
+- Best validation value loss: **0.7924**
+- Output checkpoint copied locally to `temp/santorini_v3_bootstrap_result/best.pth.tar`
+
+Training/validation curve summary:
+
+- Validation total loss improved quickly from **3.7115** at epoch 1 to **2.8370** at epoch 6.
+- Training loss kept falling through epoch 9, while validation loss drifted upward after epoch 6.
+- This is a clean early-stopping shape: the model learned the replay distribution, then began to overfit.
+- Local load smoke passed: the checkpoint reports architecture `v3`, predicts a `(1600,)` policy, and plays a tiny pit through `pit_santorini.py`.
+
 Local smoke command:
 
 ```bash
@@ -241,6 +263,20 @@ Before using clock-based evaluation, run same-search matches to isolate evaluato
    - If V3 loses badly at equal sims, the larger network has not learned a better evaluator yet.
    - If V3 wins at equal sims, it is a promising candidate for time-odds testing.
    - If results are close, continue with self-play or a better distillation dataset before promotion.
+
+First fixed-sim evaluation results:
+
+- Assumption: records are listed as **V3 wins - V2 wins**.
+- 100 games at 128 sims using the `santorini_bootstrap_result` opening book: **37-63**.
+- 200 games at 128 sims using `bootstrap_arena_suite`: **82-118**.
+- Combined fixed-sim result: **119-181** across 300 games, or **39.7%** for V3.
+
+Interpretation:
+
+- The bootstrapped V3 checkpoint is clearly weaker than the V2 opponent at equal 128-sim search.
+- Do not advance this checkpoint to time-odds promotion testing as-is.
+- This result does not disprove the 8x96 architecture; it says pure supervised bootstrap from `training6_v2/latest.examples` did not produce a stronger evaluator.
+- Next useful tests are either self-play continuation from the V3 bootstrap or a stronger/distinct distillation target.
 
 ---
 
@@ -279,7 +315,16 @@ Recommended initial continuation:
 - Use the best V3 bootstrapped checkpoint as `best.pth.tar`.
 - Load the selected replay examples only if intentionally continuing from that distribution.
 - Prefer fresh V3 self-play soon after bootstrap so the larger network can move beyond imitation.
+- Use the default `main_santorini.py` opening sampler, which now draws self-play and paired arena starts uniformly from the **9,664 symmetry-unique worker placements** instead of from the value-filtered opening book.
 - Re-benchmark self-play batch size after switching to V3.
 - Keep V2 checkpoints and opening books available for regression matches.
 
 Promotion should be based on repeated arena evidence, not on validation loss alone.
+
+Opening-sampling update:
+
+- Training now defaults to `--opening-source unique`.
+- `unique` samples all 9,664 symmetry-unique initial worker placements, then optionally applies random orientation.
+- Arena comparisons still use paired openings: the same sampled opening board is used once with each model as first player.
+- The old book-based training sampler remains available with `--opening-source book`, or by passing `--opening-book` / `--arena-opening-suite` explicitly.
+- `--opening-source game` or the deprecated `--no-opening-book` flag uses `SantoriniGame.getInitBoard()`.

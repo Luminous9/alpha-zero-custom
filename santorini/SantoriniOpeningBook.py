@@ -1,6 +1,7 @@
 import json
 import math
 import os
+from itertools import combinations
 
 import numpy as np
 
@@ -75,6 +76,32 @@ class SantoriniOpeningSuite:
             positions.append(record)
 
         return cls(path, payload.get("metadata", {}), positions)
+
+
+class SantoriniRandomOpeningSampler:
+    _positions_cache = {}
+
+    def __init__(self, board_size=5, random_orientation=True, rng=None):
+        self.board_size = board_size
+        self.random_orientation = random_orientation
+        self.rng = rng if rng is not None else np.random
+        self.positions = unique_opening_positions(board_size)
+
+    def sample_self_play_board(self):
+        return self._sample_board()
+
+    def sample_arena_suite(self, count):
+        count = int(count)
+        if count <= 0:
+            return []
+        return [self._sample_board() for _ in range(count)]
+
+    def _sample_board(self):
+        p1_locations, p2_locations = self.positions[int(self.rng.randint(len(self.positions)))]
+        board = opening_board_from_locations(p1_locations, p2_locations, self.board_size)
+        if self.random_orientation:
+            board = random_board_orientation(board, self.rng)
+        return board
 
 
 class SantoriniOpeningSampler:
@@ -220,6 +247,108 @@ def passes_old_opening_filter(pieces):
         if len(locations) == 2 and all(is_outer_square(location, board_size) for location in locations):
             return False
     return True
+
+
+def transform_location(location, board_size, rotation, flip):
+    row, col = location
+
+    for _ in range(rotation):
+        row, col = col, board_size - 1 - row
+
+    if flip:
+        col = board_size - 1 - col
+
+    return row, col
+
+
+def normalize_locations(locations):
+    return tuple(sorted(locations))
+
+
+def all_transforms():
+    for rotation in range(4):
+        for flip in (False, True):
+            yield rotation, flip
+
+
+def canonical_locations(locations, board_size):
+    return min(
+        normalize_locations(
+            transform_location(location, board_size, rotation, flip)
+            for location in locations
+        )
+        for rotation, flip in all_transforms()
+    )
+
+
+def stabilizer_transforms(locations, board_size):
+    normalized = normalize_locations(locations)
+    return [
+        (rotation, flip)
+        for rotation, flip in all_transforms()
+        if normalize_locations(
+            transform_location(location, board_size, rotation, flip)
+            for location in normalized
+        ) == normalized
+    ]
+
+
+def canonical_response_for_player1(p2_locations, p1_locations, board_size):
+    return min(
+        normalize_locations(
+            transform_location(location, board_size, rotation, flip)
+            for location in p2_locations
+        )
+        for rotation, flip in stabilizer_transforms(p1_locations, board_size)
+    )
+
+
+def iter_unique_player1_choices(board_size):
+    squares = [(row, col) for row in range(board_size) for col in range(board_size)]
+    seen = set()
+    for locations in combinations(squares, 2):
+        key = canonical_locations(locations, board_size)
+        if key in seen:
+            continue
+        seen.add(key)
+        yield key
+
+
+def iter_unique_player2_responses(p1_locations, board_size):
+    p1_locations = normalize_locations(p1_locations)
+    squares = [(row, col) for row in range(board_size) for col in range(board_size)]
+    remaining = [square for square in squares if square not in p1_locations]
+    seen = set()
+    for locations in combinations(remaining, 2):
+        key = canonical_response_for_player1(locations, p1_locations, board_size)
+        if key in seen:
+            continue
+        seen.add(key)
+        yield key
+
+
+def iter_unique_opening_positions(board_size):
+    for p1_locations in iter_unique_player1_choices(board_size):
+        for p2_locations in iter_unique_player2_responses(p1_locations, board_size):
+            yield p1_locations, p2_locations
+
+
+def unique_opening_positions(board_size):
+    cache = SantoriniRandomOpeningSampler._positions_cache
+    if board_size not in cache:
+        cache[board_size] = list(iter_unique_opening_positions(board_size))
+    return cache[board_size]
+
+
+def opening_board_from_locations(p1_locations, p2_locations, board_size=5):
+    p1 = list(p1_locations)
+    p2 = list(p2_locations)
+    board = np.zeros((2, board_size, board_size), dtype=int)
+    board[0][p1[0]] = 1
+    board[0][p1[1]] = 2
+    board[0][p2[0]] = -1
+    board[0][p2[1]] = -2
+    return board
 
 
 def random_board_orientation(board, rng=None):
