@@ -7,7 +7,7 @@ import numpy as np
 
 from santorini.ReplayBuffer import load_compact_replay, save_compact_replay
 from santorini.SantoriniGame import SantoriniGame
-from santorini.SantoriniTelemetry import ReferenceSuite
+from santorini.SantoriniTelemetry import ReferenceSuite, resolve_reference_suite_path
 
 
 class FixedNetwork:
@@ -23,6 +23,25 @@ class FixedNetwork:
 
 
 class TestReplayAndTelemetry(unittest.TestCase):
+    def test_reference_suite_directory_resolves_single_npz(self):
+        with tempfile.TemporaryDirectory() as folder:
+            nested = os.path.join(folder, 'dataset')
+            os.makedirs(nested)
+            path = os.path.join(nested, 'v2_reference_500.npz')
+            with open(path, 'wb') as suite_file:
+                np.savez_compressed(suite_file, placeholder=np.asarray([1]))
+
+            self.assertEqual(resolve_reference_suite_path(folder), path)
+
+    def test_reference_suite_directory_rejects_ambiguous_npz_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for filename in ('first.npz', 'second.npz'):
+                with open(os.path.join(folder, filename), 'wb') as suite_file:
+                    np.savez_compressed(suite_file, placeholder=np.asarray([1]))
+
+            with self.assertRaisesRegex(ValueError, 'Multiple .npz files'):
+                resolve_reference_suite_path(folder)
+
     def test_compact_replay_round_trip(self):
         board = np.zeros((2, 5, 5), dtype=int)
         policy = np.zeros(1625, dtype=np.float32)

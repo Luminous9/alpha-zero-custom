@@ -1,10 +1,43 @@
+import os
+
 import numpy as np
+
+
+def resolve_reference_suite_path(path):
+    path = os.path.abspath(os.path.expanduser(os.fspath(path)))
+    if os.path.isfile(path):
+        return path
+    if not os.path.exists(path):
+        raise FileNotFoundError('Reference suite does not exist: {}'.format(path))
+    if not os.path.isdir(path):
+        raise ValueError('Reference suite path is neither a file nor a directory: {}'.format(path))
+
+    candidates = []
+    for root, _, filenames in os.walk(path):
+        candidates.extend(
+            os.path.join(root, filename)
+            for filename in filenames
+            if filename.lower().endswith('.npz')
+        )
+    candidates.sort()
+    if not candidates:
+        raise FileNotFoundError('No .npz reference suite found under directory: {}'.format(path))
+    if len(candidates) > 1:
+        preferred = [candidate for candidate in candidates if os.path.basename(candidate) == 'v2_reference_500.npz']
+        if len(preferred) == 1:
+            return preferred[0]
+        raise ValueError(
+            'Multiple .npz files found under reference-suite directory; pass the exact file path: {}'.format(
+                ', '.join(candidates)
+            )
+        )
+    return candidates[0]
 
 
 class ReferenceSuite:
     def __init__(self, path):
-        self.path = path
-        with np.load(path, allow_pickle=False) as payload:
+        self.path = resolve_reference_suite_path(path)
+        with np.load(self.path, allow_pickle=False) as payload:
             self.boards = payload['boards'].astype(int)
             self.policies = payload['policies'].astype(np.float32)
             self.values = payload['values'].astype(np.float32)

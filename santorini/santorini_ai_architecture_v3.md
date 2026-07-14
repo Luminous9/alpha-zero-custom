@@ -193,6 +193,8 @@ Every 10 iterations by default, V3 saves a milestone checkpoint. Once both endpo
 
 The result includes wins, draws, decisive-game win rate, and a 95% Wilson confidence interval. The match never accepts, rejects, or rolls back a model. With a fresh run, iteration 10 creates the first milestone and iteration 20 produces the first 10-iteration comparison.
 
+The completed record and confidence interval are logged immediately in the training output and are also retained in TensorBoard and `telemetry.jsonl`.
+
 ## V2 Reference-Search Suite
 
 The optional reference suite measures whether V3 is approaching or diverging from stable, high-budget V2 search targets. It is evaluation-only and does not compromise training from scratch.

@@ -81,6 +81,11 @@ def parse_args():
     parser.add_argument('--load-file', type=str)
     parser.add_argument('--load-model', action='store_true')
     parser.add_argument('--load-examples', action='store_true')
+    parser.add_argument(
+        '--start-iteration',
+        type=int,
+        help='Override the last completed iteration stored in a resumed checkpoint.',
+    )
     parser.add_argument('--examples-file', type=str)
     parser.add_argument('--skip-first-self-play', action='store_true')
     parser.add_argument('--history-iters', type=int)
@@ -142,6 +147,10 @@ def parse_args():
     args = parser.parse_args()
     if args.opening_mix_unique_probability < 0.0 or args.opening_mix_unique_probability > 1.0:
         parser.error('--opening-mix-unique-probability must be between 0 and 1.')
+    if args.start_iteration is not None and args.start_iteration < 0:
+        parser.error('--start-iteration cannot be negative.')
+    if args.start_iteration is not None and not args.load_model:
+        parser.error('--start-iteration requires --load-model.')
     return args
 
 
@@ -352,6 +361,22 @@ def main():
         )
         if coach_args.trainingMode == 'latest':
             coach_args.startIteration = int(loaded_metadata.get('iteration', 0))
+            if parsed_args.start_iteration is not None:
+                log.warning(
+                    'Overriding checkpoint iteration metadata %s with %s.',
+                    coach_args.startIteration,
+                    parsed_args.start_iteration,
+                )
+                coach_args.startIteration = parsed_args.start_iteration
+            if parsed_args.start_iteration is not None:
+                log.info('Resume iteration override applied; continuing after iteration %s.', coach_args.startIteration)
+            elif 'iteration' in loaded_metadata:
+                log.info('Resume metadata loaded; continuing after iteration %s.', coach_args.startIteration)
+            else:
+                log.warning(
+                    'Checkpoint has no iteration metadata; numbering will restart at 1. '
+                    'Confirm that this is a latest-training checkpoint from a completed latest-mode iteration.'
+                )
     else:
         log.warning('Not loading a checkpoint!')
 

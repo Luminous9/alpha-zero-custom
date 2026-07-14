@@ -719,6 +719,28 @@ class Coach():
             ) / denominator
             confidence_low = float(center - margin)
             confidence_high = float(center + margin)
+            log.info(
+                'Milestone result: checkpoint %s vs %s = %s-%s-%s '
+                '(current-previous-draws), current win rate %.1f%%, 95%% CI %.1f%%-%.1f%%',
+                iteration,
+                previous_iteration,
+                current_wins,
+                previous_wins,
+                draws,
+                100.0 * win_rate,
+                100.0 * confidence_low,
+                100.0 * confidence_high,
+            )
+        else:
+            log.info(
+                'Milestone result: checkpoint %s vs %s = %s-%s-%s '
+                '(current-previous-draws); no decisive games',
+                iteration,
+                previous_iteration,
+                current_wins,
+                previous_wins,
+                draws,
+            )
         return {
             'milestone_opponent_iteration': int(previous_iteration),
             'milestone_previous_wins': int(previous_wins),
