@@ -294,8 +294,23 @@ class NNetWrapper(NeuralNet):
             if 'torch_rng_state' in checkpoint:
                 torch.set_rng_state(checkpoint['torch_rng_state'])
             if self.net_args.cuda and 'cuda_rng_state_all' in checkpoint:
-                torch.cuda.set_rng_state_all(checkpoint['cuda_rng_state_all'])
+                self._restore_cuda_rng_states(checkpoint['cuda_rng_state_all'])
         return checkpoint.get('training_metadata', {})
+
+    @staticmethod
+    def _restore_cuda_rng_states(saved_states):
+        saved_states = list(saved_states)
+        available_devices = torch.cuda.device_count()
+        if len(saved_states) != available_devices:
+            log.warning(
+                'Checkpoint contains CUDA RNG state for %s device(s), but this runtime exposes %s; '
+                'restoring the first %s compatible state(s).',
+                len(saved_states),
+                available_devices,
+                min(len(saved_states), available_devices),
+            )
+        for device_index, state in enumerate(saved_states[:available_devices]):
+            torch.cuda.set_rng_state(state, device=device_index)
 
 
 class V3NNetWrapper(NNetWrapper):

@@ -1,7 +1,9 @@
 import unittest
 import tempfile
+from unittest.mock import patch
 
 import numpy as np
+import torch
 
 from MCTS import MCTS
 from santorini.SantoriniGame import SantoriniGame
@@ -108,6 +110,16 @@ class TestSantoriniNNet(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, 'Checkpoint architecture "v3"'):
                 self.nnet.load_checkpoint(folder, 'v3.pth.tar')
+
+    def test_cuda_rng_restore_tolerates_fewer_runtime_devices(self):
+        saved_states = [torch.tensor([1], dtype=torch.uint8), torch.tensor([2], dtype=torch.uint8)]
+        with patch.object(torch.cuda, 'device_count', return_value=1), patch.object(
+            torch.cuda, 'set_rng_state'
+        ) as set_rng_state:
+            with self.assertLogs('santorini.pytorch.NNet', level='WARNING'):
+                NNetWrapper._restore_cuda_rng_states(saved_states)
+
+        set_rng_state.assert_called_once_with(saved_states[0], device=0)
 
     def test_v2_policy_adapter_scatter_preserves_square_blocks(self):
         placement_game = SantoriniGame(5, sequential_placement=True)
