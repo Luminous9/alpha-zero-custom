@@ -360,22 +360,22 @@ def main():
             load_optimizer=coach_args.trainingMode == 'latest',
         )
         if coach_args.trainingMode == 'latest':
-            coach_args.startIteration = int(loaded_metadata.get('iteration', 0))
+            coach_args['startIteration'] = int(loaded_metadata.get('iteration', 0))
             if parsed_args.start_iteration is not None:
                 log.warning(
                     'Overriding checkpoint iteration metadata %s with %s.',
                     coach_args.startIteration,
                     parsed_args.start_iteration,
                 )
-                coach_args.startIteration = parsed_args.start_iteration
+                coach_args['startIteration'] = parsed_args.start_iteration
             if parsed_args.start_iteration is not None:
                 log.info('Resume iteration override applied; continuing after iteration %s.', coach_args.startIteration)
             elif 'iteration' in loaded_metadata:
                 log.info('Resume metadata loaded; continuing after iteration %s.', coach_args.startIteration)
             else:
-                log.warning(
-                    'Checkpoint has no iteration metadata; numbering will restart at 1. '
-                    'Confirm that this is a latest-training checkpoint from a completed latest-mode iteration.'
+                raise ValueError(
+                    'Latest-mode resume checkpoint has no iteration metadata. Refusing to restart numbering at 1; '
+                    'use --start-iteration with the known last completed iteration.'
                 )
     else:
         log.warning('Not loading a checkpoint!')

@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 
+from Coach import Coach
 from MCTS import MCTS
 from utils import dotdict
 
@@ -32,6 +33,14 @@ class ZeroNetwork:
 
 
 class TestTurnAwareMCTS(unittest.TestCase):
+    def test_coach_reads_updated_start_iteration_dictionary_key(self):
+        args = dotdict({'startIteration': 0})
+        args['startIteration'] = 50
+        coach = Coach.__new__(Coach)
+        coach.args = args
+
+        self.assertEqual(coach._arg('startIteration', 0), 50)
+
     def test_same_player_edge_does_not_invert_value(self):
         game = SamePlayerTerminalGame()
         mcts = MCTS(game, ZeroNetwork(), dotdict({'numMCTSSims': 2, 'cpuct': 1.0}))
