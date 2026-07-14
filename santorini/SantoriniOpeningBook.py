@@ -104,6 +104,37 @@ class SantoriniRandomOpeningSampler:
         return board
 
 
+class SantoriniMixedOpeningSampler:
+    def __init__(self, primary_sampler, unique_sampler, unique_probability=0.20, rng=None):
+        if unique_probability < 0.0 or unique_probability > 1.0:
+            raise ValueError("unique_probability must be between 0 and 1.")
+        self.primary_sampler = primary_sampler
+        self.unique_sampler = unique_sampler
+        self.unique_probability = unique_probability
+        self.rng = rng if rng is not None else np.random
+
+    def sample_self_play_board(self):
+        return self._sample_sampler().sample_self_play_board()
+
+    def sample_arena_suite(self, count):
+        count = int(count)
+        if count <= 0:
+            return []
+        unique_count = int(round(count * self.unique_probability))
+        primary_count = count - unique_count
+        boards = (
+            self.primary_sampler.sample_arena_suite(primary_count)
+            + self.unique_sampler.sample_arena_suite(unique_count)
+        )
+        self.rng.shuffle(boards)
+        return boards
+
+    def _sample_sampler(self):
+        if self.rng.random() < self.unique_probability:
+            return self.unique_sampler
+        return self.primary_sampler
+
+
 class SantoriniOpeningSampler:
     def __init__(
         self,

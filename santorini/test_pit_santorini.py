@@ -85,6 +85,7 @@ class TestPitSantoriniOpening(unittest.TestCase):
             'opening_book_path': None,
             'arena_opening_suite': None,
             'opening_id': None,
+            'opening_source': 'book',
             'no_opening_book': False,
             'arena_opening_top_fraction': 0.50,
             'arena_opening_max_abs_value': 0.14,
@@ -139,6 +140,37 @@ class TestPitSantoriniOpening(unittest.TestCase):
         self.assertIsNone(opening_position)
         self.assertEqual(opening_mode, 'sampled_book')
         self.assertEqual(opening_boards[0].shape, (2, 5, 5))
+
+    def test_build_opening_suite_samples_unique_openings(self):
+        args = self.make_opening_args(opening_source='unique', games=4)
+
+        with redirect_stdout(StringIO()):
+            opening_book_path, opening_boards, opening_position, opening_mode = build_opening_suite(args)
+
+        self.assertIsNone(opening_book_path)
+        self.assertEqual(len(opening_boards), 2)
+        self.assertIsNone(opening_position)
+        self.assertEqual(opening_mode, 'sampled_unique')
+        self.assertEqual(opening_boards[0].shape, (2, 5, 5))
+        self.assertEqual(int(np.count_nonzero(opening_boards[0][0])), 4)
+        self.assertEqual(int(np.sum(opening_boards[0][1])), 0)
+
+    def test_build_opening_suite_can_use_game_random_starts(self):
+        args = self.make_opening_args(opening_source='game', games=4)
+
+        with redirect_stdout(StringIO()):
+            opening_book_path, opening_boards, opening_position, opening_mode = build_opening_suite(args)
+
+        self.assertIsNone(opening_book_path)
+        self.assertIsNone(opening_boards)
+        self.assertIsNone(opening_position)
+        self.assertEqual(opening_mode, 'random_start')
+
+    def test_build_opening_suite_rejects_opening_id_with_unique_source(self):
+        args = self.make_opening_args(opening_source='unique', opening_id=7)
+
+        with self.assertRaisesRegex(ValueError, "opening-source book"):
+            build_opening_suite(args)
 
     def test_build_opening_suite_samples_explicit_arena_suite(self):
         with tempfile.TemporaryDirectory() as folder:

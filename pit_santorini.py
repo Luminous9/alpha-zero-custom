@@ -11,6 +11,7 @@ from MCTS import MCTS
 from santorini.SantoriniGame import SantoriniGame
 from santorini.SantoriniOpeningBook import (
     SantoriniOpeningBook,
+    SantoriniRandomOpeningSampler,
     SantoriniOpeningSampler,
     SantoriniOpeningSuite,
     find_opening_book,
@@ -172,8 +173,29 @@ def build_opening_suite(args):
     if args.no_opening_book:
         return None, None, None, 'random_start'
 
+    opening_source = getattr(args, 'opening_source', 'book')
+    if opening_source == 'game':
+        print("Using game random starts.")
+        return None, None, None, 'random_start'
+
     if args.opening_id is not None and getattr(args, 'arena_opening_suite', None):
         raise ValueError('--opening-id cannot be used with --arena-opening-suite.')
+    if args.opening_id is not None and opening_source != 'book':
+        raise ValueError('--opening-id can only be used with --opening-source book.')
+
+    if opening_source == 'unique':
+        sampler = SantoriniRandomOpeningSampler(
+            board_size=5,
+            random_orientation=not args.no_opening_random_orientation,
+        )
+        opening_boards = sampler.sample_arena_suite(int(args.games / 2))
+        print(
+            'Sampled {} paired openings from {} symmetry-unique placements.'.format(
+                len(opening_boards),
+                len(sampler.positions),
+            )
+        )
+        return None, opening_boards, None, 'sampled_unique'
 
     if getattr(args, 'arena_opening_suite', None):
         suite, opening_boards = sample_opening_suite(
@@ -352,15 +374,23 @@ def main():
     parser.add_argument('--opening-book-path', help='Optional opening book JSON path.')
     parser.add_argument('--arena-opening-suite', help='Optional fixed opening suite JSON path to sample paired arena openings from.')
     parser.add_argument('--opening-id', type=int, help='Opening response id to use for every paired seat game.')
-    parser.add_argument('--no-opening-book', action='store_true', help='Use game random starts instead of paired book openings.')
+    parser.add_argument(
+        '--opening-source',
+        choices=['book', 'unique', 'game'],
+        default='book',
+        help='Opening source for paired arena starts. book preserves legacy book/suite behavior; unique samples the 9,664 symmetry-unique worker placements; game uses SantoriniGame random starts.',
+    )
+    parser.add_argument('--no-opening-book', action='store_true', help='Deprecated alias for --opening-source game.')
     parser.add_argument('--arena-opening-top-fraction', type=float, default=0.50)
     parser.add_argument('--arena-opening-max-abs-value', type=float, default=0.14)
     parser.add_argument('--no-opening-random-orientation', action='store_true')
     parser.add_argument('--json-out', help='Optional path to write evaluation results as JSON.')
     args = parser.parse_args()
+    if args.no_opening_book:
+        args.opening_source = 'game'
 
-    if args.opening_id is not None and args.no_opening_book:
-        parser.error('--opening-id cannot be used with --no-opening-book.')
+    if args.opening_id is not None and args.opening_source != 'book':
+        parser.error('--opening-id can only be used with --opening-source book.')
     if args.opening_id is not None and args.arena_opening_suite:
         parser.error('--opening-id cannot be used with --arena-opening-suite.')
     if args.action_temp < 0:
@@ -518,6 +548,7 @@ def main():
             'opening_book_path': opening_book_path,
             'arena_opening_suite': args.arena_opening_suite,
             'opening_id': args.opening_id,
+            'opening_source': args.opening_source,
             'opening_mode': opening_mode,
             'contestant1_wins': int(nnet_wins),
             'contestant2_wins': int(opponent_wins),

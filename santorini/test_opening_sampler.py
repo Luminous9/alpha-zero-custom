@@ -7,6 +7,7 @@ import numpy as np
 
 from santorini.SantoriniOpeningBook import (
     SantoriniOpeningBook,
+    SantoriniMixedOpeningSampler,
     SantoriniRandomOpeningSampler,
     SantoriniOpeningSampler,
     SantoriniOpeningSuite,
@@ -14,6 +15,17 @@ from santorini.SantoriniOpeningBook import (
     random_board_orientation,
     unique_opening_positions,
 )
+
+
+class FixedSampler:
+    def __init__(self, value):
+        self.value = value
+
+    def sample_self_play_board(self):
+        return np.array([self.value], dtype=int)
+
+    def sample_arena_suite(self, count):
+        return [np.array([self.value], dtype=int) for _ in range(count)]
 
 
 def sample_book_payload():
@@ -126,6 +138,42 @@ class TestSantoriniOpeningSampler(unittest.TestCase):
         for opening_board in suite:
             self.assertEqual(opening_board.shape, (2, 5, 5))
             self.assertEqual(int(np.count_nonzero(opening_board[0])), 4)
+
+    def test_mixed_opening_sampler_switches_between_sources(self):
+        primary = FixedSampler(1)
+        unique = FixedSampler(2)
+
+        old_only = SantoriniMixedOpeningSampler(
+            primary,
+            unique,
+            unique_probability=0.0,
+            rng=np.random.RandomState(1),
+        )
+        unique_only = SantoriniMixedOpeningSampler(
+            primary,
+            unique,
+            unique_probability=1.0,
+            rng=np.random.RandomState(1),
+        )
+
+        self.assertEqual(int(old_only.sample_self_play_board()[0]), 1)
+        self.assertEqual([int(board[0]) for board in old_only.sample_arena_suite(3)], [1, 1, 1])
+        self.assertEqual(int(unique_only.sample_self_play_board()[0]), 2)
+        self.assertEqual([int(board[0]) for board in unique_only.sample_arena_suite(3)], [2, 2, 2])
+
+    def test_mixed_opening_sampler_proportions_arena_suite_by_count(self):
+        sampler = SantoriniMixedOpeningSampler(
+            FixedSampler(1),
+            FixedSampler(2),
+            unique_probability=0.25,
+            rng=np.random.RandomState(1),
+        )
+
+        suite = sampler.sample_arena_suite(8)
+        values = [int(board[0]) for board in suite]
+
+        self.assertEqual(values.count(1), 6)
+        self.assertEqual(values.count(2), 2)
 
     def test_self_play_sampling_filters_lopsided_positions(self):
         with tempfile.TemporaryDirectory() as folder:

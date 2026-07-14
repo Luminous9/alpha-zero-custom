@@ -12,6 +12,7 @@ from santorini.pytorch.NNet import build_nnet
 from santorini.pytorch.NNet import args as nnet_args
 from santorini.SantoriniGame import SantoriniGame as Game
 from santorini.SantoriniOpeningBook import (SantoriniOpeningSampler,
+                                            SantoriniMixedOpeningSampler,
                                             SantoriniRandomOpeningSampler,
                                             SantoriniOpeningSuite,
                                             find_opening_book)
@@ -108,23 +109,27 @@ def parse_args():
     parser.add_argument('--arena-batch-size', type=int)
     parser.add_argument(
         '--opening-source',
-        choices=['unique', 'book', 'game'],
-        default='unique',
-        help='unique samples all symmetry-unique starting placements; book uses the old opening book sampler; game uses SantoriniGame.getInitBoard().',
+        choices=['mixed', 'unique', 'book', 'game'],
+        default='mixed',
+        help='mixed samples old filtered book starts plus unique random placements; unique samples all symmetry-unique starting placements; book uses the old opening book sampler; game uses SantoriniGame.getInitBoard().',
     )
     parser.add_argument('--opening-book', type=str)
     parser.add_argument('--arena-opening-suite', type=str)
     parser.add_argument('--no-opening-book', action='store_true', help='Deprecated alias for --opening-source game.')
     parser.add_argument('--self-play-opening-max-abs-value', type=float, default=0.30)
-    parser.add_argument('--self-play-old-filter-probability', type=float, default=0.70)
-    parser.add_argument('--self-play-value-probability', type=float, default=0.25)
-    parser.add_argument('--self-play-opening-tail-probability', type=float, default=0.05)
+    parser.add_argument('--self-play-old-filter-probability', type=float, default=1.00)
+    parser.add_argument('--self-play-value-probability', type=float, default=0.00)
+    parser.add_argument('--self-play-opening-tail-probability', type=float, default=0.00)
+    parser.add_argument('--opening-mix-unique-probability', type=float, default=0.20)
     parser.add_argument('--arena-opening-top-fraction', type=float, default=0.50)
     parser.add_argument('--arena-opening-max-abs-value', type=float, default=0.14)
     parser.add_argument('--no-opening-random-orientation', action='store_true')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--quiet', action='store_true')
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.opening_mix_unique_probability < 0.0 or args.opening_mix_unique_probability > 1.0:
+        parser.error('--opening-mix-unique-probability must be between 0 and 1.')
+    return args
 
 
 def build_coach_args(parsed_args):
@@ -179,37 +184,12 @@ def opening_book_candidates(parsed_args, coach_args):
     ]
 
 
-def build_opening_sampler(parsed_args, coach_args):
-    if parsed_args.no_opening_book:
-        parsed_args.opening_source = 'game'
-
-    if (
-        parsed_args.opening_source == 'unique'
-        and (parsed_args.opening_book or parsed_args.arena_opening_suite)
-    ):
-        parsed_args.opening_source = 'book'
-        log.info('Using opening book sampler because an opening book or arena suite was provided explicitly.')
-
-    if parsed_args.opening_source == 'game':
-        log.info('Using SantoriniGame.getInitBoard() for training starts.')
-        return None
-
-    if parsed_args.opening_source == 'unique':
-        sampler = SantoriniRandomOpeningSampler(
-            board_size=5,
-            random_orientation=not parsed_args.no_opening_random_orientation,
-        )
-        log.info(
-            'Using %s symmetry-unique random opening placements for self-play and paired arena starts.',
-            len(sampler.positions),
-        )
-        return sampler
-
+def build_book_opening_sampler(parsed_args, coach_args):
     opening_book = find_opening_book(opening_book_candidates(parsed_args, coach_args))
     if opening_book is None:
         if parsed_args.opening_book:
             raise FileNotFoundError("No opening book found at {}".format(parsed_args.opening_book))
-        log.warning('No opening book found; using game random starts.')
+        log.warning('No opening book found for book-filtered starts.')
         return None
 
     arena_suite = None
@@ -238,6 +218,61 @@ def build_opening_sampler(parsed_args, coach_args):
     if arena_suite is not None:
         log.info('Loaded arena opening suite "%s" (%s positions)', parsed_args.arena_opening_suite, len(arena_suite.positions))
     return sampler
+
+
+def build_unique_opening_sampler(parsed_args):
+    sampler = SantoriniRandomOpeningSampler(
+        board_size=5,
+        random_orientation=not parsed_args.no_opening_random_orientation,
+    )
+    log.info(
+        'Using %s symmetry-unique random opening placements.',
+        len(sampler.positions),
+    )
+    return sampler
+
+
+def build_opening_sampler(parsed_args, coach_args):
+    if parsed_args.no_opening_book:
+        parsed_args.opening_source = 'game'
+
+    if (
+        parsed_args.opening_source == 'unique'
+        and (parsed_args.opening_book or parsed_args.arena_opening_suite)
+    ):
+        parsed_args.opening_source = 'book'
+        log.info('Using opening book sampler because an opening book or arena suite was provided explicitly.')
+
+    if parsed_args.opening_source == 'game':
+        log.info('Using SantoriniGame.getInitBoard() for training starts.')
+        return None
+
+    if parsed_args.opening_source == 'unique':
+        return build_unique_opening_sampler(parsed_args)
+
+    if parsed_args.opening_source == 'book':
+        sampler = build_book_opening_sampler(parsed_args, coach_args)
+        if sampler is None:
+            log.warning('No opening book found; using game random starts.')
+        return sampler
+
+    book_sampler = build_book_opening_sampler(parsed_args, coach_args)
+    unique_sampler = build_unique_opening_sampler(parsed_args)
+    if book_sampler is None:
+        log.warning('No opening book found; using unique random opening placements only.')
+        return unique_sampler
+
+    mixed_sampler = SantoriniMixedOpeningSampler(
+        book_sampler,
+        unique_sampler,
+        unique_probability=parsed_args.opening_mix_unique_probability,
+    )
+    log.info(
+        'Using mixed opening sampler: %.0f%% book-filtered starts, %.0f%% unique random starts.',
+        100.0 * (1.0 - mixed_sampler.unique_probability),
+        100.0 * mixed_sampler.unique_probability,
+    )
+    return mixed_sampler
 
 
 def main():

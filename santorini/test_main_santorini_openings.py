@@ -4,21 +4,26 @@ import os
 import tempfile
 
 from main_santorini import build_opening_sampler
-from santorini.SantoriniOpeningBook import SantoriniOpeningSampler, SantoriniRandomOpeningSampler
+from santorini.SantoriniOpeningBook import (
+    SantoriniMixedOpeningSampler,
+    SantoriniOpeningSampler,
+    SantoriniRandomOpeningSampler,
+)
 from utils import dotdict
 
 
 def make_args(**overrides):
     args = dotdict({
-        'opening_source': 'unique',
+        'opening_source': 'mixed',
         'no_opening_book': False,
         'no_opening_random_orientation': True,
         'opening_book': None,
         'arena_opening_suite': None,
         'self_play_opening_max_abs_value': 0.30,
-        'self_play_old_filter_probability': 0.70,
-        'self_play_value_probability': 0.25,
-        'self_play_opening_tail_probability': 0.05,
+        'self_play_old_filter_probability': 1.00,
+        'self_play_value_probability': 0.00,
+        'self_play_opening_tail_probability': 0.00,
+        'opening_mix_unique_probability': 0.20,
         'arena_opening_top_fraction': 0.50,
         'arena_opening_max_abs_value': 0.14,
     })
@@ -34,11 +39,14 @@ def make_coach_args():
 
 
 class TestMainSantoriniOpenings(unittest.TestCase):
-    def test_default_opening_sampler_uses_unique_random_positions(self):
+    def test_default_opening_sampler_mixes_book_filter_and_unique_random_positions(self):
         sampler = build_opening_sampler(make_args(), make_coach_args())
 
-        self.assertIsInstance(sampler, SantoriniRandomOpeningSampler)
-        self.assertEqual(len(sampler.positions), 9664)
+        self.assertIsInstance(sampler, SantoriniMixedOpeningSampler)
+        self.assertIsInstance(sampler.primary_sampler, SantoriniOpeningSampler)
+        self.assertIsInstance(sampler.unique_sampler, SantoriniRandomOpeningSampler)
+        self.assertAlmostEqual(sampler.unique_probability, 0.20)
+        self.assertEqual(len(sampler.unique_sampler.positions), 9664)
 
     def test_no_opening_book_alias_uses_game_initial_board(self):
         sampler = build_opening_sampler(
@@ -56,7 +64,7 @@ class TestMainSantoriniOpenings(unittest.TestCase):
 
         self.assertIsNone(sampler)
 
-    def test_explicit_opening_book_uses_book_sampler(self):
+    def test_opening_source_book_uses_book_sampler(self):
         payload = {
             "player1_choices": [
                 {
@@ -88,7 +96,7 @@ class TestMainSantoriniOpenings(unittest.TestCase):
                 json.dump(payload, book_file)
 
             sampler = build_opening_sampler(
-                make_args(opening_book=path),
+                make_args(opening_source='book', opening_book=path),
                 make_coach_args(),
             )
 
