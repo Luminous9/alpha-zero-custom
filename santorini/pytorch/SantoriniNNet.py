@@ -38,7 +38,7 @@ class SantoriniNNet(nn.Module):
             *[ResidualBlock(args.num_channels) for _ in range(args.num_residual_blocks)]
         )
 
-        self.policy_conv = nn.Conv2d(args.num_channels, 64, kernel_size=1, stride=1)
+        self.policy_conv = nn.Conv2d(args.num_channels, args.policy_channels, kernel_size=1, stride=1)
 
         self.value_conv = nn.Conv2d(args.num_channels, 1, kernel_size=1, stride=1)
         self.value_bn = nn.BatchNorm2d(1)

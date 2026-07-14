@@ -84,7 +84,8 @@ class TestSantoriniNNet(unittest.TestCase):
 
     def test_build_nnet_can_select_v2_and_v3_architectures(self):
         v2 = build_nnet(self.game, 'v2')
-        v3 = build_nnet(self.game, 'v3')
+        v3_game = SantoriniGame(5, sequential_placement=True)
+        v3 = build_nnet(v3_game, 'v3')
 
         self.assertIsInstance(v2, NNetWrapper)
         self.assertIsInstance(v3, V3NNetWrapper)
@@ -92,17 +93,31 @@ class TestSantoriniNNet(unittest.TestCase):
         self.assertEqual(v2.net_args.num_channels, 64)
         self.assertEqual(v3.net_args.num_residual_blocks, 8)
         self.assertEqual(v3.net_args.num_channels, 96)
+        self.assertEqual(v3.net_args.policy_channels, 65)
         self.assertEqual(v2.action_size, self.game.getActionSize())
-        self.assertEqual(v3.action_size, self.game.getActionSize())
+        self.assertEqual(v3.action_size, v3_game.getActionSize())
+
+        pi, _ = v3.predict(v3_game.getInitBoard())
+        self.assertEqual(pi.shape, (1625,))
 
     def test_checkpoint_metadata_rejects_wrong_architecture(self):
-        v3 = V3NNetWrapper(self.game)
+        v3 = V3NNetWrapper(SantoriniGame(5, sequential_placement=True))
 
         with tempfile.TemporaryDirectory() as folder:
             v3.save_checkpoint(folder, 'v3.pth.tar')
 
             with self.assertRaisesRegex(ValueError, 'Checkpoint architecture "v3"'):
                 self.nnet.load_checkpoint(folder, 'v3.pth.tar')
+
+    def test_v2_policy_adapter_scatter_preserves_square_blocks(self):
+        placement_game = SantoriniGame(5, sequential_placement=True)
+        v2 = NNetWrapper(placement_game)
+        native = np.arange(1600, dtype=np.float32).reshape(1, 1600)
+
+        adapted = v2._adapt_native_policies(native).reshape(25, 65)
+
+        np.testing.assert_array_equal(adapted[:, :64], native.reshape(25, 64))
+        np.testing.assert_array_equal(adapted[:, 64], np.zeros(25))
 
     def test_single_training_step_runs(self):
         old_epochs = nnet_args.epochs
@@ -118,6 +133,27 @@ class TestSantoriniNNet(unittest.TestCase):
                 examples.append((board, pi, 1))
 
             self.nnet.train(examples)
+        finally:
+            nnet_args.epochs = old_epochs
+            nnet_args.batch_size = old_batch_size
+
+    def test_resumable_checkpoint_restores_adam_state(self):
+        old_epochs = nnet_args.epochs
+        old_batch_size = nnet_args.batch_size
+        nnet_args.epochs = 1
+        nnet_args.batch_size = 1
+        try:
+            board = self.game.getCanonicalForm(self.game.getInitBoard(), 1)
+            valids = self.game.getValidMoves(board, 1).astype(np.float32)
+            self.nnet.train([(board, valids / valids.sum(), 1.0)])
+            self.assertTrue(self.nnet.optimizer.state)
+
+            with tempfile.TemporaryDirectory() as folder:
+                self.nnet.save_checkpoint(folder, 'resume.pth.tar', include_optimizer=True)
+                restored = NNetWrapper(self.game)
+                restored.load_checkpoint(folder, 'resume.pth.tar', load_optimizer=True)
+
+            self.assertEqual(len(restored.optimizer.state), len(self.nnet.optimizer.state))
         finally:
             nnet_args.epochs = old_epochs
             nnet_args.batch_size = old_batch_size

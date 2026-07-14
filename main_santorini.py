@@ -67,6 +67,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train a Santorini AlphaZero model.')
     parser.add_argument('--preset', choices=sorted(PRESETS.keys()), default='full')
     parser.add_argument('--architecture', choices=['v2', 'v3'], default='v2')
+    parser.add_argument('--training-mode', choices=['arena', 'latest'])
     parser.add_argument('--num-iters', type=int)
     parser.add_argument('--num-eps', type=int)
     parser.add_argument('--temp-threshold', type=int)
@@ -77,7 +78,7 @@ def parse_args():
     parser.add_argument('--cpuct', type=float, default=1.0)
     parser.add_argument('--checkpoint', type=str)
     parser.add_argument('--load-folder', type=str)
-    parser.add_argument('--load-file', type=str, default='best.pth.tar')
+    parser.add_argument('--load-file', type=str)
     parser.add_argument('--load-model', action='store_true')
     parser.add_argument('--load-examples', action='store_true')
     parser.add_argument('--examples-file', type=str)
@@ -126,6 +127,18 @@ def parse_args():
     parser.add_argument('--no-opening-random-orientation', action='store_true')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--quiet', action='store_true')
+    parser.add_argument('--placement-temperature', type=float, default=1.0)
+    parser.add_argument('--dirichlet-alpha', type=float, default=0.30)
+    parser.add_argument('--dirichlet-epsilon', type=float, default=0.25)
+    parser.add_argument('--no-dirichlet-noise', action='store_true')
+    parser.add_argument('--compact-replay', action='store_true')
+    parser.add_argument('--telemetry-dir', type=str)
+    parser.add_argument('--milestone-interval', type=int, default=10)
+    parser.add_argument('--reference-suite', type=str)
+    parser.add_argument('--telemetry-match-games', type=int, default=40)
+    parser.add_argument('--telemetry-match-batch-size', type=int)
+    parser.add_argument('--no-telemetry-matches', action='store_true')
+    parser.add_argument('--telemetry-sample-size', type=int, default=256)
     args = parser.parse_args()
     if args.opening_mix_unique_probability < 0.0 or args.opening_mix_unique_probability > 1.0:
         parser.error('--opening-mix-unique-probability must be between 0 and 1.')
@@ -138,6 +151,12 @@ def build_coach_args(parsed_args):
     load_folder = parsed_args.load_folder or checkpoint
     arena_batch_size = parsed_args.arena_batch_size or parsed_args.self_play_batch_size
 
+    training_mode = getattr(parsed_args, 'training_mode', None) or (
+        'latest' if parsed_args.architecture == 'v3' else 'arena'
+    )
+    load_file = getattr(parsed_args, 'load_file', None) or (
+        'latest-training.pth.tar' if training_mode == 'latest' else 'best.pth.tar'
+    )
     return dotdict({
         'numIters': parsed_args.num_iters or preset['numIters'],
         'numEps': parsed_args.num_eps or preset['numEps'],
@@ -149,12 +168,12 @@ def build_coach_args(parsed_args):
         'cpuct': parsed_args.cpuct,
         'checkpoint': checkpoint,
         'load_model': parsed_args.load_model,
-        'load_folder_file': (load_folder, parsed_args.load_file),
+        'load_folder_file': (load_folder, load_file),
         'numItersForTrainExamplesHistory': parsed_args.history_iters or preset['numItersForTrainExamplesHistory'],
         'checkpointExamplesToKeep': (
             parsed_args.checkpoint_examples_to_keep
             if parsed_args.checkpoint_examples_to_keep is not None
-            else preset['checkpointExamplesToKeep']
+            else (0 if training_mode == 'latest' else preset['checkpointExamplesToKeep'])
         ),
         'deleteLoadedExamplesAfterFirstIteration': (
             preset['deleteLoadedExamplesAfterFirstIteration']
@@ -165,6 +184,27 @@ def build_coach_args(parsed_args):
         'selfPlayBatchSize': parsed_args.self_play_batch_size,
         'arenaBatchSize': arena_batch_size,
         'quiet': parsed_args.quiet,
+        'trainingMode': training_mode,
+        'placementTemperature': getattr(parsed_args, 'placement_temperature', 1.0),
+        'addDirichletNoise': (
+            training_mode == 'latest' and not getattr(parsed_args, 'no_dirichlet_noise', False)
+        ),
+        'dirichletAlpha': getattr(parsed_args, 'dirichlet_alpha', 0.30),
+        'dirichletEpsilon': getattr(parsed_args, 'dirichlet_epsilon', 0.25),
+        'compactReplay': getattr(parsed_args, 'compact_replay', False) or training_mode == 'latest',
+        'telemetryDir': getattr(parsed_args, 'telemetry_dir', None) or os.path.join(checkpoint, 'telemetry'),
+        'milestoneInterval': getattr(parsed_args, 'milestone_interval', 10),
+        'referenceSuite': getattr(parsed_args, 'reference_suite', None),
+        'telemetryMatchGames': (
+            0 if getattr(parsed_args, 'no_telemetry_matches', False)
+            else getattr(parsed_args, 'telemetry_match_games', 40)
+        ),
+        'telemetryMatchBatchSize': (
+            getattr(parsed_args, 'telemetry_match_batch_size', None)
+            or parsed_args.self_play_batch_size
+        ),
+        'startIteration': 0,
+        'telemetrySampleSize': getattr(parsed_args, 'telemetry_sample_size', 256),
     })
 
 
@@ -286,17 +326,32 @@ def main():
     nnet_args.batch_size = parsed_args.batch_size or preset['batch_size']
     nnet_args.quiet = parsed_args.quiet
     coach_args = build_coach_args(parsed_args)
-    opening_sampler = build_opening_sampler(parsed_args, coach_args)
+    if parsed_args.architecture == 'v3':
+        opening_sampler = None
+        log.info('V3 learns placement from the empty board; opening samplers are disabled.')
+    else:
+        opening_sampler = build_opening_sampler(parsed_args, coach_args)
 
     log.info('Loading %s...', Game.__name__)
-    game = Game(5, true_random_placement=True)
+    game = Game(
+        5,
+        true_random_placement=parsed_args.architecture != 'v3',
+        sequential_placement=parsed_args.architecture == 'v3',
+    )
 
     log.info('Loading Santorini network architecture %s...', parsed_args.architecture)
     nnet = build_nnet(game, parsed_args.architecture)
 
+    loaded_metadata = {}
     if coach_args.load_model:
         log.info('Loading checkpoint "%s/%s"...', coach_args.load_folder_file[0], coach_args.load_folder_file[1])
-        nnet.load_checkpoint(coach_args.load_folder_file[0], coach_args.load_folder_file[1])
+        loaded_metadata = nnet.load_checkpoint(
+            coach_args.load_folder_file[0],
+            coach_args.load_folder_file[1],
+            load_optimizer=coach_args.trainingMode == 'latest',
+        )
+        if coach_args.trainingMode == 'latest':
+            coach_args.startIteration = int(loaded_metadata.get('iteration', 0))
     else:
         log.warning('Not loading a checkpoint!')
 
@@ -306,8 +361,8 @@ def main():
     if coach_args.load_model and parsed_args.load_examples:
         log.info("Loading 'trainExamples' from file...")
         examples_file = parsed_args.examples_file
-        if examples_file is None and parsed_args.load_file == 'best.pth.tar':
-            examples_file = 'latest.examples'
+        if examples_file is None:
+            examples_file = 'latest.examples.npz' if coach_args.compactReplay else 'latest.examples'
         coach.loadTrainExamples(
             examples_file,
             skipFirstSelfPlay=parsed_args.skip_first_self_play,

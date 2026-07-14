@@ -61,7 +61,7 @@ def reset_peak_memory(use_cuda):
         torch.cuda.reset_peak_memory_stats()
 
 
-def make_nnet_args(blocks, channels, use_cuda, dropout=0.2):
+def make_nnet_args(blocks, channels, use_cuda, policy_channels=64, dropout=0.2):
     return dotdict({
         "lr": 0.001,
         "dropout": dropout,
@@ -73,6 +73,7 @@ def make_nnet_args(blocks, channels, use_cuda, dropout=0.2):
         "num_residual_blocks": blocks,
         "value_hidden_size": 128,
         "quiet": True,
+        "policy_channels": policy_channels,
     })
 
 
@@ -102,7 +103,12 @@ class BenchmarkNNet:
         self.blocks = blocks
         self.channels = channels
         self.use_cuda = use_cuda
-        self.args = make_nnet_args(blocks, channels, use_cuda)
+        self.args = make_nnet_args(
+            blocks,
+            channels,
+            use_cuda,
+            policy_channels=65 if name == 'v3' else 64,
+        )
         self.nnet = SantoriniNNet(game, self.args)
         if use_cuda:
             self.nnet.cuda()
@@ -404,13 +410,16 @@ def main():
     print("Device: {}".format("cuda" if use_cuda else "cpu"))
     if use_cuda:
         print("GPU: {}".format(torch.cuda.get_device_name(0)))
-    print("Sampling {} canonical boards...".format(board_count))
-
-    game = SantoriniGame(5, true_random_placement=True)
-    boards = sample_canonical_boards(game, board_count, args.max_random_plies)
+    print("Sampling {} canonical boards per architecture...".format(board_count))
 
     all_results = []
     for name, blocks, channels in args.architectures:
+        game = SantoriniGame(
+            5,
+            true_random_placement=name != 'v3',
+            sequential_placement=name == 'v3',
+        )
+        boards = sample_canonical_boards(game, board_count, args.max_random_plies)
         model = BenchmarkNNet(game, name, blocks, channels, use_cuda)
         print(
             "\nArchitecture {}: {} residual blocks, {} channels, {:,} parameters".format(

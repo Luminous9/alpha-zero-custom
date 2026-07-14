@@ -27,6 +27,7 @@ class MCTS():
 
         self.Es = {}  # stores game.getGameEnded ended for board s
         self.Vs = {}  # stores game.getValidMoves for board s
+        self.noised_roots = set()
 
     def getActionProb(self, canonicalBoard, temp=1):
         """
@@ -39,6 +40,8 @@ class MCTS():
         """
         for i in range(self.args.numMCTSSims):
             self.search(canonicalBoard)
+            if i == 0:
+                self.add_root_noise(canonicalBoard)
 
         return self.getActionProbFromTree(canonicalBoard, temp=temp)
 
@@ -89,12 +92,12 @@ class MCTS():
         outcome is propagated up the search path. The values of Ns, Nsa, Qsa are
         updated.
 
-        NOTE: the return values are the negative of the value of the current
-        state. This is done since v is in [-1,1] and if v is the value of a
-        state for the current player, then its value is -v for the other player.
+        Values are backed up from the acting player's perspective. The sign is
+        inverted only across edges where control changes; games may legally
+        return the same player for consecutive actions.
 
         Returns:
-            v: the negative of the value of the current canonicalBoard
+            v: the value of the current canonicalBoard's player
         """
 
         leaf = self.select_leaf(canonicalBoard)
@@ -124,7 +127,7 @@ class MCTS():
                 return {
                     'needs_eval': False,
                     'path': path,
-                    'value': -self.Es[s],
+                    'value': self.Es[s],
                 }
 
             if s not in self.Ps:
@@ -136,8 +139,8 @@ class MCTS():
                 }
 
             a = self._best_action(s)
-            path.append((s, a))
             next_s, next_player = self.game.getNextState(board, 1, a)
+            path.append((s, a, next_player != 1))
             board = self.game.getCanonicalForm(next_s, next_player)
 
     def complete_search(self, leaf, policy=None, value=None):
@@ -147,14 +150,15 @@ class MCTS():
         """
         if leaf['needs_eval']:
             self._expand_leaf(leaf['state_key'], leaf['board'], policy)
-            propagated_value = -value
+            propagated_value = value
         else:
             propagated_value = leaf['value']
 
-        for s, a in reversed(leaf['path']):
-            self._update_edge(s, a, propagated_value)
+        for s, a, player_changed in reversed(leaf['path']):
+            parent_value = -propagated_value if player_changed else propagated_value
+            self._update_edge(s, a, parent_value)
             self.Ns[s] += 1
-            propagated_value = -propagated_value
+            propagated_value = parent_value
 
         return propagated_value
 
@@ -181,6 +185,22 @@ class MCTS():
         self.Qs[s] = np.zeros(self.game.getActionSize(), dtype=np.float32)
         self.Nsas[s] = np.zeros(self.game.getActionSize(), dtype=np.int32)
         self.Ns[s] = 0
+
+    def add_root_noise(self, canonicalBoard):
+        get_arg = self.args.get if hasattr(self.args, 'get') else lambda key, default: getattr(self.args, key, default)
+        if not bool(get_arg('addDirichletNoise', False)):
+            return
+        s = self.game.stringRepresentation(canonicalBoard)
+        if s in self.noised_roots or s not in self.Ps:
+            return
+        actions = self.As[s]
+        if len(actions) == 0:
+            return
+        epsilon = float(get_arg('dirichletEpsilon', 0.25))
+        alpha = float(get_arg('dirichletAlpha', 0.30))
+        noise = np.random.dirichlet([alpha] * len(actions))
+        self.Ps[s][actions] = (1.0 - epsilon) * self.Ps[s][actions] + epsilon * noise
+        self.noised_roots.add(s)
 
     def _get_game_ended_and_valids(self, canonicalBoard):
         if hasattr(self.game, 'getGameEndedAndValidMoves'):

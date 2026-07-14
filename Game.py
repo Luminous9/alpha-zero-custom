@@ -42,7 +42,8 @@ class Game():
 
         Returns:
             nextBoard: board after applying action
-            nextPlayer: player who plays in the next turn (should be -player)
+            nextPlayer: player who plays in the next turn. Most games return
+                        -player, but multi-action turns may return player.
         """
         pass
 

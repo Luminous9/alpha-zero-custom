@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import sys
 
 import numpy as np
@@ -35,10 +36,14 @@ ARCHITECTURES = {
     'v2': {
         'num_channels': 64,
         'num_residual_blocks': 5,
+        'policy_channels': 64,
+        'action_encoding': 'spatial64',
     },
     'v3': {
         'num_channels': 96,
         'num_residual_blocks': 8,
+        'policy_channels': 65,
+        'action_encoding': 'spatial65-placement',
     },
 }
 
@@ -51,15 +56,19 @@ class NNetWrapper(NeuralNet):
         self.nnet = SantoriniNNet(game, self.net_args)
         _, self.board_x, self.board_y = game.getBoardSize()
         self.action_size = game.getActionSize()
+        self.native_action_size = self.board_x * self.board_y * self.net_args.policy_channels
 
         if self.net_args.cuda:
             self.nnet.cuda()
+        self.optimizer = optim.Adam(self.nnet.parameters(), lr=self.net_args.lr)
 
     def _make_net_args(self):
         net_args = dotdict(dict(args))
         architecture = ARCHITECTURES[self.architecture]
         net_args.num_channels = architecture['num_channels']
         net_args.num_residual_blocks = architecture['num_residual_blocks']
+        net_args.policy_channels = architecture['policy_channels']
+        net_args.action_encoding = architecture['action_encoding']
         return net_args
 
     def _sync_runtime_args(self):
@@ -94,9 +103,11 @@ class NNetWrapper(NeuralNet):
         examples: list of examples, each example is of form (board, pi, v)
         """
         runtime_args = self._sync_runtime_args()
-        optimizer = optim.Adam(self.nnet.parameters(), lr=runtime_args.lr)
+        for parameter_group in self.optimizer.param_groups:
+            parameter_group['lr'] = runtime_args.lr
         encoded_boards, target_pis, target_vs = self._encode_training_examples(examples)
 
+        metrics = {}
         for epoch in range(runtime_args.epochs):
             self.nnet.train()
             pi_losses = AverageMeter()
@@ -131,9 +142,9 @@ class NNetWrapper(NeuralNet):
                 if not runtime_args.quiet:
                     t.set_postfix(Loss_pi=pi_losses, Loss_v=v_losses)
 
-                optimizer.zero_grad()
+                self.optimizer.zero_grad()
                 total_loss.backward()
-                optimizer.step()
+                self.optimizer.step()
 
             if runtime_args.quiet:
                 log.info(
@@ -143,6 +154,13 @@ class NNetWrapper(NeuralNet):
                     pi_losses.avg,
                     v_losses.avg,
                 )
+            metrics = {
+                'policy_loss': float(pi_losses.avg),
+                'value_loss': float(v_losses.avg),
+                'total_loss': float(pi_losses.avg + v_losses.avg),
+                'epoch': epoch + 1,
+            }
+        return metrics
 
     def _encode_training_examples(self, examples):
         boards, pis, vs = list(zip(*examples))
@@ -171,7 +189,26 @@ class NNetWrapper(NeuralNet):
         with torch.no_grad():
             pi, v = self.nnet(encoded)
 
-        return torch.exp(pi).data.cpu().numpy(), v.view(-1).data.cpu().numpy()
+        policies = torch.exp(pi).data.cpu().numpy()
+        if policies.shape[1] != self.action_size:
+            policies = self._adapt_native_policies(policies)
+        return policies, v.view(-1).data.cpu().numpy()
+
+    def _adapt_native_policies(self, policies):
+        game_local_actions = getattr(self, 'action_size', 0) // (self.board_x * self.board_y)
+        native_local_actions = self.net_args.policy_channels
+        if native_local_actions != 64 or game_local_actions != 65:
+            raise ValueError(
+                'Cannot adapt {}-channel {} policy to game action size {}.'.format(
+                    native_local_actions,
+                    self.architecture,
+                    self.action_size,
+                )
+            )
+        adapted = np.zeros((len(policies), self.action_size), dtype=policies.dtype)
+        adapted_view = adapted.reshape(len(policies), self.board_x * self.board_y, game_local_actions)
+        adapted_view[:, :, :64] = policies.reshape(len(policies), self.board_x * self.board_y, 64)
+        return adapted
 
     def loss_pi(self, targets, outputs):
         return -torch.sum(targets * outputs) / targets.size()[0]
@@ -179,7 +216,7 @@ class NNetWrapper(NeuralNet):
     def loss_v(self, targets, outputs):
         return torch.sum((targets - outputs.view(-1)) ** 2) / targets.size()[0]
 
-    def save_checkpoint(self, folder='checkpoint', filename='checkpoint.pth.tar'):
+    def save_checkpoint(self, folder='checkpoint', filename='checkpoint.pth.tar', include_optimizer=False, metadata=None):
         filepath = os.path.join(folder, filename)
         if not os.path.exists(folder):
             if not self.net_args.quiet:
@@ -188,25 +225,48 @@ class NNetWrapper(NeuralNet):
         else:
             if not self.net_args.quiet:
                 print("Checkpoint Directory exists! ")
-        torch.save({
+        payload = {
             'state_dict': self.nnet.state_dict(),
             'architecture': self.architecture,
             'num_channels': self.net_args.num_channels,
             'num_residual_blocks': self.net_args.num_residual_blocks,
-        }, filepath)
+            'policy_channels': self.net_args.policy_channels,
+            'action_encoding': self.net_args.action_encoding,
+        }
+        if include_optimizer:
+            payload['optimizer_state_dict'] = self.optimizer.state_dict()
+            payload['numpy_rng_state'] = np.random.get_state()
+            payload['python_rng_state'] = random.getstate()
+            payload['torch_rng_state'] = torch.get_rng_state()
+            if torch.cuda.is_available():
+                payload['cuda_rng_state_all'] = torch.cuda.get_rng_state_all()
+        if metadata:
+            payload['training_metadata'] = dict(metadata)
+        torch.save(payload, filepath)
 
-    def load_checkpoint(self, folder='checkpoint', filename='checkpoint.pth.tar'):
+    def load_checkpoint(self, folder='checkpoint', filename='checkpoint.pth.tar', load_optimizer=False):
         filepath = os.path.join(folder, filename)
         if not os.path.exists(filepath):
             raise FileNotFoundError("No model in path {}".format(filepath))
         map_location = None if self.net_args.cuda else 'cpu'
-        checkpoint = torch.load(filepath, map_location=map_location)
+        try:
+            checkpoint = torch.load(filepath, map_location=map_location, weights_only=False)
+        except TypeError:
+            checkpoint = torch.load(filepath, map_location=map_location)
         checkpoint_architecture = checkpoint.get('architecture')
         if checkpoint_architecture is not None and checkpoint_architecture != self.architecture:
             raise ValueError(
                 'Checkpoint architecture "{}" cannot be loaded into "{}".'.format(
                     checkpoint_architecture,
                     self.architecture,
+                )
+            )
+        checkpoint_encoding = checkpoint.get('action_encoding')
+        if checkpoint_encoding is not None and checkpoint_encoding != self.net_args.action_encoding:
+            raise ValueError(
+                'Checkpoint action encoding "{}" cannot be loaded into "{}".'.format(
+                    checkpoint_encoding,
+                    self.net_args.action_encoding,
                 )
             )
         try:
@@ -221,6 +281,21 @@ class NNetWrapper(NeuralNet):
                     self.net_args.num_channels,
                 )
             ) from exc
+        if load_optimizer:
+            optimizer_state = checkpoint.get('optimizer_state_dict')
+            if optimizer_state is None:
+                log.warning('Checkpoint %s has no optimizer state; Adam will resume fresh.', filepath)
+            else:
+                self.optimizer.load_state_dict(optimizer_state)
+            if 'numpy_rng_state' in checkpoint:
+                np.random.set_state(checkpoint['numpy_rng_state'])
+            if 'python_rng_state' in checkpoint:
+                random.setstate(checkpoint['python_rng_state'])
+            if 'torch_rng_state' in checkpoint:
+                torch.set_rng_state(checkpoint['torch_rng_state'])
+            if self.net_args.cuda and 'cuda_rng_state_all' in checkpoint:
+                torch.cuda.set_rng_state_all(checkpoint['cuda_rng_state_all'])
+        return checkpoint.get('training_metadata', {})
 
 
 class V3NNetWrapper(NNetWrapper):

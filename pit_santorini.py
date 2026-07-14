@@ -399,7 +399,14 @@ def main():
         parser.error('--arena-batch-size must be at least 1.')
     validate_batched_arena_args(parser, args)
 
-    game = SantoriniGame(5, true_random_placement=True)
+    uses_v3 = args.architecture == 'v3' or (
+        args.opponent_checkpoint_folder and args.opponent_architecture == 'v3'
+    )
+    game = SantoriniGame(
+        5,
+        true_random_placement=not uses_v3,
+        sequential_placement=uses_v3,
+    )
     opening_book_path, opening_boards, opening_position, opening_mode = build_opening_suite(args)
     if opening_position is not None:
         opening_board = opening_boards[0]

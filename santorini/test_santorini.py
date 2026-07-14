@@ -48,6 +48,41 @@ class TestSantoriniRules(unittest.TestCase):
             self.assertFalse(all(self.is_outer_edge(loc) for loc in opponent_locations))
         self.assertGreater(len(seen_starts), 1)
 
+    def test_sequential_placement_masks_and_player_order(self):
+        game = SantoriniGame(5, sequential_placement=True)
+        board = game.getInitBoard()
+        player = 1
+
+        self.assertEqual(game.getActionSize(), 1625)
+        for location, expected_valids, expected_player in [
+            ((0, 0), 25, 1),
+            ((1, 1), 24, -1),
+            ((2, 2), 23, -1),
+            ((3, 3), 22, 1),
+        ]:
+            valids = game.getValidMoves(board, player)
+            self.assertEqual(int(valids.sum()), expected_valids)
+            self.assertTrue(all(game.isPlacementAction(action) for action in np.flatnonzero(valids)))
+            board, player = game.getNextState(board, player, game.getPlacementAction(location))
+            self.assertEqual(player, expected_player)
+
+        self.assertFalse(game.isPlacementPhase(board))
+        self.assertTrue(all(not game.isPlacementAction(action) for action in np.flatnonzero(game.getValidMoves(board, player))))
+
+    def test_completed_worker_pair_labels_are_coordinate_normalized(self):
+        game = SantoriniGame(5, sequential_placement=True)
+
+        def place_pair(first, second):
+            board = game.getInitBoard()
+            board, player = game.getNextState(board, 1, game.getPlacementAction(first))
+            board, player = game.getNextState(board, player, game.getPlacementAction(second))
+            return board, player
+
+        forward, forward_player = place_pair((4, 4), (0, 0))
+        reverse, reverse_player = place_pair((0, 0), (4, 4))
+        np.testing.assert_array_equal(forward, reverse)
+        self.assertEqual(forward_player, reverse_player)
+
     def test_cannot_move_onto_dome_even_from_level_three(self):
         board = self.empty_board()
         board[0, 2, 2] = 1

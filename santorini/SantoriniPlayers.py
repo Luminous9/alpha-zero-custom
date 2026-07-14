@@ -44,6 +44,20 @@ class HumanSantoriniPlayer():
 
     def play(self, board):
         valids = self.game.getValidMoves(board, 1)
+        if hasattr(self.game, 'isPlacementPhase') and self.game.isPlacementPhase(board):
+            while True:
+                entered = input("\nPlace your next worker on a square (example: B3), or q to quit: ").strip()
+                if entered.lower() in ('q', 'quit', 'exit'):
+                    raise KeyboardInterrupt
+                try:
+                    location = parse_coordinate(entered, self.game.n)
+                    action = self.game.getPlacementAction(location)
+                except ValueError as error:
+                    print("Sorry, {}".format(error))
+                    continue
+                if valids[action]:
+                    return action
+                print("Sorry, that square is already occupied.")
         worker_locations = self.game.getCharacterLocations(board, 1)
         print(
             "Your workers: O at {}, U at {}.".format(
@@ -106,6 +120,20 @@ class GreedySantoriniPlayer():
 
     def play(self, board):
         valids = self.game.getValidMoves(board, 1)
+        if hasattr(self.game, 'isPlacementPhase') and self.game.isPlacementPhase(board):
+            # Baseline compatibility: prefer central placement squares.
+            legal = np.flatnonzero(valids)
+            center = (self.game.n - 1) / 2.0
+            return min(
+                legal,
+                key=lambda action: sum(
+                    (coordinate - center) ** 2
+                    for coordinate in (
+                        int(action) // self.game.local_action_size // self.game.n,
+                        int(action) // self.game.local_action_size % self.game.n,
+                    )
+                ),
+            )
         candidates = []
         for a in range(self.game.getActionSize()):
             if valids[a]==0:

@@ -22,6 +22,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Play Santorini against a trained neural MCTS player.')
     parser.add_argument('--checkpoint-folder', default=DEFAULT_CHECKPOINT_FOLDER)
     parser.add_argument('--checkpoint-file', default='best.pth.tar')
+    parser.add_argument('--architecture', choices=['v2', 'v3'], default='v2')
     parser.add_argument('--sims', type=int, default=1024, help='MCTS simulations per AI move.')
     parser.add_argument('--human-first', action='store_true', help='Let the human play first.')
     parser.add_argument('--ai-first', action='store_true', help='Let the AI play first.')
@@ -245,6 +246,10 @@ def run_worker_placement(game, selector, human_player):
 
 
 def describe_action(game, board, player, action, perspective_player):
+    if hasattr(game, 'isPlacementAction') and game.isPlacementAction(action):
+        square = int(action) // game.local_action_size
+        location = (square // game.n, square % game.n)
+        return "places a worker at {}".format(coordinate_label(location))
     origin, move_direction, build_direction = game.decodeAction(action)
 
     worker_idx = game.getCharacterLocations(board, player).index(origin)
@@ -302,9 +307,15 @@ def main():
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError("No model in path {}".format(checkpoint_path))
 
-    game = SantoriniGame(5)
+    game = SantoriniGame(5, sequential_placement=args.architecture == 'v3')
     human = HumanSantoriniPlayer(game).play
-    ai = NeuralMCTSPlayer(game, args.checkpoint_folder, args.checkpoint_file, args.sims)
+    ai = NeuralMCTSPlayer(
+        game,
+        args.checkpoint_folder,
+        args.checkpoint_file,
+        args.sims,
+        architecture=args.architecture,
+    )
 
     human_starts = args.human_first or not args.ai_first
     human_player = 1 if human_starts else -1
@@ -316,7 +327,9 @@ def main():
     print("Coordinates use lettered columns and numbered rows; the top-left corner is A1.")
 
     try:
-        if args.fixed_start:
+        if args.architecture == 'v3':
+            initial_board = game.getInitBoard()
+        elif args.fixed_start:
             initial_board = game.getInitBoard()
         else:
             opening_book, opening_book_path = load_opening_book(args.checkpoint_folder, args.opening_book)

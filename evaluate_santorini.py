@@ -7,7 +7,7 @@ import numpy as np
 
 from play_santorini import DEFAULT_CHECKPOINT_FOLDER, describe_action
 from santorini.SantoriniGame import SantoriniGame
-from santorini.pytorch.NNet import NNetWrapper
+from santorini.pytorch.NNet import build_nnet
 
 
 ROW_SPLIT_RE = re.compile(r"\s*[;/]\s*")
@@ -141,6 +141,7 @@ Board format:
     parser.add_argument("--board-size", type=int, default=5)
     parser.add_argument("--checkpoint-folder", default=DEFAULT_CHECKPOINT_FOLDER)
     parser.add_argument("--checkpoint-file", default="best.pth.tar")
+    parser.add_argument("--architecture", choices=["v2", "v3"], default="v2")
     parser.add_argument("--top-actions", type=int, default=0, help="Print the top N legal policy moves.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     return parser.parse_args()
@@ -159,8 +160,8 @@ def main():
         board = build_board(args)
         validate_board(board)
 
-        game = SantoriniGame(args.board_size)
-        nnet = NNetWrapper(game)
+        game = SantoriniGame(args.board_size, sequential_placement=args.architecture == 'v3')
+        nnet = build_nnet(game, args.architecture)
         nnet.load_checkpoint(args.checkpoint_folder, args.checkpoint_file)
 
         canonical_board = game.getCanonicalForm(board, args.player)

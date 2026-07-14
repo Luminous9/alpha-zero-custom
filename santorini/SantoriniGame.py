@@ -26,9 +26,14 @@ class SantoriniGame(Game):
     def getSquarePiece(piece):
         return SantoriniGame.square_content[piece]
 
-    def __init__(self, board_length=5, true_random_placement=False):
+    STANDARD_LOCAL_ACTIONS = 64
+    PLACEMENT_LOCAL_ACTION = 64
+
+    def __init__(self, board_length=5, true_random_placement=False, sequential_placement=False):
         self.n = board_length
         self.true_random_placement = true_random_placement
+        self.sequential_placement = bool(sequential_placement)
+        self.local_action_size = 65 if self.sequential_placement else 64
         self._directions_array = np.array(self.__directions, dtype=np.int8)
         self._action_origin_x = np.zeros(self.getActionSize(), dtype=np.int8)
         self._action_origin_y = np.zeros(self.getActionSize(), dtype=np.int8)
@@ -59,10 +64,14 @@ class SantoriniGame(Game):
         
     def _init_action_tables(self):
         for action in range(self.getActionSize()):
-            origin = action // 64
+            origin = action // self.local_action_size
             origin_x = origin // self.n
             origin_y = origin % self.n
-            local_action = action % 64
+            local_action = action % self.local_action_size
+            if local_action == self.PLACEMENT_LOCAL_ACTION:
+                self._action_origin_x[action] = origin_x
+                self._action_origin_y[action] = origin_y
+                continue
             move_direction = local_action // 8
             build_direction = local_action % 8
             move_dx, move_dy = self.__directions[move_direction]
@@ -116,8 +125,8 @@ class SantoriniGame(Game):
                 for x in range(self.n):
                     for y in range(self.n):
                         new_x, new_y = self._transform_square(x, y, rotations, flip)
-                        origin_offset = (x * self.n + y) * 64
-                        new_origin_offset = (new_x * self.n + new_y) * 64
+                        origin_offset = (x * self.n + y) * self.local_action_size
+                        new_origin_offset = (new_x * self.n + new_y) * self.local_action_size
 
                         for move_direction in range(8):
                             for build_direction in range(8):
@@ -129,12 +138,19 @@ class SantoriniGame(Game):
                                 )
                                 new_indices[old_action] = new_action
 
+                        if self.sequential_placement:
+                            new_indices[origin_offset + self.PLACEMENT_LOCAL_ACTION] = (
+                                new_origin_offset + self.PLACEMENT_LOCAL_ACTION
+                            )
+
                 permutations[(rotations, flip)] = (old_indices, new_indices)
 
         return permutations
 
     def getInitBoard(self):
         # return initial board (numpy board)
+        if self.sequential_placement:
+            return np.zeros((2, self.n, self.n), dtype=int)
         b = Board(self.n, true_random_placement=self.true_random_placement)
         return np.array(b.pieces)
 
@@ -145,19 +161,33 @@ class SantoriniGame(Game):
 
     def getActionSize(self):
         # return number of actions
-        return self.n * self.n * 64
+        return self.n * self.n * self.local_action_size
 
     def getActionFromOrigin(self, origin, move_direction, build_direction):
         x, y = origin
-        return (x * self.n + y) * 64 + move_direction * 8 + build_direction
+        return (x * self.n + y) * self.local_action_size + move_direction * 8 + build_direction
+
+    def getPlacementAction(self, location):
+        if not self.sequential_placement:
+            raise ValueError("Placement actions require sequential_placement=True.")
+        x, y = location
+        return (x * self.n + y) * self.local_action_size + self.PLACEMENT_LOCAL_ACTION
+
+    def isPlacementAction(self, action):
+        return self.sequential_placement and int(action) % self.local_action_size == self.PLACEMENT_LOCAL_ACTION
+
+    def isPlacementPhase(self, board):
+        return self.sequential_placement and int(np.count_nonzero(board[0])) < 4
 
     def decodeAction(self, action):
         action = int(action)
+        if self.isPlacementAction(action):
+            raise ValueError("Placement actions do not have move/build directions.")
         origin = (
             int(self._action_origin_x[action]),
             int(self._action_origin_y[action]),
         )
-        local_action = action % 64
+        local_action = action % self.local_action_size
         return origin, local_action // 8, local_action % 8
 
     def getNextState(self, board, player, action):
@@ -165,6 +195,28 @@ class SantoriniGame(Game):
         # action must be a valid move
 
         action = int(action)
+        if self.isPlacementPhase(board):
+            if not self.isPlacementAction(action):
+                raise ValueError("Only placement actions are valid during worker placement.")
+            location = (
+                int(self._action_origin_x[action]),
+                int(self._action_origin_y[action]),
+            )
+            if board[0][location] != 0:
+                raise ValueError("Cannot place a worker on an occupied square.")
+
+            next_board = board.copy()
+            worker_count = len(self.getCharacterLocations(next_board, player))
+            if worker_count >= 2:
+                raise ValueError("The current player has already placed both workers.")
+            next_board[0][location] = player * (worker_count + 1)
+            if worker_count == 1:
+                self._normalize_worker_labels(next_board, player)
+                return next_board, -player
+            return next_board, player
+
+        if self.isPlacementAction(action):
+            raise ValueError("Placement actions are invalid after setup is complete.")
         current = (
             int(self._action_origin_x[action]),
             int(self._action_origin_y[action]),
@@ -192,6 +244,9 @@ class SantoriniGame(Game):
         return self._get_valid_moves_fast(board, player)
 
     def getGameEndedAndValidMoves(self, board, player):
+        if self.isPlacementPhase(board):
+            return 0, self._get_valid_placement_moves(board)
+
         player_pieces = self.getCharacterLocations(board, player)
         opponent_pieces = self.getCharacterLocations(board, -1 * player)
 
@@ -209,6 +264,9 @@ class SantoriniGame(Game):
         return 0, valids
 
     def _get_valid_moves_fast(self, board, player, player_pieces=None):
+        if self.isPlacementPhase(board):
+            return self._get_valid_placement_moves(board)
+
         pieces = board[0]
         heights = board[1]
         valids = np.zeros(self.getActionSize(), dtype=np.int8)
@@ -217,7 +275,7 @@ class SantoriniGame(Game):
         for worker in player_pieces:
             x, y = worker
             origin_height = heights[x, y]
-            action_offset = (x * self.n + y) * 64
+            action_offset = (x * self.n + y) * self.local_action_size
 
             move_x = self._local_action_move_x[x, y]
             move_y = self._local_action_move_y[x, y]
@@ -252,6 +310,18 @@ class SantoriniGame(Game):
 
         return valids
 
+    def _get_valid_placement_moves(self, board):
+        valids = np.zeros(self.getActionSize(), dtype=np.int8)
+        for x, y in np.argwhere(board[0] == 0):
+            valids[self.getPlacementAction((int(x), int(y)))] = 1
+        return valids
+
+    @staticmethod
+    def _normalize_worker_labels(board, player):
+        locations = sorted(map(tuple, np.argwhere(board[0] * player > 0)))
+        for label, location in enumerate(locations, start=1):
+            board[0][location] = player * label
+
     def _is_on_board(self, x, y):
         return 0 <= x < self.n and 0 <= y < self.n
 
@@ -268,16 +338,12 @@ class SantoriniGame(Game):
         """
         Returns a list of both character's locations as tuples for the player
         """
-        color = player
-    
-        # Get all the squares with pieces of the given color.
-        char1_location = np.where(board[0] == 1*color)
-        char1_location = (char1_location[0][0], char1_location[1][0])
-
-        char2_location = np.where(board[0] == 2*color)
-        char2_location = (char2_location[0][0], char2_location[1][0])
-        
-        return [char1_location, char2_location]
+        locations = []
+        for label in (1, 2):
+            rows, cols = np.where(board[0] == label * player)
+            if len(rows):
+                locations.append((int(rows[0]), int(cols[0])))
+        return locations
 
     def getGameEnded(self, board, player):
         """

@@ -1,330 +1,324 @@
-# Engineering Plan: Santorini AI Architecture V3
+# Santorini AI V3 Architecture and Training Design
 
-Our current V2 model is intentionally small: 5 residual blocks and 64 filters. That has been a good fit for fast MCTS, but the V2 representation may now be strong enough that the network itself is becoming a limiting factor. V3 is an experiment to test a middleweight model: larger tactical capacity, but still small enough to keep self-play practical.
+This document is the authoritative specification for Santorini AI V3. It replaces the original V3 draft and the subsequent architecture revision.
 
-The first V3 candidate will be:
+V3 is a clean training line. It is not compatible with checkpoints or replay buffers produced by the earlier, 1,600-action V3 experiment. V2 remains supported for evaluation and reference generation, but V3 training begins from random weights and learns worker placement and standard play together.
 
-- **8 residual blocks**
-- **96 filters**
-- **Same V2 game representation:** anonymous 6-plane input and 1,600-action physical-origin policy
-- **Pure supervised bootstrap:** no network surgery for the first attempt
+## Goals
 
-This should be treated as an empirical strength-per-time experiment, not an automatic migration. V2 remains the production architecture unless V3 earns promotion in controlled evaluation.
+V3 is designed to:
 
-## Architectural Math
+1. Increase evaluator capacity without making self-play prohibitively expensive.
+2. Learn all four opening placements organically from the empty board.
+3. Train continuously without promotion-gating every update through an arena.
+4. Preserve enough state to resume a long Kaggle run exactly, including Adam optimizer state.
+5. Replace promotion gating with useful, non-gating telemetry and periodic strength measurements.
+6. Keep replay files and committed Kaggle outputs within practical disk limits.
 
-The rough scaling estimate is:
+## Network Architecture
 
-- **Depth penalty:** 8 blocks vs 5 blocks = **$1.6\times$**
-- **Width penalty:** $(96 / 64)^2 = 1.5^2 =$ **$2.25\times$**
+V3 uses a shared residual tower with separate policy and value heads.
 
-Combined, the residual tower is expected to cost about **$3.6\times$** more convolution work than the current 5x64 model. Actual wall-clock MCTS cost must be measured, because the full turn cost also includes CPU move generation, tree traversal, valid-move masking, batching efficiency, and GPU launch overhead.
+| Component | V3 configuration |
+| --- | --- |
+| Board size | `5 x 5` |
+| Input planes | 6 anonymous, canonical planes |
+| Residual blocks | 8 |
+| Tower channels | 96 |
+| Policy channels | 65 |
+| Policy actions | 1,625 |
+| Value hidden size | 128 |
 
-Current parameter counts:
+The six input planes encode:
 
-- **5x64 V2:** about **381k** parameters
-- **8x96 V3 candidate:** about **1.35M** parameters, about **3.5x** V2
-- **10x128 larger alternative:** about **2.97M** parameters, about **7.8x** V2
+1. Current player's workers
+2. Opponent's workers
+3. Height 1 squares
+4. Height 2 squares
+5. Height 3 squares
+6. Domes, represented by height 4 or greater
 
-So 8x96 is large enough to be a meaningful test while staying far below the 10x128 jump.
+Boards are canonicalized to the player who is about to act. The representation therefore does not require separate identities for player one and player two.
 
----
+The 8-block, 96-channel tower has approximately 1.35 million parameters. It is materially larger than V2's 5-block, 64-channel tower while remaining small enough for batched P100 self-play.
 
-## Phase 0: Throughput And Batch-Size Calibration
+## Unified Action Encoding
 
-Before relying on theoretical speed ratios, benchmark the actual hardware target, especially Kaggle/Colab GPU behavior.
+V3 extends the spatial V2 policy from 64 to 65 local actions per square:
 
-Measure:
-
-1. **Raw neural inference throughput**
-   - Compare 5x64 and 8x96 using `predict_batch`.
-   - Test batch sizes such as `1, 8, 16, 32, 64, 128, 256`.
-   - Record latency per batch, positions/sec, and approximate GPU memory use.
-
-2. **Full MCTS throughput**
-   - Compare completed simulations/sec from representative midgame positions.
-   - Test both unbatched MCTS and batched self-play style leaf evaluation.
-   - This is the number that matters for time-odds arena matches.
-
-3. **Training throughput**
-   - Test supervised training epoch time at batch sizes such as `64, 128, 256, 512`.
-   - Pick the largest batch size that is stable, keeps GPU utilization healthy, and does not degrade validation behavior.
-
-Practical batch-size tuning rule:
-
-- Use **training batch size** to maximize stable supervised learning throughput.
-- Use **self-play batch size** to improve GPU occupancy during MCTS leaf evaluation.
-- Use **arena batch size** to speed deterministic checkpoint-vs-checkpoint evaluation.
-- Prefer powers of two as the first sweep values, but choose based on measured throughput rather than the power-of-two rule alone.
-- If GPU utilization is low, increase self-play or arena batch size.
-- If game throughput stops improving, CPU move generation/tree work has likely become the bottleneck.
-- If memory pressure appears, step down one batch level.
-
-Initial tooling:
-
-```bash
-.venv/bin/python benchmark_santorini_phase0.py \
-  --device auto \
-  --architectures v2,v3 \
-  --modes inference,mcts,training \
-  --json-out temp/santorini_phase0_benchmark.json
+```text
+action = (x * 5 + y) * 65 + local_action
 ```
 
-For a faster smoke run:
+The local action has the following meaning:
 
-```bash
-.venv/bin/python benchmark_santorini_phase0.py \
-  --device auto \
-  --architectures v2,v3 \
-  --inference-batch-sizes 1,8,32 \
-  --mcts-batch-sizes 1,8 \
-  --training-batch-sizes 64,128 \
-  --timed-batches 10 \
-  --mcts-sims 16 \
-  --mcts-repeats 1 \
-  --timed-steps 5
+- `0..63`: one of the 8 move directions combined with one of the 8 build directions
+- `64`: place a worker on `(x, y)`
+
+This produces:
+
+```text
+25 squares * 65 local actions = 1,625 actions
 ```
 
-P100 benchmark result:
+The neural network always emits the same 1,625-value policy. The game-provided legal-action mask determines which portion of that policy is meaningful in the current phase.
 
-- Hardware: **Tesla P100-PCIE-16GB**
-- Raw inference speed penalty for V3 vs V2: about **1.2x to 1.7x**, depending on batch size.
-- Batched MCTS speed penalty for V3 vs V2: about **1.1x to 1.2x** over tested batch sizes.
-- Training speed penalty for V3 vs V2: about **1.4x to 3.0x**, with the penalty increasing at larger batch sizes.
-- GPU memory is not a concern for either architecture in these microbenchmarks.
+### Placement phase
 
-Best measured settings from `santorini/benchmark.json`:
+A full game starts from an empty board and decomposes setup into four micro-actions:
 
-- **Inference:** throughput keeps improving through batch `256` for both V2 and V3.
-- **Training:** throughput is best at batch `512` for both models, though V3 gains only modestly from `256` to `512`.
+1. Player 1 places their first worker: 25 legal squares.
+2. Player 1 places their second worker: 24 legal squares.
+3. Player 2 places their first worker: 23 legal squares.
+4. Player 2 places their second worker: 22 legal squares.
 
-Follow-up MCTS sweep from `santorini/benchmark2.json`:
+During these plies, all move/build actions are illegal. Only channel 64 on an empty square is legal. Control remains with the same player between that player's first and second placements; MCTS value backup changes sign only when control actually changes.
 
-- Tested MCTS batch sizes: `64, 96, 128, 192`.
-- Best V2 result: batch `192`, about **5,371 sims/sec**.
-- Best V3 result: batch `192`, about **4,967 sims/sec**.
-- V3 was about **1.08x** slower than V2 at batch `192`.
-- There is visible run-to-run noise, especially at batch `64`, so use the broad trend rather than a single row.
+### Standard phase
 
-Local M1 CPU benchmark from `santorini/benchmark_m1_cpu.json`:
+After four workers have been placed, channel 64 is permanently illegal. Legal actions are the normal move/build combinations originating from one of the current player's workers.
 
-- Raw inference speed penalty for V3 vs V2: about **1.8x to 2.3x**.
-- MCTS speed penalty for V3 vs V2: about **1.7x to 2.0x**.
-- Best tested local MCTS throughput:
-  - V2: batch `32`, about **2,727 sims/sec**.
-  - V3: batch `32`, about **1,383 sims/sec**.
-- Single-game interactive speed is still comfortable:
-  - V2 batch `1`: about **647 sims/sec**, so 64 sims is about **0.10s/turn**.
-  - V3 batch `1`: about **377 sims/sec**, so 64 sims is about **0.17s/turn**.
+### Symmetry
 
-Implications:
+Board transformations also transform the spatial action origin. This applies to both move/build actions and placement actions, allowing placement examples to use the same geometric augmentation as standard positions.
 
-- The old **3.6x equal-time penalty** is too pessimistic for batched MCTS on the P100.
-- For evaluation, start with **equal sims**, then try a measured time-odds approximation around **V2 64 sims vs V3 59 sims** when using large-batch play, because V3 is about **1.08x** slower than V2 at MCTS batch `192`.
-- For self-play and arena batching, use at least batch `64` on this hardware. Prefer batch `192` when enough parallel games are available to keep it fed; otherwise use the largest batch the run can naturally fill.
-- For local CPU-only play, use smaller expectations: V3 is closer to **2x** slower than V2, but still fast enough for interactive 64-sim games.
-- For supervised V3 bootstrap, start with training batch `512`; a follow-up sweep at `768, 1024, 1536` may be worthwhile before the long run.
+## Training From Scratch
 
----
+The production V3 run starts from random weights. V2 weights, V2 replay data, and the earlier V3 bootstrap are not training inputs.
 
-## Phase 1: Codebase Updates
+Every self-play game begins at the empty board. The resulting replay therefore contains examples from:
 
-V3 should be implemented as a parallel architecture, not as a hard replacement for V2.
+- all four placement plies;
+- early standard play;
+- midgame positions; and
+- late tactical positions.
 
-1. **Add a selectable 8x96 architecture**
-   - Keep the existing V2 `NNetWrapper` behavior at 5x64.
-   - Add a V3 wrapper/config path that uses `num_residual_blocks=8` and `num_channels=96`.
-   - Make `pit_santorini.py` able to load both V2 and V3 checkpoints in the same process for direct comparison.
+The policy target is the MCTS visit distribution. The value target is the final game outcome from the acting player's perspective.
 
-2. **Keep checkpoint compatibility explicit**
-   - A V2 checkpoint should load only into the V2 wrapper.
-   - A V3 checkpoint should load only into the V3 wrapper.
-   - Evaluation commands should make architecture choice visible in logs and JSON output.
+### Exploration
 
-3. **Add benchmark tooling**
-   - Create a small benchmark script for inference throughput and MCTS simulations/sec.
-   - Use the measured speed ratio later when choosing fixed-sim and time-odds evaluation settings.
+Placement and standard play use related but distinct temperature rules:
 
-Implementation status:
+- All four placement plies use `placementTemperature`, which defaults to `1.0`.
+- Standard moves use temperature `1` until `tempThreshold`, counted from the first standard move, and temperature `0` afterward.
+- Root Dirichlet noise is enabled by default in V3 latest-training mode.
+- The default Dirichlet parameters are alpha `0.30` and epsilon `0.25`.
 
-- `santorini.pytorch.NNet` now exposes V2 and V3 wrappers through `build_nnet(game, architecture)`.
-- V2 remains the default `NNetWrapper`; V3 uses `V3NNetWrapper` with 8 residual blocks and 96 channels.
-- New checkpoints save architecture metadata so V2/V3 mismatches fail clearly.
-- `main_santorini.py` accepts `--architecture v2|v3`.
-- `pit_santorini.py` accepts `--architecture v1|v2|v3` and `--opponent-architecture v1|v2|v3`.
+Temperature samples from the MCTS visit distribution; it does not enforce a fixed percentage of deliberately bad moves. Dirichlet noise supplies additional root exploration, while the legal-action mask prevents invalid placement or move/build actions.
 
----
+## Continuous Latest Training
 
-## Phase 2: Offline Bootstrapping (Pure Distillation)
+V3 defaults to `latest` training mode instead of arena-gated promotion:
 
-We will bypass the slow, erratic random-weights phase by training the fresh 8x96 model on the best available V2 replay buffer.
+1. Generate self-play with the current network.
+2. Append the new examples to the replay history.
+3. Train on the retained replay window.
+4. Immediately make the trained network the latest network.
+5. Save resumable state and telemetry.
+6. Begin the next iteration.
 
-Dataset choice should be explicit. At the time this draft was written, `./temp/santorini_kaggle_training6_v2/latest.examples` was the safer known-good dataset. If a newer run produces stronger examples, use that instead. Do not blindly use the newest buffer if the run went in a bad strategic direction.
+There is no accept/reject match in this loop. A temporarily weaker update is not automatically rolled back. Telemetry and milestones reveal regressions, but they do not prove that every gradient update improves playing strength.
 
-For the first V3 bootstrap run, use the known-good `training6_v2/latest.examples` dataset rather than `training7`.
+V2 and legacy workflows can still select `arena` mode. V3 uses `latest` by default.
 
-Create a new supervised bootstrap script with:
+## Replay Buffer
 
-1. **Master dataset input**
-   - Load a selected `.examples` replay buffer.
-   - Accept the dataset path as a CLI argument.
+Latest mode stores replay history in `latest.examples.npz` using a compact sparse-policy format:
 
-2. **Fresh V3 initialization**
-   - Instantiate the 8x96 model from random weights.
-   - Do not use V2 network surgery for the first attempt.
+- boards: `int8` arrays;
+- values: `float32`;
+- policy: nonzero indices and probabilities;
+- history-window lengths: retained so iteration boundaries can be reconstructed;
+- action size and format version: stored for validation.
 
-3. **Train/validation split**
-   - Use a deterministic 90% / 10% split.
-   - Track policy cross-entropy, value MSE, and total validation loss.
+The default full preset retains 20 iterations and caps each iteration queue at 200,000 examples. Compact replay avoids storing a dense 1,625-value vector for every example on disk.
 
-4. **Checkpointing**
-   - Save the best checkpoint by validation loss.
-   - Also save final training metadata: dataset path, seed, architecture, epochs, batch size, validation losses, and timestamp.
+Replay writes are non-atomic by default to avoid temporarily requiring space for both the old and new archive. Atomic saving remains available when additional disk space is acceptable.
 
-5. **Stop condition**
-   - Train up to roughly **10 to 15 epochs** initially.
-   - Stop early if validation loss flatlines or worsens for a configured patience window.
-   - If validation loss improves but arena strength does not, treat that as evidence that imitation quality is not enough and self-play continuation is required.
+## Checkpoints and Exact Resume
 
-Implementation status:
+Latest mode writes two current checkpoints:
 
-- `bootstrap_santorini_v3.py` performs supervised V3 bootstrapping from a `.examples` replay buffer.
-- It defaults to `temp/santorini_kaggle_training6_v2/latest.examples`.
-- It creates a deterministic train/validation split, saves the best checkpoint by validation loss, saves a final checkpoint, and writes `bootstrap_metadata.json`.
-- It supports `--max-examples` for smoke runs and `--cpu` for local testing.
-- `santorini/bootstrap_v3_kaggle.ipynb` provides the Kaggle workflow for the first V3 bootstrap run.
+- `latest-training.pth.tar`: model weights, optimizer state, architecture metadata, iteration metadata, and random-number-generator state needed for training resume.
+- `latest.pth.tar`: weight-only checkpoint for inference or evaluation.
 
-Recommended Kaggle command:
+Milestone weight checkpoints use `checkpoint_<iteration>.pth.tar`.
 
-```bash
-.venv/bin/python bootstrap_santorini_v3.py \
-  --examples-file /kaggle/input/<dataset-containing-training6-v2>/latest.examples \
-  --output-folder /kaggle/working/Santorini-AZ/v3_bootstrap \
-  --architecture v3 \
-  --epochs 15 \
-  --batch-size 512 \
-  --validation-fraction 0.10 \
-  --patience 3 \
-  --seed 7 \
-  --quiet
-```
+Preserving the optimizer means restoring Adam's accumulated first- and second-moment estimates along with the weights. Loading only model weights would reset those estimates and change the effective optimization trajectory after every Kaggle session. A proper resume therefore loads both `latest-training.pth.tar` and `latest.examples.npz` with optimizer loading enabled.
 
-First Kaggle bootstrap result:
+The saved iteration number is restored so iteration numbering, milestone scheduling, and telemetry continue rather than restarting at one.
 
-- Dataset: `training6_v2/latest.examples`
-- Train examples: **359,431**
-- Validation examples: **39,937**
-- Architecture: V3, 8 residual blocks, 96 channels
-- Hardware: CUDA on Kaggle P100
-- Batch size: `512`
-- Early stopping: stopped after epoch 9 because validation loss did not improve for 3 epochs
-- Best checkpoint: **epoch 6**
-- Best validation total loss: **2.8370**
-- Best validation policy loss: **2.0447**
-- Best validation value loss: **0.7924**
-- Output checkpoint copied locally to `temp/santorini_v3_bootstrap_result/best.pth.tar`
+## Telemetry
 
-Training/validation curve summary:
+Telemetry is written after every completed training iteration to:
 
-- Validation total loss improved quickly from **3.7115** at epoch 1 to **2.8370** at epoch 6.
-- Training loss kept falling through epoch 9, while validation loss drifted upward after epoch 6.
-- This is a clean early-stopping shape: the model learned the replay distribution, then began to overfit.
-- Local load smoke passed: the checkpoint reports architecture `v3`, predicts a `(1600,)` policy, and plays a tiny pit through `pit_santorini.py`.
+- TensorBoard event files under the configured telemetry directory; and
+- `telemetry.jsonl`, with one machine-readable record per iteration.
 
-Local smoke command:
+The training notebook launches TensorBoard so metrics can be viewed while the run is active.
+
+### Training and game metrics
+
+The run records available training losses and operational measurements, including:
+
+- policy loss, value loss, and total loss;
+- iteration duration and replay example count;
+- games completed;
+- average total game length;
+- average, median, and percentile standard-play length, excluding placement plies; and
+- first-player win rate.
+
+### Placement metrics
+
+For each of the four placement plies, telemetry records:
+
+- normalized selection entropy;
+- maximum single-square frequency; and
+- a TensorBoard `5 x 5` placement heatmap.
+
+It also records the number of unique completed openings seen during the iteration. These metrics help detect premature opening collapse and visualize learned setup preferences.
+
+### Raw-policy metrics
+
+On a sample of replay boards, V3 records metrics separately for placement and standard positions:
+
+- probability mass assigned to legal actions; and
+- normalized entropy over legal actions.
+
+Entropy should be interpreted diagnostically rather than as a score that must always decrease. Some positions are genuinely ambiguous, and an abrupt change matters more than a universally monotonic trend.
+
+### Milestone matches
+
+Every 10 iterations by default, V3 saves a milestone checkpoint. Once both endpoints exist, it plays a non-gating match between the current checkpoint and the checkpoint 10 iterations earlier.
+
+The result includes wins, draws, decisive-game win rate, and a 95% Wilson confidence interval. The match never accepts, rejects, or rolls back a model. With a fresh run, iteration 10 creates the first milestone and iteration 20 produces the first 10-iteration comparison.
+
+## V2 Reference-Search Suite
+
+The optional reference suite measures whether V3 is approaching or diverging from stable, high-budget V2 search targets. It is evaluation-only and does not compromise training from scratch.
+
+The default suite contains 500 distinct V2 replay positions:
+
+- 150 early positions;
+- 200 midgame positions; and
+- 150 late positions.
+
+Each position is labeled by the best V2 checkpoint using 1,600 MCTS simulations. The saved target includes the complete visit policy and the search-derived root value. These are strong, reproducible reference targets, not mathematically proven optimal moves or exact game-theoretic values.
+
+The builder is CPU-parallel and reports loading, selection, per-position progress, throughput, elapsed time, and ETA:
 
 ```bash
-.venv/bin/python bootstrap_santorini_v3.py \
-  --examples-file temp/santorini_kaggle_training6_v2/latest.examples \
-  --output-folder temp/santorini_v3_bootstrap_smoke \
-  --architecture v3 \
-  --epochs 1 \
-  --batch-size 32 \
-  --max-examples 256 \
-  --cpu \
-  --quiet
+.venv/bin/python -u build_santorini_reference_suite.py \
+  --checkpoint-folder ./temp/santorini_bootstrap_result \
+  --checkpoint-file best.pth.tar \
+  --examples-file ./temp/santorini_kaggle_training6/merged_20.examples \
+  --output ./santorini/reference_suites/v2_reference_500.npz \
+  --mcts-sims 1600 \
+  --workers 4 \
+  --threads-per-worker 1
 ```
 
----
+Four workers is the conservative default for an M1 MacBook Pro. Worker count can be increased after measuring throughput and memory use.
 
-## Phase 3: Fixed-Sim Evaluation
+When attached with `--reference-suite`, iteration telemetry records:
 
-Before using clock-based evaluation, run same-search matches to isolate evaluator strength.
+- policy cross-entropy against the V2 visit distribution;
+- policy KL divergence;
+- top-1 agreement;
+- value MSE;
+- legal policy mass; and
+- normalized legal-action entropy.
 
-1. **Matchup**
-   - Current best 5x64 V2 checkpoint vs bootstrapped 8x96 V3 checkpoint.
+For V3 comparison, its 65th placement channel is removed from standard-position policies before comparing them with the V2 1,600-action target.
 
-2. **Search settings**
-   - Use the same number of MCTS simulations for both sides, such as 64 and 128.
-   - Use paired openings from the opening book where possible.
-   - Keep deterministic play with action temperature 0.
+Five hundred positions are sufficient for routine trend monitoring. A larger suite can reduce sampling noise but increases both labeling cost and per-iteration evaluation time.
 
-3. **Interpretation**
-   - If V3 loses badly at equal sims, the larger network has not learned a better evaluator yet.
-   - If V3 wins at equal sims, it is a promising candidate for time-odds testing.
-   - If results are close, continue with self-play or a better distillation dataset before promotion.
+## V2 Compatibility
 
-First fixed-sim evaluation results:
+V2 retains its 1,600-action policy, 5-block/64-channel network, and existing post-placement workflows. Checkpoints contain architecture metadata, and incompatible architectures fail explicitly rather than partially loading.
 
-- Assumption: records are listed as **V3 wins - V2 wins**.
-- 100 games at 128 sims using the `santorini_bootstrap_result` opening book: **37-63**.
-- 200 games at 128 sims using `bootstrap_arena_suite`: **82-118**.
-- Combined fixed-sim result: **119-181** across 300 games, or **39.7%** for V3.
+Direct V2/V3 evaluation is naturally performed from a completed placement position because V2 cannot select the four V3 placement micro-actions. Full-game V3 self-play does not use an opening book or opening sampler.
 
-Interpretation:
+The 1,625-action V3 format intentionally supersedes the earlier 1,600-action V3 experiment. Old V3 checkpoints and replay buffers must not be loaded into this architecture.
 
-- The bootstrapped V3 checkpoint is clearly weaker than the V2 opponent at equal 128-sim search.
-- Do not advance this checkpoint to time-odds promotion testing as-is.
-- This result does not disprove the 8x96 architecture; it says pure supervised bootstrap from `training6_v2/latest.examples` did not produce a stronger evaluator.
-- Next useful tests are either self-play continuation from the V3 bootstrap or a stronger/distinct distillation target.
+## Kaggle Training Workflow
 
----
+The maintained entry point is `santorini/training_kaggle.ipynb`.
 
-## Phase 4: Time-Odds Arena Validation
+The baseline long-run configuration is:
 
-The key production question is not just whether V3 is smarter per node. It is whether V3 is stronger per unit wall-clock time.
+| Setting | Value |
+| --- | ---: |
+| Architecture | V3 |
+| Training mode | latest |
+| Iterations per notebook chunk | 10 |
+| Self-play games per iteration | 80 |
+| MCTS simulations | 64 |
+| Self-play batch size | 128 |
+| Training epochs | 3 |
+| Training batch size | 512 |
+| Replay history | 20 iterations |
+| Milestone interval | 10 iterations |
+| Placement temperature | 1.0 |
+| Dirichlet alpha / epsilon | 0.30 / 0.25 |
 
-1. **Time-control support**
-   - Add clock-limited play to `pit_santorini.py` or a dedicated evaluation script.
-   - Example target: **1 second of compute per turn**.
-   - Record actual simulations completed per turn for each model.
+These values are an initial operating point, not immutable architecture constants. Throughput, strength telemetry, and run stability should guide later tuning.
 
-2. **Measured odds**
-   - Do not assume V2 gets exactly 3.6x more simulations.
-   - Use the benchmarked or observed simulations/sec ratio.
-   - Optionally run a fixed-sim approximation first, such as V2 at `N` sims vs V3 at `N / measured_ratio` sims.
+### Fresh run inputs
 
-3. **Match design**
-   - Use paired openings and balanced seats.
-   - Start with 100 games as a smoke test.
-   - Use 200 to 400 games before calling a small edge real.
+A fresh run requires only the repository and a Kaggle GPU. Leave the resume source empty. The reference suite is optional; attach it as a Kaggle Dataset and configure its path if reference metrics are desired.
 
-4. **Promotion bar**
-   - A 55-45 result over 100 games is encouraging but not definitive.
-   - V3 should beat V2 under equal-time conditions before becoming the default production architecture.
-   - If V3 wins equal sims but loses equal time, it may still be useful for analysis or high-time-control play, but not normal self-play.
+### Resume inputs
 
----
+A resumed run needs the previous export containing at least:
 
-## Phase 5: Self-Play Continuation
+- `latest-training.pth.tar`;
+- `latest.examples.npz`; and
+- retained telemetry and milestone files.
 
-If the bootstrapped V3 model passes the evaluation gates, resume AlphaZero training from the V3 checkpoint.
+The notebook copies attached read-only inputs into writable scratch space before training.
 
-Recommended initial continuation:
+### Disk layout
 
-- Use the best V3 bootstrapped checkpoint as `best.pth.tar`.
-- Load the selected replay examples only if intentionally continuing from that distribution.
-- Prefer fresh V3 self-play soon after bootstrap so the larger network can move beyond imitation.
-- Use the default `main_santorini.py` opening sampler, which now draws self-play and paired arena starts uniformly from the **9,664 symmetry-unique worker placements** instead of from the value-filtered opening book.
-- Re-benchmark self-play batch size after switching to V3.
-- Keep V2 checkpoints and opening books available for regression matches.
+Kaggle storage is split deliberately:
 
-Promotion should be based on repeated arena evidence, not on validation loss alone.
+- `/kaggle/tmp/`: repository checkout, active training state, caches, transient checkpoints, and other large scratch files. This space is not retained with the notebook version.
+- `/kaggle/working/`: only the compact export that must survive a notebook commit. Notebook outputs saved here count against Kaggle's 5 GB saved-output limit.
 
-Opening-sampling update:
+The export step must be run after each training chunk. A later Kaggle session attaches that export as an input Dataset and resumes from it.
 
-- Training now defaults to `--opening-source unique`.
-- `unique` samples all 9,664 symmetry-unique initial worker placements, then optionally applies random orientation.
-- Arena comparisons still use paired openings: the same sampled opening board is used once with each model as first player.
-- The old book-based training sampler remains available with `--opening-source book`, or by passing `--opening-book` / `--arena-opening-suite` explicitly.
-- `--opening-source game` or the deprecated `--no-opening-book` flag uses `SantoriniGame.getInitBoard()`.
+## Performance Baseline
+
+Existing benchmark artifacts provide the initial hardware expectations:
+
+- On a Kaggle P100, V3 batched MCTS was approximately 1.08 times slower than V2 at batch size 192 in the measured sweep.
+- Training throughput was best at batch size 512 among the tested values.
+- On the tested M1 CPU, V3 MCTS was approximately 1.7 to 2.0 times slower than V2, but remained fast enough for interactive 64-simulation play.
+
+The benchmark JSON files are retained as evidence rather than treating theoretical convolution counts as wall-clock predictions.
+
+## Implemented Validation
+
+Before the initial V3 training run, the implementation passed:
+
+- the complete Santorini test suite;
+- fresh empty-board V3 self-play and training smoke tests;
+- compact replay round trips;
+- model, optimizer, replay, and iteration resume tests;
+- turn-aware MCTS tests for placement micro-actions;
+- V2 and V3 benchmark smoke tests;
+- a complete V3 game against the greedy player; and
+- Kaggle notebook JSON validation.
+
+## Deferred Work
+
+The following ideas are intentionally not part of the current implementation:
+
+- Apple MPS acceleration for the reference-suite builder;
+- promotion gating or automatic rollback based on telemetry;
+- an exact solved-position puzzle suite;
+- a permanent old-data anchor buffer;
+- automatic learning-rate reduction after a detected regression; and
+- claiming that lower loss or lower entropy alone proves greater playing strength.
+
+These can be added when telemetry from the first clean V3 run provides evidence that they are needed.
