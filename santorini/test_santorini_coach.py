@@ -55,6 +55,30 @@ class BatchCountingNNet:
         return policies, values
 
 
+class RecordingTinyGame(TinyGame):
+    def __init__(self):
+        self.actions = []
+
+    def getNextState(self, board, player, action):
+        self.actions.append(int(action))
+        return super().getNextState(board, player, action)
+
+
+class SplitPolicyMCTS:
+    def __init__(self):
+        self.calls = []
+
+    def getActionProb(self, board, temp=1):
+        self.calls.append(('search', float(temp)))
+        return np.array([0.25, 0.75], dtype=np.float32)
+
+    def getActionProbFromTree(self, board, temp=1):
+        self.calls.append(('tree', float(temp)))
+        if float(temp) == 0.0:
+            return np.array([1.0, 0.0], dtype=np.float32)
+        return np.array([0.25, 0.75], dtype=np.float32)
+
+
 class FixedOpeningSampler:
     def __init__(self, board):
         self.board = board
@@ -69,6 +93,47 @@ class FixedOpeningSampler:
 
 
 class TestSantoriniCoachExamples(unittest.TestCase):
+    def test_validation_split_is_deterministic_and_keeps_duplicate_boards_together(self):
+        coach = object.__new__(Coach)
+        coach.args = dotdict({'validationFraction': 0.05})
+        examples = []
+        for index in range(1000):
+            board = np.zeros((2, 5, 5), dtype=np.int64)
+            value = index
+            for square in range(5):
+                board[1].flat[square] = value % 5
+                value //= 5
+            examples.append((board, np.array([1.0]), 1.0))
+        duplicate = examples[123]
+        examples.append(duplicate)
+
+        first_training, first_validation = coach._splitTrainingValidation(examples)
+        second_training, second_validation = coach._splitTrainingValidation(examples)
+
+        self.assertEqual(len(first_training), len(second_training))
+        self.assertEqual(len(first_validation), len(second_validation))
+        self.assertGreater(len(first_validation), 25)
+        self.assertLess(len(first_validation), 75)
+        duplicate_is_validation = coach._isValidationExample(duplicate)
+        duplicate_count = sum(example is duplicate for example in (
+            first_validation if duplicate_is_validation else first_training
+        ))
+        self.assertEqual(duplicate_count, 2)
+
+        labeled_board = np.zeros((2, 5, 5), dtype=np.int64)
+        labeled_board[0, 0, 1] = 1
+        labeled_board[0, 1, 2] = 2
+        labeled_board[1, 3, 4] = 2
+        rotated_board = np.rot90(labeled_board, 1, axes=(-2, -1)).copy()
+        swapped_board = labeled_board.copy()
+        swapped_board[0, labeled_board[0] == 1] = 2
+        swapped_board[0, labeled_board[0] == 2] = 1
+        base = (labeled_board, np.array([1.0]), 1.0)
+        rotated = (rotated_board, np.array([1.0]), 1.0)
+        swapped = (swapped_board, np.array([1.0]), 1.0)
+        self.assertEqual(coach._isValidationExample(base), coach._isValidationExample(rotated))
+        self.assertEqual(coach._isValidationExample(base), coach._isValidationExample(swapped))
+
     def test_on_the_fly_symmetry_stores_one_position_instead_of_eight(self):
         game = SantoriniGame(5, sequential_placement=True)
         policy = game.getValidMoves(game.getInitBoard(), 1).astype(np.float32)
@@ -242,6 +307,57 @@ class TestSantoriniCoachExamples(unittest.TestCase):
 
 
 class TestSantoriniCoachBatchedSelfPlay(unittest.TestCase):
+    def test_policy_target_remains_soft_when_action_selection_is_greedy(self):
+        game = RecordingTinyGame()
+        nnet = BatchCountingNNet(game)
+        args = dotdict({
+            'numMCTSSims': 2,
+            'cpuct': 1.0,
+            'tempThreshold': 1,
+            'policyTargetTemperature': 1.0,
+            'quiet': True,
+        })
+        coach = Coach(game, nnet, args)
+        split_mcts = SplitPolicyMCTS()
+        coach.mcts = split_mcts
+
+        examples = coach.executeEpisode()
+
+        self.assertEqual(game.actions, [0, 0])
+        self.assertEqual(
+            split_mcts.calls,
+            [('search', 1.0), ('tree', 0.0), ('search', 1.0), ('tree', 0.0)],
+        )
+        for _, policy, _ in examples:
+            np.testing.assert_allclose(policy, [0.25, 0.75])
+        self.assertEqual(coach._policy_target_stats['standard']['one_hot'], [False, False])
+
+    def test_unspecified_policy_target_temperature_preserves_legacy_coupling(self):
+        coach = object.__new__(Coach)
+        coach.args = dotdict({})
+
+        self.assertEqual(coach._policyTargetTemperature(0), 0)
+        self.assertEqual(coach._policyTargetTemperature(1), 1)
+
+    def test_batched_policy_outputs_are_split_after_one_search(self):
+        coach = object.__new__(Coach)
+        coach.args = dotdict({
+            'numMCTSSims': 0,
+            'policyTargetTemperature': 1.0,
+        })
+        split_mcts = SplitPolicyMCTS()
+        episodes = [{
+            'mcts': split_mcts,
+            'canonicalBoard': np.array([0], dtype=np.int64),
+            'temp': 0,
+        }]
+
+        training_policies, action_policies = coach._getBatchedSelfPlayPolicies(episodes)
+
+        self.assertEqual(split_mcts.calls, [('tree', 1.0), ('tree', 0.0)])
+        np.testing.assert_allclose(training_policies[0], [0.25, 0.75])
+        np.testing.assert_allclose(action_policies[0], [1.0, 0.0])
+
     def test_latest_telemetry_suites_are_fixed_distinct_and_reproducible(self):
         game = SantoriniGame(5, sequential_placement=True)
         args = dotdict({

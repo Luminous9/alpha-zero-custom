@@ -25,6 +25,11 @@ coloredlogs.install(level='INFO')
 
 DEFAULT_ARENA_OPENING_SUITE = './santorini/opening_suites/bootstrap_arena_suite.json'
 DEFAULT_OPENING_BOOK = './santorini/opening_books/bootstrap_result/opening_book.json'
+V3_DEFAULT_REPLAY_REUSE = 16.0
+V3_DEFAULT_VALIDATION_FRACTION = 0.05
+V3_DEFAULT_LEARNING_RATE = 3e-4
+V3_DEFAULT_WEIGHT_DECAY = 1e-4
+V3_DEFAULT_LR_SCHEDULE = [(200, 1e-4), (400, 3e-5)]
 
 PRESETS = {
     'full': {
@@ -62,6 +67,28 @@ PRESETS = {
         'batch_size': 64,
     },
 }
+
+
+def parse_lr_schedule(value):
+    if value is None:
+        return None
+    value = value.strip()
+    if not value or value.lower() in ('none', 'off'):
+        return []
+    schedule = []
+    try:
+        for item in value.split(','):
+            iteration, learning_rate = item.split(':', 1)
+            schedule.append((int(iteration), float(learning_rate)))
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            'Expected ITERATION:RATE pairs, for example 200:0.0001,400:0.00003.'
+        ) from exc
+    if any(iteration < 1 or learning_rate <= 0 for iteration, learning_rate in schedule):
+        raise argparse.ArgumentTypeError('Schedule iterations and learning rates must be positive.')
+    if [iteration for iteration, _ in schedule] != sorted({iteration for iteration, _ in schedule}):
+        raise argparse.ArgumentTypeError('Schedule iterations must be unique and increasing.')
+    return schedule
 
 
 def parse_args():
@@ -116,9 +143,30 @@ def parse_args():
         '--max-train-steps',
         type=int,
         help=(
-            'Cap optimizer steps per iteration after applying --epochs. '
-            'Small replay buffers still use fewer steps when their requested epochs finish first.'
+            'Safety cap on optimizer steps per iteration. V3 applies it after the '
+            'fresh-data replay-reuse calculation; V2 applies it after its epoch calculation.'
         ),
+    )
+    parser.add_argument(
+        '--replay-reuse',
+        type=float,
+        help=(
+            'Requested training draws per newly generated training position. '
+            'V3 defaults to 16; V2 retains epoch-based scheduling.'
+        ),
+    )
+    parser.add_argument(
+        '--validation-fraction',
+        type=float,
+        help='Deterministic held-out fraction of replay positions. V3 defaults to 0.05.',
+    )
+    parser.add_argument('--optimizer', choices=['adam', 'adamw'])
+    parser.add_argument('--learning-rate', type=float)
+    parser.add_argument('--weight-decay', type=float)
+    parser.add_argument(
+        '--lr-schedule',
+        type=parse_lr_schedule,
+        help='Absolute-iteration learning-rate changes as ITERATION:RATE pairs; use none to disable.',
     )
     parser.add_argument(
         '--symmetry-augmentation',
@@ -150,6 +198,14 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--quiet', action='store_true')
     parser.add_argument('--placement-temperature', type=float, default=1.0)
+    parser.add_argument(
+        '--policy-target-temperature',
+        type=float,
+        help=(
+            'Temperature applied to MCTS visits stored in replay, independently of action selection. '
+            'V3 defaults to 1.0; V2 defaults to its action temperature for backward compatibility.'
+        ),
+    )
     parser.add_argument('--dirichlet-alpha', type=float, default=0.30)
     parser.add_argument('--dirichlet-epsilon', type=float, default=0.25)
     parser.add_argument('--no-dirichlet-noise', action='store_true')
@@ -193,6 +249,8 @@ def parse_args():
             parser.error('{} must be a non-negative even number.'.format(option))
     if args.telemetry_placement_temperature < 0:
         parser.error('--telemetry-placement-temperature cannot be negative.')
+    if args.policy_target_temperature is not None and args.policy_target_temperature < 0:
+        parser.error('--policy-target-temperature cannot be negative.')
     if args.anchor_interval < 1:
         parser.error('--anchor-interval must be at least 1.')
     if args.milestone_interval is not None and args.milestone_interval < 1:
@@ -201,6 +259,14 @@ def parse_args():
         parser.error('--anchor-mcts-sims must be at least 1.')
     if args.max_train_steps is not None and args.max_train_steps < 1:
         parser.error('--max-train-steps must be at least 1.')
+    if args.replay_reuse is not None and args.replay_reuse <= 0:
+        parser.error('--replay-reuse must be positive.')
+    if args.validation_fraction is not None and not 0 <= args.validation_fraction < 0.5:
+        parser.error('--validation-fraction must be at least 0 and less than 0.5.')
+    if args.learning_rate is not None and args.learning_rate <= 0:
+        parser.error('--learning-rate must be positive.')
+    if args.weight_decay is not None and args.weight_decay < 0:
+        parser.error('--weight-decay cannot be negative.')
     return args
 
 
@@ -216,6 +282,9 @@ def build_coach_args(parsed_args):
     symmetry_augmentation = getattr(parsed_args, 'symmetry_augmentation', None) or (
         'on-the-fly' if parsed_args.architecture == 'v3' else 'expanded'
     )
+    policy_target_temperature = getattr(parsed_args, 'policy_target_temperature', None)
+    if policy_target_temperature is None and parsed_args.architecture == 'v3':
+        policy_target_temperature = 1.0
     load_file = getattr(parsed_args, 'load_file', None) or (
         'latest-training.pth.tar' if training_mode == 'latest' else 'best.pth.tar'
     )
@@ -248,6 +317,7 @@ def build_coach_args(parsed_args):
         'quiet': parsed_args.quiet,
         'trainingMode': training_mode,
         'placementTemperature': getattr(parsed_args, 'placement_temperature', 1.0),
+        'policyTargetTemperature': policy_target_temperature,
         'addDirichletNoise': (
             training_mode == 'latest' and not getattr(parsed_args, 'no_dirichlet_noise', False)
         ),
@@ -255,6 +325,16 @@ def build_coach_args(parsed_args):
         'dirichletEpsilon': getattr(parsed_args, 'dirichlet_epsilon', 0.25),
         'compactReplay': getattr(parsed_args, 'compact_replay', False) or training_mode == 'latest',
         'symmetryAugmentation': symmetry_augmentation,
+        'replayReuse': (
+            parsed_args.replay_reuse
+            if parsed_args.replay_reuse is not None
+            else (V3_DEFAULT_REPLAY_REUSE if parsed_args.architecture == 'v3' else None)
+        ),
+        'validationFraction': (
+            parsed_args.validation_fraction
+            if parsed_args.validation_fraction is not None
+            else (V3_DEFAULT_VALIDATION_FRACTION if parsed_args.architecture == 'v3' else 0.0)
+        ),
         'telemetryDir': getattr(parsed_args, 'telemetry_dir', None) or os.path.join(checkpoint, 'telemetry'),
         'milestoneInterval': (
             getattr(parsed_args, 'milestone_interval', None)
@@ -444,6 +524,27 @@ def main():
     nnet_args.epochs = parsed_args.epochs or preset['epochs']
     nnet_args.batch_size = parsed_args.batch_size or preset['batch_size']
     nnet_args.max_train_steps = parsed_args.max_train_steps
+    nnet_args.replay_reuse = (
+        parsed_args.replay_reuse
+        if parsed_args.replay_reuse is not None
+        else (V3_DEFAULT_REPLAY_REUSE if parsed_args.architecture == 'v3' else None)
+    )
+    nnet_args.optimizer = parsed_args.optimizer or ('adamw' if parsed_args.architecture == 'v3' else 'adam')
+    nnet_args.lr = (
+        parsed_args.learning_rate
+        if parsed_args.learning_rate is not None
+        else (V3_DEFAULT_LEARNING_RATE if parsed_args.architecture == 'v3' else 0.001)
+    )
+    nnet_args.weight_decay = (
+        parsed_args.weight_decay
+        if parsed_args.weight_decay is not None
+        else (V3_DEFAULT_WEIGHT_DECAY if parsed_args.architecture == 'v3' else 0.0)
+    )
+    nnet_args.lr_schedule = (
+        parsed_args.lr_schedule
+        if parsed_args.lr_schedule is not None
+        else (list(V3_DEFAULT_LR_SCHEDULE) if parsed_args.architecture == 'v3' else [])
+    )
     nnet_args.quiet = parsed_args.quiet
     coach_args = build_coach_args(parsed_args)
     nnet_args.on_the_fly_symmetry = coach_args.symmetryAugmentation == 'on-the-fly'
@@ -535,7 +636,7 @@ def main():
         )
 
     log.info(
-        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s max_train_steps=%s batch=%s symmetry=%s checkpoint=%s',
+        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s max_train_steps=%s replay_reuse=%s validation=%.3f batch=%s symmetry=%s policy_target_temp=%s optimizer=%s lr=%g weight_decay=%g lr_schedule=%s checkpoint=%s',
         parsed_args.architecture,
         parsed_args.preset,
         coach_args.numIters,
@@ -546,8 +647,15 @@ def main():
         coach_args.arenaBatchSize,
         nnet_args.epochs,
         nnet_args.max_train_steps,
+        coach_args.replayReuse,
+        coach_args.validationFraction,
         nnet_args.batch_size,
         coach_args.symmetryAugmentation,
+        coach_args.policyTargetTemperature,
+        nnet_args.optimizer,
+        nnet_args.lr,
+        nnet_args.weight_decay,
+        nnet_args.lr_schedule,
         coach_args.checkpoint,
     )
     if anchor_nnet is not None:

@@ -8,6 +8,7 @@ from main_santorini import (
     build_coach_args,
     build_opening_sampler,
     parse_args,
+    parse_lr_schedule,
     resolve_anchor_checkpoint_path,
 )
 from santorini.SantoriniOpeningBook import (
@@ -45,6 +46,47 @@ def make_coach_args():
 
 
 class TestMainSantoriniOpenings(unittest.TestCase):
+    def test_v3_defaults_to_fresh_replay_reuse_and_validation(self):
+        with patch('sys.argv', ['main_santorini.py', '--architecture', 'v3']):
+            parsed = parse_args()
+
+        coach_args = build_coach_args(parsed)
+        self.assertEqual(coach_args.replayReuse, 16.0)
+        self.assertEqual(coach_args.validationFraction, 0.05)
+
+    def test_v2_retains_legacy_epoch_schedule_without_validation(self):
+        with patch('sys.argv', ['main_santorini.py', '--architecture', 'v2']):
+            parsed = parse_args()
+
+        coach_args = build_coach_args(parsed)
+        self.assertIsNone(coach_args.replayReuse)
+        self.assertEqual(coach_args.validationFraction, 0.0)
+
+    def test_learning_rate_schedule_parser(self):
+        self.assertEqual(parse_lr_schedule('200:0.0001,400:0.00003'), [(200, 1e-4), (400, 3e-5)])
+        self.assertEqual(parse_lr_schedule('none'), [])
+
+    def test_v3_defaults_to_temperature_one_policy_targets(self):
+        with patch('sys.argv', ['main_santorini.py', '--architecture', 'v3']):
+            parsed = parse_args()
+
+        self.assertEqual(build_coach_args(parsed).policyTargetTemperature, 1.0)
+
+    def test_v2_retains_action_temperature_policy_targets(self):
+        with patch('sys.argv', ['main_santorini.py', '--architecture', 'v2']):
+            parsed = parse_args()
+
+        self.assertIsNone(build_coach_args(parsed).policyTargetTemperature)
+
+    def test_policy_target_temperature_can_be_overridden(self):
+        with patch(
+            'sys.argv',
+            ['main_santorini.py', '--architecture', 'v3', '--policy-target-temperature', '0.5'],
+        ):
+            parsed = parse_args()
+
+        self.assertEqual(build_coach_args(parsed).policyTargetTemperature, 0.5)
+
     def test_v3_defaults_to_twenty_iteration_milestones(self):
         with patch('sys.argv', ['main_santorini.py', '--architecture', 'v3']):
             parsed = parse_args()

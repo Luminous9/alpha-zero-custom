@@ -20,6 +20,9 @@ log = logging.getLogger(__name__)
 
 args = dotdict({
     'lr': 0.001,
+    'lr_schedule': [],
+    'optimizer': 'adam',
+    'weight_decay': 0.0,
     'dropout': 0.2,
     'epochs': 10,
     'batch_size': 64,
@@ -29,6 +32,7 @@ args = dotdict({
     'num_residual_blocks': 5,
     'value_hidden_size': 128,
     'max_train_steps': None,
+    'replay_reuse': None,
     'on_the_fly_symmetry': False,
     'quiet': False,
 })
@@ -63,10 +67,18 @@ class NNetWrapper(NeuralNet):
 
         if self.net_args.cuda:
             self.nnet.cuda()
-        self.optimizer = optim.Adam(self.nnet.parameters(), lr=self.net_args.lr)
+        optimizer_class = optim.AdamW if self.net_args.optimizer == 'adamw' else optim.Adam
+        self.optimizer = optimizer_class(
+            self.nnet.parameters(),
+            lr=self.net_args.lr,
+            weight_decay=self.net_args.weight_decay,
+        )
 
     def _make_net_args(self):
-        net_args = dotdict(dict(args))
+        # Runtime configuration historically uses attribute assignment on dotdict.
+        # Copy through getattr so values set before construction are not lost when
+        # the backing dictionary still contains its module default.
+        net_args = dotdict({key: getattr(args, key) for key in args})
         architecture = ARCHITECTURES[self.architecture]
         net_args.num_channels = architecture['num_channels']
         net_args.num_residual_blocks = architecture['num_residual_blocks']
@@ -76,10 +88,14 @@ class NNetWrapper(NeuralNet):
 
     def _sync_runtime_args(self):
         self.net_args.lr = args.lr
+        self.net_args.lr_schedule = list(args.lr_schedule)
+        self.net_args.optimizer = args.optimizer
+        self.net_args.weight_decay = args.weight_decay
         self.net_args.dropout = args.dropout
         self.net_args.epochs = args.epochs
         self.net_args.batch_size = args.batch_size
         self.net_args.max_train_steps = args.max_train_steps
+        self.net_args.replay_reuse = args.replay_reuse
         self.net_args.on_the_fly_symmetry = args.on_the_fly_symmetry
         self.net_args.quiet = args.quiet
         return self.net_args
@@ -103,25 +119,56 @@ class NNetWrapper(NeuralNet):
     def encode_boards(cls, boards):
         return np.array([cls.encode_board(board) for board in boards], dtype=np.float32)
 
-    def train(self, examples):
+    def train(self, examples, new_example_count=None, validation_examples=None, iteration=None):
         """
         examples: list of examples, each example is of form (board, pi, v)
         """
         runtime_args = self._sync_runtime_args()
+        if not examples:
+            raise ValueError('Cannot train without training examples.')
+        learning_rate = self._learning_rate_for_iteration(iteration, runtime_args)
         for parameter_group in self.optimizer.param_groups:
-            parameter_group['lr'] = runtime_args.lr
+            parameter_group['lr'] = learning_rate
+            parameter_group['weight_decay'] = runtime_args.weight_decay
         encoded_boards, target_pis, target_vs = self._encode_training_examples(examples)
 
         symmetry_multiplier = 8 if runtime_args.on_the_fly_symmetry else 1
         virtual_example_count = len(examples) * symmetry_multiplier
-        epoch_batch_count = max(1, int(np.ceil(virtual_example_count / runtime_args.batch_size)))
-        uncapped_training_steps = runtime_args.epochs * epoch_batch_count
+        if runtime_args.replay_reuse is not None:
+            if new_example_count is None or int(new_example_count) < 1:
+                raise ValueError(
+                    'Replay-reuse scheduling requires at least one newly generated training example.'
+                )
+            new_example_count = int(new_example_count)
+            uncapped_training_steps = max(
+                1,
+                int(np.ceil(new_example_count * runtime_args.replay_reuse / runtime_args.batch_size)),
+            )
+            training_schedule = 'fresh-data-reuse'
+        else:
+            epoch_batch_count = max(1, int(np.ceil(virtual_example_count / runtime_args.batch_size)))
+            uncapped_training_steps = runtime_args.epochs * epoch_batch_count
+            training_schedule = 'legacy-epochs'
         training_steps = uncapped_training_steps
         if runtime_args.max_train_steps is not None:
             training_steps = min(training_steps, int(runtime_args.max_train_steps))
+        epoch_batch_count = max(1, int(np.ceil(training_steps / runtime_args.epochs)))
+        if runtime_args.quiet:
+            log.info(
+                'Optimizer schedule: mode=%s fresh=%s replay=%s steps=%s/%s lr=%g weight_decay=%g',
+                training_schedule,
+                new_example_count,
+                len(examples),
+                training_steps,
+                uncapped_training_steps,
+                learning_rate,
+                runtime_args.weight_decay,
+            )
 
         metrics = {}
         completed_steps = 0
+        iteration_pi_losses = AverageMeter()
+        iteration_v_losses = AverageMeter()
         for epoch in range(runtime_args.epochs):
             steps_this_epoch = min(epoch_batch_count, training_steps - completed_steps)
             if steps_this_epoch <= 0:
@@ -132,7 +179,7 @@ class NNetWrapper(NeuralNet):
 
             if runtime_args.quiet:
                 log.info(
-                    'Training epoch %s/%s (%s/%s batches; %s/%s total steps)',
+                    'Training segment %s/%s (%s/%s batches; %s/%s total steps)',
                     epoch + 1,
                     runtime_args.epochs,
                     steps_this_epoch,
@@ -141,7 +188,7 @@ class NNetWrapper(NeuralNet):
                     training_steps,
                 )
             else:
-                print('EPOCH ::: ' + str(epoch + 1))
+                print('TRAINING SEGMENT ::: ' + str(epoch + 1))
 
             t = tqdm(range(steps_this_epoch), desc='Training Net', disable=runtime_args.quiet)
             for _ in t:
@@ -171,6 +218,8 @@ class NNetWrapper(NeuralNet):
 
                 pi_losses.update(l_pi.item(), boards.size(0))
                 v_losses.update(l_v.item(), boards.size(0))
+                iteration_pi_losses.update(l_pi.item(), boards.size(0))
+                iteration_v_losses.update(l_v.item(), boards.size(0))
                 if not runtime_args.quiet:
                     t.set_postfix(Loss_pi=pi_losses, Loss_v=v_losses)
 
@@ -182,7 +231,7 @@ class NNetWrapper(NeuralNet):
 
             if runtime_args.quiet:
                 log.info(
-                    'Finished epoch %s/%s: pi_loss=%.4f v_loss=%.4f',
+                    'Finished training segment %s/%s: pi_loss=%.4f v_loss=%.4f',
                     epoch + 1,
                     runtime_args.epochs,
                     pi_losses.avg,
@@ -192,18 +241,161 @@ class NNetWrapper(NeuralNet):
                 'policy_loss': float(pi_losses.avg),
                 'value_loss': float(v_losses.avg),
                 'total_loss': float(pi_losses.avg + v_losses.avg),
+                'final_segment_policy_loss': float(pi_losses.avg),
+                'final_segment_value_loss': float(v_losses.avg),
+                'final_segment_total_loss': float(pi_losses.avg + v_losses.avg),
+                'iteration_policy_loss': float(iteration_pi_losses.avg),
+                'iteration_value_loss': float(iteration_v_losses.avg),
+                'iteration_total_loss': float(
+                    iteration_pi_losses.avg + iteration_v_losses.avg
+                ),
                 'epoch': epoch + 1,
+                'training_segments_completed': epoch + 1,
                 'training_steps': int(completed_steps),
                 'uncapped_training_steps': int(uncapped_training_steps),
                 'virtual_replay_examples': int(virtual_example_count),
+                'training_examples': int(len(examples)),
                 'symmetry_augmentation_multiplier': int(symmetry_multiplier),
                 'effective_replay_epochs': float(
-                    completed_steps * runtime_args.batch_size / virtual_example_count
+                    completed_steps * runtime_args.batch_size /
+                    (len(examples) if runtime_args.replay_reuse is not None else virtual_example_count)
                 ),
                 'average_draws_per_stored_position': float(
                     completed_steps * runtime_args.batch_size / len(examples)
                 ),
+                'base_replay_epochs': float(
+                    completed_steps * runtime_args.batch_size / len(examples)
+                ),
+                'fresh_training_examples': (
+                    int(new_example_count) if new_example_count is not None else None
+                ),
+                'target_replay_reuse': (
+                    float(runtime_args.replay_reuse)
+                    if runtime_args.replay_reuse is not None else None
+                ),
+                'actual_replay_reuse': (
+                    float(completed_steps * runtime_args.batch_size / new_example_count)
+                    if new_example_count else None
+                ),
+                'training_schedule': training_schedule,
+                'learning_rate': float(learning_rate),
+                'weight_decay': float(runtime_args.weight_decay),
+                'optimizer': str(runtime_args.optimizer),
             }
+        if runtime_args.quiet:
+            log.info(
+                'Finished optimizer iteration: steps=%s pi_loss=%.4f v_loss=%.4f total_loss=%.4f',
+                completed_steps,
+                iteration_pi_losses.avg,
+                iteration_v_losses.avg,
+                iteration_pi_losses.avg + iteration_v_losses.avg,
+            )
+        validation_metrics = self._validation_metrics(
+            validation_examples if validation_examples is not None else []
+        )
+        metrics.update(validation_metrics)
+        if runtime_args.quiet and validation_metrics.get('validation_examples'):
+            log.info(
+                'Held-out validation (%s positions): placement policy_kl=%s value_loss=%s; '
+                'standard policy_kl=%s value_loss=%s',
+                validation_metrics['validation_examples'],
+                self._format_metric(validation_metrics.get('placement_validation_policy_kl')),
+                self._format_metric(validation_metrics.get('placement_validation_value_loss')),
+                self._format_metric(validation_metrics.get('standard_validation_policy_kl')),
+                self._format_metric(validation_metrics.get('standard_validation_value_loss')),
+            )
+        return metrics
+
+    @staticmethod
+    def _format_metric(value):
+        return 'n/a' if value is None else '{:.4f}'.format(value)
+
+    @staticmethod
+    def _learning_rate_for_iteration(iteration, runtime_args):
+        learning_rate = float(runtime_args.lr)
+        if iteration is None:
+            return learning_rate
+        for start_iteration, scheduled_rate in sorted(runtime_args.lr_schedule):
+            if int(iteration) >= int(start_iteration):
+                learning_rate = float(scheduled_rate)
+        return learning_rate
+
+    def _validation_metrics(self, examples):
+        metrics = {'validation_examples': int(len(examples))}
+        if not examples:
+            return metrics
+
+        accumulators = {
+            phase: {
+                'count': 0,
+                'policy_loss': 0.0,
+                'target_entropy': 0.0,
+                'value_loss': 0.0,
+                'policy_top1': 0,
+                'value_sign': 0,
+            }
+            for phase in ('placement', 'standard')
+        }
+        batch_size = max(1, int(self.net_args.batch_size))
+        for offset in range(0, len(examples), batch_size):
+            batch = examples[offset:offset + batch_size]
+            boards, target_pis, target_vs = list(zip(*batch))
+            predicted_pis, predicted_vs = self.predict_batch(boards)
+            for board, target_pi, target_v, predicted_pi, predicted_v in zip(
+                boards,
+                target_pis,
+                target_vs,
+                predicted_pis,
+                predicted_vs,
+            ):
+                phase = 'placement' if (
+                    hasattr(self.game, 'isPlacementPhase') and self.game.isPlacementPhase(board)
+                ) else 'standard'
+                bucket = accumulators[phase]
+                target_pi = np.asarray(target_pi, dtype=np.float64)
+                predicted_pi = np.asarray(predicted_pi, dtype=np.float64)
+                positive = target_pi > 0
+                policy_loss = -float(
+                    np.sum(target_pi[positive] * np.log(np.maximum(predicted_pi[positive], 1e-12)))
+                )
+                target_entropy = -float(np.sum(target_pi[positive] * np.log(target_pi[positive])))
+                valids = np.asarray(self.game.getValidMoves(board, 1), dtype=bool)
+                legal_prediction = np.where(valids, predicted_pi, -np.inf)
+
+                bucket['count'] += 1
+                bucket['policy_loss'] += policy_loss
+                bucket['target_entropy'] += target_entropy
+                bucket['value_loss'] += float((float(target_v) - float(predicted_v)) ** 2)
+                predicted_action = int(np.argmax(legal_prediction))
+                bucket['policy_top1'] += int(
+                    target_pi[predicted_action] >= np.max(target_pi) - 1e-12
+                )
+                bucket['value_sign'] += int((float(target_v) >= 0) == (float(predicted_v) >= 0))
+
+        total_count = 0
+        total_policy_loss = 0.0
+        total_value_loss = 0.0
+        for phase, bucket in accumulators.items():
+            count = bucket['count']
+            metrics['{}_validation_examples'.format(phase)] = int(count)
+            if not count:
+                continue
+            prefix = '{}_validation_'.format(phase)
+            metrics[prefix + 'policy_loss'] = bucket['policy_loss'] / count
+            metrics[prefix + 'policy_kl'] = (
+                bucket['policy_loss'] - bucket['target_entropy']
+            ) / count
+            metrics[prefix + 'value_loss'] = bucket['value_loss'] / count
+            metrics[prefix + 'policy_top1_accuracy'] = bucket['policy_top1'] / count
+            metrics[prefix + 'value_sign_accuracy'] = bucket['value_sign'] / count
+            total_count += count
+            total_policy_loss += bucket['policy_loss']
+            total_value_loss += bucket['value_loss']
+        metrics['validation_policy_loss'] = total_policy_loss / total_count
+        metrics['validation_value_loss'] = total_value_loss / total_count
+        metrics['validation_total_loss'] = (
+            metrics['validation_policy_loss'] + metrics['validation_value_loss']
+        )
         return metrics
 
     def _apply_symmetries(self, encoded_boards, target_pis, symmetry_ids):
@@ -311,6 +503,7 @@ class NNetWrapper(NeuralNet):
             'num_residual_blocks': self.net_args.num_residual_blocks,
             'policy_channels': self.net_args.policy_channels,
             'action_encoding': self.net_args.action_encoding,
+            'optimizer': self.net_args.optimizer,
         }
         if include_optimizer:
             payload['optimizer_state_dict'] = self.optimizer.state_dict()
@@ -363,9 +556,23 @@ class NNetWrapper(NeuralNet):
         if load_optimizer:
             optimizer_state = checkpoint.get('optimizer_state_dict')
             if optimizer_state is None:
-                log.warning('Checkpoint %s has no optimizer state; Adam will resume fresh.', filepath)
+                log.warning(
+                    'Checkpoint %s has no optimizer state; %s will resume fresh.',
+                    filepath,
+                    self.net_args.optimizer,
+                )
             else:
+                checkpoint_optimizer = checkpoint.get('optimizer', 'adam')
+                if checkpoint_optimizer != self.net_args.optimizer:
+                    log.info(
+                        'Migrating compatible %s optimizer state into %s.',
+                        checkpoint_optimizer,
+                        self.net_args.optimizer,
+                    )
                 self.optimizer.load_state_dict(optimizer_state)
+                for parameter_group in self.optimizer.param_groups:
+                    for key, value in self.optimizer.defaults.items():
+                        parameter_group.setdefault(key, value)
             if 'numpy_rng_state' in checkpoint:
                 np.random.set_state(checkpoint['numpy_rng_state'])
             if 'python_rng_state' in checkpoint:

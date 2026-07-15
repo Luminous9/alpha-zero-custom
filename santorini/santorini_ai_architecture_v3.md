@@ -11,7 +11,7 @@ V3 is designed to:
 1. Increase evaluator capacity without making self-play prohibitively expensive.
 2. Learn all four opening placements organically from the empty board.
 3. Train continuously without promotion-gating every update through an arena.
-4. Preserve enough state to resume a long Kaggle run exactly, including Adam optimizer state.
+4. Preserve enough state to resume a long Kaggle run exactly, including optimizer state.
 5. Replace promotion gating with useful, non-gating telemetry and periodic strength measurements.
 6. Keep replay files and committed Kaggle outputs within practical disk limits.
 
@@ -95,29 +95,45 @@ Every self-play game begins at the empty board. The resulting replay therefore c
 - midgame positions; and
 - late tactical positions.
 
-The policy target is the MCTS visit distribution. The value target is the final game outcome from the acting player's perspective.
+The policy target is the MCTS visit distribution at temperature `1.0`. The action played in self-play is sampled from a separately temperature-adjusted copy of those same root visits. The value target is the final game outcome from the acting player's perspective.
 
-### Capped optimizer steps
+### Fresh-data replay reuse
 
-Training requests up to three replay-equivalent epochs, but the production Kaggle configuration caps each iteration at 1,500 optimizer steps. For scheduling, each stored position represents eight virtual symmetry examples, matching the sample count used by the earlier expanded replay. The actual step count is:
+V3 budgets optimization from the amount of new self-play data rather than the total replay size. The default target is 16 training draws for every newly generated, non-validation position. With a batch size of 512, the requested step count is:
 
 ```text
-virtual_examples = stored_examples * 8
-min(epochs * ceil(virtual_examples / batch_size), max_train_steps)
+requested_steps = ceil(fresh_training_examples * replay_reuse / batch_size)
+actual_steps = min(requested_steps, max_train_steps)
 ```
 
-Small replay buffers therefore retain the original three-epoch warm-up rate without storing eight copies. Once the replay is large, the cap prevents training time from growing with replay size. Telemetry records the completed steps, virtual replay size, uncapped requested steps, effective replay-equivalent epochs, and average draws per stored position.
+The 1,500-step setting remains a safety ceiling; under the expected 80-game workload, the fresh-data calculation normally requests far fewer steps. `epochs=3` divides those steps into three reporting segments and does not multiply the budget. Every draw independently receives a random D4 symmetry, so augmentation variety is retained without treating eight possible transforms as eight additional stored examples.
+
+Telemetry records requested and completed steps, fresh training positions, target and actual replay reuse, base replay passes, stored and virtual replay sizes, and average draws per stored position. V2 retains its legacy epoch-based schedule.
+
+### Held-out replay validation
+
+Five percent of V3 replay boards are held out by a stable hash of the network-visible position. The hash normalizes anonymous same-color worker labels and groups all eight rotations/reflections, preventing on-the-fly augmentation or an equivalent replay copy from leaking a held-out input into training. The split is reconstructed from the replay file and is therefore deterministic across Kaggle sessions. Held-out positions are never sampled by the optimizer.
+
+After every iteration, validation reports policy cross-entropy, policy KL relative to the MCTS target, value mean-squared error, policy top-1 agreement, and value-sign accuracy. Every metric is separated into placement and standard-play positions, with aggregate policy and value losses also recorded. These values measure generalization to replay-like positions; milestone, anchor, and greedy matches remain the evidence for playing strength.
+
+### Optimizer and learning-rate schedule
+
+V3 uses AdamW with an initial learning rate of `3e-4` and weight decay of `1e-4`. The default absolute-iteration schedule changes the rate to `1e-4` at iteration 200 and `3e-5` at iteration 400. All values and milestones are command-line configurable, and `--lr-schedule none` disables the milestones. Absolute iteration numbers ensure that a resumed Kaggle chunk does not restart the schedule.
+
+An older V3 Adam checkpoint can be resumed into AdamW: its compatible moment estimates are loaded, and the configured learning rate and weight decay are applied on the next training iteration. V2 retains Adam at `1e-3`, no weight decay, and no default schedule.
 
 ### Exploration
 
-Placement and standard play use related but distinct temperature rules:
+V3 separates the policy saved for training from the policy used to choose the self-play action:
 
-- All four placement plies use `placementTemperature`, which defaults to `1.0`.
-- Standard moves use temperature `1` until `tempThreshold`, counted from the first standard move, and temperature `0` afterward.
+- The replay policy always uses `policyTargetTemperature=1.0`, preserving the relative MCTS visit counts even when action selection is greedy.
+- All four placement actions use `placementTemperature`, which defaults to `1.0`.
+- Standard actions use temperature `1` until `tempThreshold`, counted from the first standard action, and temperature `0` afterward.
+- Both policies come from the same MCTS search; this does not run extra simulations.
 - Root Dirichlet noise is enabled by default in V3 latest-training mode.
 - The default Dirichlet parameters are alpha `0.30` and epsilon `0.25`.
 
-Temperature samples from the MCTS visit distribution; it does not enforce a fixed percentage of deliberately bad moves. Dirichlet noise supplies additional root exploration, while the legal-action mask prevents invalid placement or move/build actions.
+Action temperature controls how self-play samples from the MCTS visit distribution; it does not enforce a fixed percentage of deliberately bad moves. Target temperature controls only the replay label. Dirichlet noise supplies additional root exploration, while the legal-action mask prevents invalid placement or move/build actions.
 
 ## Continuous Latest Training
 
@@ -162,12 +178,12 @@ The utility validates history lengths, sparse-policy offsets, and array counts b
 
 Latest mode writes two current checkpoints:
 
-- `latest-training.pth.tar`: model weights, optimizer state, architecture metadata, iteration metadata, and random-number-generator state needed for training resume.
+- `latest-training.pth.tar`: model weights, optimizer state, architecture metadata, iteration and self-play configuration metadata (including MCTS simulations and policy-target temperature), and random-number-generator state needed for training resume.
 - `latest.pth.tar`: weight-only checkpoint for inference or evaluation.
 
 Milestone weight checkpoints use `checkpoint_<iteration>.pth.tar`.
 
-Preserving the optimizer means restoring Adam's accumulated first- and second-moment estimates along with the weights. Loading only model weights would reset those estimates and change the effective optimization trajectory after every Kaggle session. A proper resume therefore loads both `latest-training.pth.tar` and `latest.examples.npz` with optimizer loading enabled.
+Preserving the optimizer means restoring its accumulated first- and second-moment estimates along with the weights. Loading only model weights would reset those estimates and change the effective optimization trajectory after every Kaggle session. A proper resume therefore loads both `latest-training.pth.tar` and `latest.examples.npz` with optimizer loading enabled.
 
 The saved iteration number is restored so iteration numbering, milestone scheduling, and telemetry continue rather than restarting at one.
 
@@ -188,7 +204,10 @@ The training notebook launches TensorBoard so metrics can be viewed while the ru
 
 The run records available training losses and operational measurements, including:
 
-- policy loss, value loss, and total loss;
+- whole-iteration policy, value, and total loss;
+- final-segment policy, value, and total loss, with the historical unqualified loss fields retained as aliases;
+- held-out placement and standard policy/value metrics;
+- optimizer steps, replay reuse, learning rate, and weight decay;
 - iteration duration and replay example count;
 - games completed;
 - average total game length;
@@ -214,6 +233,10 @@ On a sample of replay boards, V3 records metrics separately for placement and st
 
 Entropy should be interpreted diagnostically rather than as a score that must always decrease. Some positions are genuinely ambiguous, and an abrupt change matters more than a universally monotonic trend.
 
+### Self-play target metrics
+
+For the replay labels produced during each iteration, V3 records the mean policy-target entropy, mean number of visited actions, and one-hot target rate separately for placement and standard positions. These measurements verify that the temperature-1 training targets remain informative after standard action selection switches to temperature zero.
+
 ### Milestone matches
 
 Every 20 iterations by default, V3 saves a milestone checkpoint. Once both endpoints exist, it plays a non-gating match between the current checkpoint and the checkpoint 20 iterations earlier. Each milestone retains 40 standard and 40 placement-inclusive games; reducing frequency preserves the existing per-match confidence while halving evaluation overhead.
@@ -223,7 +246,7 @@ Each milestone now contains two paired evaluations:
 - The standard-play match uses 20 fixed, symmetry-distinct completed openings for 40 games. Every opening is played once with each network in each seat. The suite is sampled once from a fixed telemetry seed and reconstructed identically after a Kaggle resume.
 - The placement-inclusive match starts from the empty board. Placement actions are sampled from each network's MCTS visit distribution using 20 fixed per-game seeds and placement temperature `1.0`; standard actions remain deterministic. Reusing the paired seeds makes the measurement reproducible while avoiding 20 identical copies of the same empty-board game.
 
-The two results are kept separate because a completed-opening match measures standard play cleanly, while the placement-inclusive result measures the combined effect of learned setup and play. Both include wins, draws, decisive-game win rate, and an approximate 95% Wilson confidence interval. The match never accepts, rejects, or rolls back a model. With a fresh run, iteration 10 creates the first milestone and iteration 20 produces the first 10-iteration comparison.
+The two results are kept separate because a completed-opening match measures standard play cleanly, while the placement-inclusive result measures the combined effect of learned setup and play. Both include wins, draws, decisive-game win rate, and an approximate 95% Wilson confidence interval. The match never accepts, rejects, or rolls back a model. With a fresh run, iteration 20 creates the first milestone and iteration 40 produces the first 20-iteration comparison.
 
 The completed record and confidence interval are logged immediately in the training output and are also retained in TensorBoard and `telemetry.jsonl`.
 
@@ -311,11 +334,17 @@ The baseline long-run configuration is:
 | --- | ---: |
 | Architecture | V3 |
 | Training mode | latest |
-| Iterations per notebook chunk | 10 |
+| Iterations per notebook chunk | Configurable; 10 by default |
 | Self-play games per iteration | 80 |
-| MCTS simulations | 64 |
+| MCTS simulations | 96 |
 | Self-play batch size | 128 |
-| Training epochs | 3 |
+| Optimizer | AdamW |
+| Initial learning rate | 0.0003 |
+| Weight decay | 0.0001 |
+| Learning-rate schedule | 0.0001 at iteration 200; 0.00003 at iteration 400 |
+| Training reporting segments (`epochs`) | 3 |
+| Replay reuse target | 16 draws per new training position |
+| Validation replay fraction | 5% deterministic holdout |
 | Maximum optimizer steps | 1,500 per iteration |
 | Training batch size | 512 |
 | Symmetry augmentation | Random on-the-fly rotation/reflection |
@@ -324,6 +353,7 @@ The baseline long-run configuration is:
 | Standard milestone games | 40 on 20 fixed completed openings |
 | Placement-inclusive milestone games | 40 using 20 fixed seed pairs |
 | Fixed V1 anchor | Optional, 40 games every 10 iterations |
+| Replay policy-target temperature | 1.0 |
 | Placement temperature | 1.0 |
 | Dirichlet alpha / epsilon | 0.30 / 0.25 |
 

@@ -1,4 +1,5 @@
 import json
+import hashlib
 import logging
 import os
 import random
@@ -81,6 +82,7 @@ class Coach():
         self._completed_game_results = []
         self._placement_choices = []
         self._completed_openings = []
+        self._policy_target_stats = self._newPolicyTargetStats()
         self._reference_suite = None
         reference_suite_path = self._arg('referenceSuite', None)
         if reference_suite_path:
@@ -107,11 +109,45 @@ class Coach():
         return self._arg('symmetryAugmentation', 'expanded') == 'on-the-fly'
 
     def _appendTrainingPosition(self, examples, canonical_board, player, policy):
+        if hasattr(self, '_policy_target_stats'):
+            self._recordPolicyTarget(canonical_board, policy)
         if self._uses_on_the_fly_symmetry():
             examples.append([canonical_board, player, policy, None])
             return
         for sym_board, sym_policy in self.game.getSymmetries(canonical_board, policy):
             examples.append([sym_board, player, sym_policy, None])
+
+    def _isValidationExample(self, example):
+        fraction = float(self._arg('validationFraction', 0.0))
+        if fraction <= 0:
+            return False
+        # Hash the network-visible position rather than its incidental storage
+        # representation. Same-color worker labels are anonymous to the encoder,
+        # and every D4 transform must stay on the same side of the split so
+        # on-the-fly augmentation cannot leak validation inputs into training.
+        board = np.asarray(example[0])
+        network_board = np.stack((
+            np.sign(board[0]),
+            np.clip(board[1], 0, 4),
+        )).astype(np.int8)
+        symmetry_encodings = []
+        for rotations in range(4):
+            rotated = np.rot90(network_board, rotations, axes=(-2, -1))
+            symmetry_encodings.append(np.ascontiguousarray(rotated).tobytes())
+            symmetry_encodings.append(np.ascontiguousarray(np.flip(rotated, axis=-1)).tobytes())
+        digest = hashlib.blake2b(
+            min(symmetry_encodings),
+            digest_size=8,
+            person=b'SantoriniVal',
+        ).digest()
+        return int.from_bytes(digest, byteorder='big') < int(fraction * (1 << 64))
+
+    def _splitTrainingValidation(self, examples):
+        training = []
+        validation = []
+        for example in examples:
+            (validation if self._isValidationExample(example) else training).append(example)
+        return training, validation
 
     def _initial_board(self):
         if self.opening_sampler is not None:
@@ -133,6 +169,32 @@ class Coach():
         standard_step = max(1, episode_step - placement_steps)
         return int(standard_step < self.args.tempThreshold)
 
+    def _policyTargetTemperature(self, action_temperature):
+        target_temperature = self._arg('policyTargetTemperature', None)
+        return action_temperature if target_temperature is None else float(target_temperature)
+
+    def _selfPlayPoliciesFromTree(
+        self,
+        mcts,
+        canonical_board,
+        action_temperature,
+        training_policy=None,
+    ):
+        target_temperature = self._policyTargetTemperature(action_temperature)
+        if training_policy is None:
+            training_policy = mcts.getActionProbFromTree(
+                canonical_board,
+                temp=target_temperature,
+            )
+        if float(action_temperature) == float(target_temperature):
+            action_policy = training_policy
+        else:
+            action_policy = mcts.getActionProbFromTree(
+                canonical_board,
+                temp=action_temperature,
+            )
+        return training_policy, action_policy
+
     def executeEpisode(self):
         """
         This function executes one episode of self-play, starting with player 1.
@@ -141,8 +203,8 @@ class Coach():
         ends, the outcome of the game is used to assign values to each example
         in trainExamples.
 
-        It uses a temp=1 if episodeStep < tempThreshold, and thereafter
-        uses temp=0.
+        Action selection uses temp=1 before tempThreshold and temp=0 afterward.
+        The stored policy can use an independent policyTargetTemperature.
 
         Returns:
             trainExamples: a list of examples of the form (canonicalBoard, currPlayer, pi,v)
@@ -157,12 +219,23 @@ class Coach():
         while True:
             episodeStep += 1
             canonicalBoard = self.game.getCanonicalForm(board, self.curPlayer)
-            temp = self._temperature(canonicalBoard, episodeStep)
+            action_temperature = self._temperature(canonicalBoard, episodeStep)
+            target_temperature = self._policyTargetTemperature(action_temperature)
+            training_policy = self.mcts.getActionProb(canonicalBoard, temp=target_temperature)
+            training_policy, action_policy = self._selfPlayPoliciesFromTree(
+                self.mcts,
+                canonicalBoard,
+                action_temperature,
+                training_policy=training_policy,
+            )
+            self._appendTrainingPosition(
+                trainExamples,
+                canonicalBoard,
+                self.curPlayer,
+                training_policy,
+            )
 
-            pi = self.mcts.getActionProb(canonicalBoard, temp=temp)
-            self._appendTrainingPosition(trainExamples, canonicalBoard, self.curPlayer, pi)
-
-            action = np.random.choice(len(pi), p=pi)
+            action = np.random.choice(len(action_policy), p=action_policy)
             if hasattr(self.game, 'isPlacementAction') and self.game.isPlacementAction(action):
                 self._recordPlacementChoice(episodeStep, action)
             board, self.curPlayer = self.game.getNextState(board, self.curPlayer, action)
@@ -213,18 +286,22 @@ class Coach():
                         episode['episodeStep'],
                     )
 
-                action_probs = self._getBatchedActionProbs(activeEpisodes)
+                training_policies, action_policies = self._getBatchedSelfPlayPolicies(activeEpisodes)
                 still_active = []
 
-                for episode, pi in zip(activeEpisodes, action_probs):
+                for episode, training_policy, action_policy in zip(
+                    activeEpisodes,
+                    training_policies,
+                    action_policies,
+                ):
                     self._appendTrainingPosition(
                         episode['trainExamples'],
                         episode['canonicalBoard'],
                         episode['curPlayer'],
-                        pi,
+                        training_policy,
                     )
 
-                    action = np.random.choice(len(pi), p=pi)
+                    action = np.random.choice(len(action_policy), p=action_policy)
                     if hasattr(self.game, 'isPlacementAction') and self.game.isPlacementAction(action):
                         self._recordPlacementChoice(episode['episodeStep'], action)
                         episode['placementActions'].append(action)
@@ -255,7 +332,7 @@ class Coach():
 
         return completedExamples
 
-    def _getBatchedActionProbs(self, episodes):
+    def _getBatchedSelfPlayPolicies(self, episodes):
         for simulation_index in range(self.args.numMCTSSims):
             pending = []
 
@@ -283,10 +360,18 @@ class Coach():
                 for episode in episodes:
                     episode['mcts'].add_root_noise(episode['canonicalBoard'])
 
-        return [
-            episode['mcts'].getActionProbFromTree(episode['canonicalBoard'], temp=episode['temp'])
+        pairs = [
+            self._selfPlayPoliciesFromTree(
+                episode['mcts'],
+                episode['canonicalBoard'],
+                episode['temp'],
+            )
             for episode in episodes
         ]
+        return (
+            [training_policy for training_policy, _ in pairs],
+            [action_policy for _, action_policy in pairs],
+        )
 
     def learn(self):
         """
@@ -307,6 +392,8 @@ class Coach():
             self._completed_game_results = []
             self._placement_choices = []
             self._completed_openings = []
+            self._policy_target_stats = self._newPolicyTargetStats()
+            iterationTrainExamples = None
             # examples of the iteration
             if not self.skipFirstSelfPlay or local_iteration > 1:
                 iterationTrainExamples = deque([], maxlen=self.args.maxlenOfQueue)
@@ -336,17 +423,38 @@ class Coach():
             trainExamples = []
             for e in self.trainExamplesHistory:
                 trainExamples.extend(e)
+            replay_example_count = len(trainExamples)
+            trainExamples, validationExamples = self._splitTrainingValidation(trainExamples)
+            freshExamples = (
+                list(iterationTrainExamples)
+                if iterationTrainExamples is not None
+                else (list(self.trainExamplesHistory[-1]) if self.trainExamplesHistory else [])
+            )
+            freshTrainingExamples, _ = self._splitTrainingValidation(freshExamples)
             shuffle(trainExamples)
             telemetry_sample_size = min(int(self._arg('telemetrySampleSize', 256)), len(trainExamples))
             self._telemetry_boards = [trainExamples[index][0] for index in range(telemetry_sample_size)]
 
             if self.training_mode == 'latest':
-                metrics = self.nnet.train(trainExamples)
+                metrics = self.nnet.train(
+                    trainExamples,
+                    new_example_count=len(freshTrainingExamples),
+                    validation_examples=validationExamples,
+                    iteration=i,
+                )
                 metadata = {
                     'iteration': i,
                     'training_mode': self.training_mode,
+                    'num_mcts_sims': int(self.args.numMCTSSims),
+                    'policy_target_temperature': self._arg('policyTargetTemperature', None),
                     'max_train_steps': getattr(getattr(self.nnet, 'net_args', None), 'max_train_steps', None),
                     'symmetry_augmentation': self._arg('symmetryAugmentation', 'expanded'),
+                    'replay_reuse': self._arg('replayReuse', None),
+                    'validation_fraction': self._arg('validationFraction', 0.0),
+                    'optimizer': getattr(getattr(self.nnet, 'net_args', None), 'optimizer', None),
+                    'learning_rate': metrics.get('learning_rate'),
+                    'weight_decay': getattr(getattr(self.nnet, 'net_args', None), 'weight_decay', None),
+                    'lr_schedule': getattr(getattr(self.nnet, 'net_args', None), 'lr_schedule', None),
                 }
                 self.nnet.save_checkpoint(
                     folder=self.args.checkpoint,
@@ -367,7 +475,7 @@ class Coach():
                 if self.anchor_nnet is not None and i % anchor_interval == 0:
                     with preserve_rng_state():
                         metrics.update(self._runAnchorMatch(i))
-                self._writeTelemetry(i, metrics, time.time() - iteration_started, len(trainExamples))
+                self._writeTelemetry(i, metrics, time.time() - iteration_started, replay_example_count)
                 if local_iteration == 1 and self._arg('deleteLoadedExamplesAfterFirstIteration', False):
                     self._deleteLoadedTrainExamplesFile()
                 continue
@@ -376,7 +484,12 @@ class Coach():
             self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
             self.pnet.load_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
 
-            metrics = self.nnet.train(trainExamples)
+            metrics = self.nnet.train(
+                trainExamples,
+                new_example_count=len(freshTrainingExamples),
+                validation_examples=validationExamples,
+                iteration=i,
+            )
 
             log.info('PITTING AGAINST PREVIOUS VERSION')
             arena_opening_suite = self._arena_opening_suite()
@@ -416,7 +529,7 @@ class Coach():
                 else:
                     self._deleteExamplesFile('best.pth.tar.examples')
 
-            self._writeTelemetry(i, metrics, time.time() - iteration_started, len(trainExamples))
+            self._writeTelemetry(i, metrics, time.time() - iteration_started, replay_example_count)
 
             if local_iteration == 1 and self._arg('deleteLoadedExamplesAfterFirstIteration', False):
                 self._deleteLoadedTrainExamplesFile()
@@ -643,6 +756,10 @@ class Coach():
         results = np.asarray(self._completed_game_results, dtype=np.float64)
         payload = {
             'iteration': int(iteration),
+            'num_mcts_sims': int(self.args.numMCTSSims),
+            'policy_target_temperature': self._arg('policyTargetTemperature', None),
+            'standard_action_temperature_threshold': int(self.args.tempThreshold),
+            'placement_action_temperature': float(self._arg('placementTemperature', 1.0)),
             'duration_seconds': float(duration_seconds),
             'replay_examples': int(replay_examples),
             'games': int(len(lengths)),
@@ -656,6 +773,7 @@ class Coach():
         }
         payload.update(training_metrics or {})
         payload.update(self._placementTelemetry())
+        payload.update(self._policyTargetTelemetry())
         payload.update(self._policyTelemetry())
         if self._reference_suite is not None:
             payload.update(self._reference_suite.evaluate(self.game, self.nnet))
@@ -675,6 +793,36 @@ class Coach():
     def _recordPlacementChoice(self, ply, action):
         square = int(action) // self.game.local_action_size
         self._placement_choices.append((int(ply), square))
+
+    @staticmethod
+    def _newPolicyTargetStats():
+        return {
+            'placement': {'entropy': [], 'support': [], 'one_hot': []},
+            'standard': {'entropy': [], 'support': [], 'one_hot': []},
+        }
+
+    def _recordPolicyTarget(self, canonical_board, policy):
+        phase = 'placement' if (
+            hasattr(self.game, 'isPlacementPhase') and self.game.isPlacementPhase(canonical_board)
+        ) else 'standard'
+        probabilities = np.asarray(policy, dtype=np.float64)
+        positive = probabilities[probabilities > 0]
+        support = int(len(positive))
+        entropy = -float(np.sum(positive * np.log(positive))) if support else 0.0
+        bucket = self._policy_target_stats[phase]
+        bucket['entropy'].append(entropy)
+        bucket['support'].append(support)
+        bucket['one_hot'].append(support <= 1)
+
+    def _policyTargetTelemetry(self):
+        payload = {}
+        for phase, values in self._policy_target_stats.items():
+            if not values['entropy']:
+                continue
+            payload['{}_policy_target_entropy'.format(phase)] = float(np.mean(values['entropy']))
+            payload['{}_policy_target_support'.format(phase)] = float(np.mean(values['support']))
+            payload['{}_policy_target_one_hot_rate'.format(phase)] = float(np.mean(values['one_hot']))
+        return payload
 
     def _placementTelemetry(self):
         if not self._placement_choices:

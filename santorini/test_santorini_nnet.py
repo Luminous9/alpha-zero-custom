@@ -183,6 +183,97 @@ class TestSantoriniNNet(unittest.TestCase):
             nnet_args.max_train_steps = old_max_train_steps
             nnet_args.on_the_fly_symmetry = old_on_the_fly_symmetry
 
+    def test_fresh_data_reuse_controls_step_budget_independently_of_replay_size(self):
+        old_epochs = nnet_args.epochs
+        old_batch_size = nnet_args.batch_size
+        old_max_train_steps = nnet_args.max_train_steps
+        old_replay_reuse = nnet_args.replay_reuse
+        old_on_the_fly_symmetry = nnet_args.on_the_fly_symmetry
+        nnet_args.epochs = 3
+        nnet_args.batch_size = 8
+        nnet_args.max_train_steps = None
+        nnet_args.replay_reuse = 4.0
+        nnet_args.on_the_fly_symmetry = True
+        try:
+            board = self.game.getCanonicalForm(self.game.getInitBoard(), 1)
+            valids = self.game.getValidMoves(board, 1).astype(np.float32)
+            examples = [(board, valids / valids.sum(), 1.0) for _ in range(20)]
+
+            with patch.object(self.nnet.optimizer, 'step', wraps=self.nnet.optimizer.step) as step:
+                metrics = self.nnet.train(examples, new_example_count=10, iteration=12)
+
+            self.assertEqual(step.call_count, 5)
+            self.assertEqual(metrics['uncapped_training_steps'], 5)
+            self.assertEqual(metrics['fresh_training_examples'], 10)
+            self.assertEqual(metrics['target_replay_reuse'], 4.0)
+            self.assertEqual(metrics['actual_replay_reuse'], 4.0)
+            self.assertEqual(metrics['base_replay_epochs'], 2.0)
+            self.assertEqual(metrics['training_schedule'], 'fresh-data-reuse')
+            self.assertEqual(metrics['training_segments_completed'], 3)
+            self.assertEqual(metrics['final_segment_policy_loss'], metrics['policy_loss'])
+            self.assertEqual(metrics['final_segment_value_loss'], metrics['value_loss'])
+            self.assertAlmostEqual(
+                metrics['iteration_total_loss'],
+                metrics['iteration_policy_loss'] + metrics['iteration_value_loss'],
+            )
+        finally:
+            nnet_args.epochs = old_epochs
+            nnet_args.batch_size = old_batch_size
+            nnet_args.max_train_steps = old_max_train_steps
+            nnet_args.replay_reuse = old_replay_reuse
+            nnet_args.on_the_fly_symmetry = old_on_the_fly_symmetry
+
+    def test_validation_metrics_report_placement_and_standard_phases(self):
+        game = SantoriniGame(5, sequential_placement=True)
+        nnet = V3NNetWrapper(game)
+        placement_board = game.getInitBoard()
+        standard_board = placement_board
+        player = 1
+        for location in ((0, 0), (4, 4), (0, 4), (4, 0)):
+            standard_board, player = game.getNextState(
+                standard_board,
+                player,
+                game.getPlacementAction(location),
+            )
+        standard_board = game.getCanonicalForm(standard_board, player)
+        examples = []
+        for board, value in ((placement_board, 1.0), (standard_board, -1.0)):
+            policy = game.getValidMoves(board, 1).astype(np.float32)
+            policy /= policy.sum()
+            examples.append((board, policy, value))
+
+        metrics = nnet._validation_metrics(examples)
+
+        self.assertEqual(metrics['validation_examples'], 2)
+        self.assertEqual(metrics['placement_validation_examples'], 1)
+        self.assertEqual(metrics['standard_validation_examples'], 1)
+        self.assertIn('placement_validation_policy_kl', metrics)
+        self.assertIn('standard_validation_value_loss', metrics)
+        self.assertIn('validation_total_loss', metrics)
+
+    def test_iteration_learning_rate_schedule_uses_absolute_iteration(self):
+        runtime_args = dotdict({
+            'lr': 3e-4,
+            'lr_schedule': [(200, 1e-4), (400, 3e-5)],
+        })
+
+        self.assertEqual(self.nnet._learning_rate_for_iteration(199, runtime_args), 3e-4)
+        self.assertEqual(self.nnet._learning_rate_for_iteration(200, runtime_args), 1e-4)
+        self.assertEqual(self.nnet._learning_rate_for_iteration(450, runtime_args), 3e-5)
+
+    def test_adamw_and_weight_decay_are_configurable(self):
+        old_optimizer = nnet_args.optimizer
+        old_weight_decay = nnet_args.weight_decay
+        nnet_args.optimizer = 'adamw'
+        nnet_args.weight_decay = 1e-4
+        try:
+            nnet = NNetWrapper(self.game)
+            self.assertIsInstance(nnet.optimizer, torch.optim.AdamW)
+            self.assertEqual(nnet.optimizer.param_groups[0]['weight_decay'], 1e-4)
+        finally:
+            nnet_args.optimizer = old_optimizer
+            nnet_args.weight_decay = old_weight_decay
+
     def test_on_the_fly_symmetry_matches_game_transforms(self):
         game = SantoriniGame(5, sequential_placement=True)
         nnet = V3NNetWrapper(game)
