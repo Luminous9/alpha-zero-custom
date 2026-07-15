@@ -46,6 +46,38 @@ def make_coach_args():
 
 
 class TestMainSantoriniOpenings(unittest.TestCase):
+    def test_playout_cap_randomization_configuration(self):
+        with patch(
+            'sys.argv',
+            [
+                'main_santorini.py',
+                '--architecture', 'v3',
+                '--num-mcts-sims', '96',
+                '--playout-cap-randomization',
+                '--playout-cap-full-probability', '0.25',
+                '--playout-cap-fast-sims', '32',
+            ],
+        ):
+            parsed = parse_args()
+
+        coach_args = build_coach_args(parsed)
+        self.assertTrue(coach_args.playoutCapRandomization)
+        self.assertEqual(coach_args.playoutCapFullProbability, 0.25)
+        self.assertEqual(coach_args.playoutCapFastSims, 32)
+        self.assertTrue(coach_args.playoutCapFullPlacement)
+
+    def test_playout_cap_fast_search_must_be_smaller_than_full_search(self):
+        with patch(
+            'sys.argv',
+            [
+                'main_santorini.py',
+                '--num-mcts-sims', '32',
+                '--playout-cap-randomization',
+                '--playout-cap-fast-sims', '32',
+            ],
+        ), self.assertRaises(SystemExit):
+            parse_args()
+
     def test_v3_defaults_to_fresh_replay_reuse_and_validation(self):
         with patch('sys.argv', ['main_santorini.py', '--architecture', 'v3']):
             parsed = parse_args()

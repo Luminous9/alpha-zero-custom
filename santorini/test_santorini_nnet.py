@@ -368,6 +368,32 @@ class TestSantoriniNNet(unittest.TestCase):
         self.assertEqual(len(probs), self.game.getActionSize())
         self.assertAlmostEqual(sum(probs), 1.0, places=5)
 
+    def test_mcts_accepts_per_move_simulation_cap_and_noise_override(self):
+        mcts_args = dotdict({
+            'numMCTSSims': 8,
+            'cpuct': 1.0,
+            'addDirichletNoise': True,
+            'dirichletAlpha': 0.3,
+            'dirichletEpsilon': 0.25,
+        })
+        mcts = MCTS(self.game, self.nnet, mcts_args)
+        board = self.game.getCanonicalForm(self.game.getInitBoard(), 1)
+
+        with patch.object(mcts, 'search') as search, patch.object(
+            mcts,
+            'add_root_noise',
+        ) as add_root_noise:
+            probabilities = mcts.getActionProb(
+                board,
+                temp=1,
+                num_simulations=3,
+                add_root_noise=False,
+            )
+
+        self.assertEqual(search.call_count, 3)
+        add_root_noise.assert_not_called()
+        self.assertAlmostEqual(sum(probabilities), 1.0, places=5)
+
 
 if __name__ == "__main__":
     unittest.main()

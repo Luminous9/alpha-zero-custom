@@ -83,6 +83,7 @@ class Coach():
         self._placement_choices = []
         self._completed_openings = []
         self._policy_target_stats = self._newPolicyTargetStats()
+        self._playout_cap_stats = self._newPlayoutCapStats()
         self._reference_suite = None
         reference_suite_path = self._arg('referenceSuite', None)
         if reference_suite_path:
@@ -169,6 +170,70 @@ class Coach():
         standard_step = max(1, episode_step - placement_steps)
         return int(standard_step < self.args.tempThreshold)
 
+    def _playoutCapSearch(self, canonical_board=None):
+        if not bool(self._arg('playoutCapRandomization', False)):
+            return True, int(self.args.numMCTSSims)
+        if (
+            bool(self._arg('playoutCapFullPlacement', True))
+            and canonical_board is not None
+            and hasattr(self.game, 'isPlacementPhase')
+            and self.game.isPlacementPhase(canonical_board)
+        ):
+            return True, int(self.args.numMCTSSims)
+        full_search = bool(
+            np.random.random() < float(self._arg('playoutCapFullProbability', 0.25))
+        )
+        simulations = (
+            int(self.args.numMCTSSims)
+            if full_search else int(self._arg('playoutCapFastSims', 32))
+        )
+        return full_search, simulations
+
+    @staticmethod
+    def _newPlayoutCapStats():
+        return {
+            'full': {'placement': 0, 'standard': 0},
+            'fast': {'placement': 0, 'standard': 0},
+            'simulations': 0,
+        }
+
+    def _recordPlayoutCapSearch(self, canonical_board, full_search, simulations):
+        if not bool(self._arg('playoutCapRandomization', False)):
+            return
+        phase = 'placement' if (
+            hasattr(self.game, 'isPlacementPhase') and self.game.isPlacementPhase(canonical_board)
+        ) else 'standard'
+        kind = 'full' if full_search else 'fast'
+        self._playout_cap_stats[kind][phase] += 1
+        self._playout_cap_stats['simulations'] += int(simulations)
+
+    def _playoutCapTelemetry(self):
+        if not bool(self._arg('playoutCapRandomization', False)):
+            return {}
+        stats = self._playout_cap_stats
+        full_moves = sum(stats['full'].values())
+        fast_moves = sum(stats['fast'].values())
+        total_moves = full_moves + fast_moves
+        payload = {
+            'playout_cap_full_search_moves': int(full_moves),
+            'playout_cap_fast_search_moves': int(fast_moves),
+            'playout_cap_full_search_rate': float(full_moves / total_moves) if total_moves else None,
+            'playout_cap_average_simulations': (
+                float(stats['simulations'] / total_moves) if total_moves else None
+            ),
+            'playout_cap_total_simulations': int(stats['simulations']),
+        }
+        for phase in ('placement', 'standard'):
+            phase_full = stats['full'][phase]
+            phase_fast = stats['fast'][phase]
+            phase_total = phase_full + phase_fast
+            payload['{}_full_search_moves'.format(phase)] = int(phase_full)
+            payload['{}_fast_search_moves'.format(phase)] = int(phase_fast)
+            payload['{}_full_search_rate'.format(phase)] = (
+                float(phase_full / phase_total) if phase_total else None
+            )
+        return payload
+
     def _policyTargetTemperature(self, action_temperature):
         target_temperature = self._arg('policyTargetTemperature', None)
         return action_temperature if target_temperature is None else float(target_temperature)
@@ -219,21 +284,37 @@ class Coach():
         while True:
             episodeStep += 1
             canonicalBoard = self.game.getCanonicalForm(board, self.curPlayer)
-            action_temperature = self._temperature(canonicalBoard, episodeStep)
-            target_temperature = self._policyTargetTemperature(action_temperature)
-            training_policy = self.mcts.getActionProb(canonicalBoard, temp=target_temperature)
-            training_policy, action_policy = self._selfPlayPoliciesFromTree(
-                self.mcts,
-                canonicalBoard,
-                action_temperature,
-                training_policy=training_policy,
-            )
-            self._appendTrainingPosition(
-                trainExamples,
-                canonicalBoard,
-                self.curPlayer,
-                training_policy,
-            )
+            full_search, simulations = self._playoutCapSearch(canonicalBoard)
+            configured_temperature = self._temperature(canonicalBoard, episodeStep)
+            action_temperature = configured_temperature if full_search else 0
+            if full_search:
+                target_temperature = self._policyTargetTemperature(action_temperature)
+                training_policy = self.mcts.getActionProb(
+                    canonicalBoard,
+                    temp=target_temperature,
+                    num_simulations=simulations,
+                    add_root_noise=True,
+                )
+                training_policy, action_policy = self._selfPlayPoliciesFromTree(
+                    self.mcts,
+                    canonicalBoard,
+                    action_temperature,
+                    training_policy=training_policy,
+                )
+                self._appendTrainingPosition(
+                    trainExamples,
+                    canonicalBoard,
+                    self.curPlayer,
+                    training_policy,
+                )
+            else:
+                action_policy = self.mcts.getActionProb(
+                    canonicalBoard,
+                    temp=0,
+                    num_simulations=simulations,
+                    add_root_noise=False,
+                )
+            self._recordPlayoutCapSearch(canonicalBoard, full_search, simulations)
 
             action = np.random.choice(len(action_policy), p=action_policy)
             if hasattr(self.game, 'isPlacementAction') and self.game.isPlacementAction(action):
@@ -285,6 +366,11 @@ class Coach():
                         episode['canonicalBoard'],
                         episode['episodeStep'],
                     )
+                    episode['fullSearch'], episode['searchSims'] = self._playoutCapSearch(
+                        episode['canonicalBoard']
+                    )
+                    if not episode['fullSearch']:
+                        episode['temp'] = 0
 
                 training_policies, action_policies = self._getBatchedSelfPlayPolicies(activeEpisodes)
                 still_active = []
@@ -294,11 +380,17 @@ class Coach():
                     training_policies,
                     action_policies,
                 ):
-                    self._appendTrainingPosition(
-                        episode['trainExamples'],
+                    if episode['fullSearch']:
+                        self._appendTrainingPosition(
+                            episode['trainExamples'],
+                            episode['canonicalBoard'],
+                            episode['curPlayer'],
+                            training_policy,
+                        )
+                    self._recordPlayoutCapSearch(
                         episode['canonicalBoard'],
-                        episode['curPlayer'],
-                        training_policy,
+                        episode['fullSearch'],
+                        episode['searchSims'],
                     )
 
                     action = np.random.choice(len(action_policy), p=action_policy)
@@ -333,10 +425,15 @@ class Coach():
         return completedExamples
 
     def _getBatchedSelfPlayPolicies(self, episodes):
-        for simulation_index in range(self.args.numMCTSSims):
+        max_simulations = max(
+            int(episode.get('searchSims', self.args.numMCTSSims)) for episode in episodes
+        )
+        for simulation_index in range(max_simulations):
             pending = []
 
             for episode in episodes:
+                if simulation_index >= int(episode.get('searchSims', self.args.numMCTSSims)):
+                    continue
                 leaf = episode['mcts'].select_leaf(episode['canonicalBoard'])
                 if leaf['needs_eval']:
                     pending.append((episode['mcts'], leaf))
@@ -358,16 +455,22 @@ class Coach():
 
             if simulation_index == 0:
                 for episode in episodes:
-                    episode['mcts'].add_root_noise(episode['canonicalBoard'])
+                    if episode.get('fullSearch', True):
+                        episode['mcts'].add_root_noise(episode['canonicalBoard'])
 
-        pairs = [
-            self._selfPlayPoliciesFromTree(
-                episode['mcts'],
-                episode['canonicalBoard'],
-                episode['temp'],
-            )
-            for episode in episodes
-        ]
+        pairs = []
+        for episode in episodes:
+            if episode.get('fullSearch', True):
+                pairs.append(self._selfPlayPoliciesFromTree(
+                    episode['mcts'],
+                    episode['canonicalBoard'],
+                    episode['temp'],
+                ))
+            else:
+                pairs.append((None, episode['mcts'].getActionProbFromTree(
+                    episode['canonicalBoard'],
+                    temp=0,
+                )))
         return (
             [training_policy for training_policy, _ in pairs],
             [action_policy for _, action_policy in pairs],
@@ -393,6 +496,7 @@ class Coach():
             self._placement_choices = []
             self._completed_openings = []
             self._policy_target_stats = self._newPolicyTargetStats()
+            self._playout_cap_stats = self._newPlayoutCapStats()
             iterationTrainExamples = None
             # examples of the iteration
             if not self.skipFirstSelfPlay or local_iteration > 1:
@@ -455,6 +559,10 @@ class Coach():
                     'learning_rate': metrics.get('learning_rate'),
                     'weight_decay': getattr(getattr(self.nnet, 'net_args', None), 'weight_decay', None),
                     'lr_schedule': getattr(getattr(self.nnet, 'net_args', None), 'lr_schedule', None),
+                    'playout_cap_randomization': self._arg('playoutCapRandomization', False),
+                    'playout_cap_full_probability': self._arg('playoutCapFullProbability', None),
+                    'playout_cap_fast_sims': self._arg('playoutCapFastSims', None),
+                    'playout_cap_full_placement': self._arg('playoutCapFullPlacement', True),
                 }
                 self.nnet.save_checkpoint(
                     folder=self.args.checkpoint,
@@ -760,6 +868,16 @@ class Coach():
             'policy_target_temperature': self._arg('policyTargetTemperature', None),
             'standard_action_temperature_threshold': int(self.args.tempThreshold),
             'placement_action_temperature': float(self._arg('placementTemperature', 1.0)),
+            'playout_cap_randomization': bool(self._arg('playoutCapRandomization', False)),
+            'playout_cap_full_probability': (
+                float(self._arg('playoutCapFullProbability', 0.25))
+                if self._arg('playoutCapRandomization', False) else None
+            ),
+            'playout_cap_fast_sims': (
+                int(self._arg('playoutCapFastSims', 32))
+                if self._arg('playoutCapRandomization', False) else None
+            ),
+            'playout_cap_full_placement': bool(self._arg('playoutCapFullPlacement', True)),
             'duration_seconds': float(duration_seconds),
             'replay_examples': int(replay_examples),
             'games': int(len(lengths)),
@@ -774,6 +892,7 @@ class Coach():
         payload.update(training_metrics or {})
         payload.update(self._placementTelemetry())
         payload.update(self._policyTargetTelemetry())
+        payload.update(self._playoutCapTelemetry())
         payload.update(self._policyTelemetry())
         if self._reference_suite is not None:
             payload.update(self._reference_suite.evaluate(self.game, self.nnet))

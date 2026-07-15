@@ -102,6 +102,25 @@ def parse_args():
     parser.add_argument('--update-threshold', type=float)
     parser.add_argument('--maxlen-of-queue', type=int)
     parser.add_argument('--num-mcts-sims', type=int)
+    parser.add_argument(
+        '--playout-cap-randomization',
+        action='store_true',
+        help=(
+            'Randomly use full or fast MCTS searches during self-play. Only full-search '
+            'positions are stored for training; fast turns disable root noise and action sampling.'
+        ),
+    )
+    parser.add_argument('--playout-cap-full-probability', type=float, default=0.25)
+    parser.add_argument(
+        '--playout-cap-fast-sims',
+        type=int,
+        help='MCTS simulations on fast turns; defaults to one third of --num-mcts-sims.',
+    )
+    parser.add_argument(
+        '--playout-cap-randomize-placement',
+        action='store_true',
+        help='Also randomize the four placement turns; by default they always receive full search.',
+    )
     parser.add_argument('--arena-compare', type=int)
     parser.add_argument('--cpuct', type=float, default=1.0)
     parser.add_argument('--checkpoint', type=str)
@@ -267,6 +286,13 @@ def parse_args():
         parser.error('--learning-rate must be positive.')
     if args.weight_decay is not None and args.weight_decay < 0:
         parser.error('--weight-decay cannot be negative.')
+    if not 0 < args.playout_cap_full_probability <= 1:
+        parser.error('--playout-cap-full-probability must be greater than 0 and at most 1.')
+    if args.playout_cap_randomization:
+        full_sims = args.num_mcts_sims or PRESETS[args.preset]['numMCTSSims']
+        fast_sims = args.playout_cap_fast_sims or max(1, full_sims // 3)
+        if fast_sims >= full_sims:
+            parser.error('--playout-cap-fast-sims must be less than the full MCTS simulation count.')
     return args
 
 
@@ -285,6 +311,12 @@ def build_coach_args(parsed_args):
     policy_target_temperature = getattr(parsed_args, 'policy_target_temperature', None)
     if policy_target_temperature is None and parsed_args.architecture == 'v3':
         policy_target_temperature = 1.0
+    full_mcts_sims = parsed_args.num_mcts_sims or preset['numMCTSSims']
+    playout_cap_fast_sims = (
+        parsed_args.playout_cap_fast_sims
+        if parsed_args.playout_cap_fast_sims is not None
+        else max(1, full_mcts_sims // 3)
+    )
     load_file = getattr(parsed_args, 'load_file', None) or (
         'latest-training.pth.tar' if training_mode == 'latest' else 'best.pth.tar'
     )
@@ -318,6 +350,14 @@ def build_coach_args(parsed_args):
         'trainingMode': training_mode,
         'placementTemperature': getattr(parsed_args, 'placement_temperature', 1.0),
         'policyTargetTemperature': policy_target_temperature,
+        'playoutCapRandomization': getattr(parsed_args, 'playout_cap_randomization', False),
+        'playoutCapFullProbability': getattr(parsed_args, 'playout_cap_full_probability', 0.25),
+        'playoutCapFastSims': playout_cap_fast_sims,
+        'playoutCapFullPlacement': not getattr(
+            parsed_args,
+            'playout_cap_randomize_placement',
+            False,
+        ),
         'addDirichletNoise': (
             training_mode == 'latest' and not getattr(parsed_args, 'no_dirichlet_noise', False)
         ),
@@ -636,12 +676,16 @@ def main():
         )
 
     log.info(
-        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s max_train_steps=%s replay_reuse=%s validation=%.3f batch=%s symmetry=%s policy_target_temp=%s optimizer=%s lr=%g weight_decay=%g lr_schedule=%s checkpoint=%s',
+        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s playout_cap=%s full_prob=%.2f fast_sims=%s placement_full=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s max_train_steps=%s replay_reuse=%s validation=%.3f batch=%s symmetry=%s policy_target_temp=%s optimizer=%s lr=%g weight_decay=%g lr_schedule=%s checkpoint=%s',
         parsed_args.architecture,
         parsed_args.preset,
         coach_args.numIters,
         coach_args.numEps,
         coach_args.numMCTSSims,
+        coach_args.playoutCapRandomization,
+        coach_args.playoutCapFullProbability,
+        coach_args.playoutCapFastSims,
+        coach_args.playoutCapFullPlacement,
         coach_args.selfPlayBatchSize,
         coach_args.arenaCompare,
         coach_args.arenaBatchSize,

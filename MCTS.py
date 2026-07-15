@@ -29,7 +29,13 @@ class MCTS():
         self.Vs = {}  # temporarily caches dense valid masks until a leaf is expanded
         self.noised_roots = set()
 
-    def getActionProb(self, canonicalBoard, temp=1):
+    def getActionProb(
+        self,
+        canonicalBoard,
+        temp=1,
+        num_simulations=None,
+        add_root_noise=True,
+    ):
         """
         This function performs numMCTSSims simulations of MCTS starting from
         canonicalBoard.
@@ -38,9 +44,15 @@ class MCTS():
             probs: a policy vector where the probability of the ith action is
                    proportional to Nsa[(s,a)]**(1./temp)
         """
-        for i in range(self.args.numMCTSSims):
+        simulations = (
+            int(self.args.numMCTSSims)
+            if num_simulations is None else int(num_simulations)
+        )
+        if simulations < 1:
+            raise ValueError('MCTS requires at least one simulation.')
+        for i in range(simulations):
             self.search(canonicalBoard)
-            if i == 0:
+            if i == 0 and add_root_noise:
                 self.add_root_noise(canonicalBoard)
 
         return self.getActionProbFromTree(canonicalBoard, temp=temp)

@@ -130,10 +130,24 @@ V3 separates the policy saved for training from the policy used to choose the se
 - All four placement actions use `placementTemperature`, which defaults to `1.0`.
 - Standard actions use temperature `1` until `tempThreshold`, counted from the first standard action, and temperature `0` afterward.
 - Both policies come from the same MCTS search; this does not run extra simulations.
-- Root Dirichlet noise is enabled by default in V3 latest-training mode.
+- Root Dirichlet noise is enabled on full-search turns in V3 latest-training mode.
 - The default Dirichlet parameters are alpha `0.30` and epsilon `0.25`.
 
 Action temperature controls how self-play samples from the MCTS visit distribution; it does not enforce a fixed percentage of deliberately bad moves. Target temperature controls only the replay label. Dirichlet noise supplies additional root exploration, while the legal-action mask prevents invalid placement or move/build actions.
+
+### Playout-cap randomization
+
+V3 optionally separates the search budget needed for strong policy targets from the independent games needed for value learning. The production notebook enables playout-cap randomization with:
+
+- full 96-simulation searches on all four placement turns to preserve opening quality and policy coverage;
+- 96-simulation full searches on 25% of standard turns;
+- 32-simulation fast searches on the other 75% of standard turns;
+- 240 games per iteration, approximately doubling independent outcomes for only about 10% more nominal root simulations than Run 6 at its observed game length; and
+- replay storage only for full-search turns.
+
+Fast standard turns disable root Dirichlet noise and choose the highest-visit action without temperature sampling. They still advance the game and determine its final outcome, so each game contributes value information through its full-search positions without adding a low-quality policy target. Full turns retain the normal temperature-1 replay policy, configured action temperature, and root noise. The choice is sampled independently at every standard turn and is covered by the resumable RNG state. Placement randomization is available as an explicit option but is not enabled in the production notebook.
+
+This follows the core playout-cap randomization method from KataGo, adapted conservatively to Santorini's much smaller full-search budget. It requires no replay-format change: older examples are implicitly full-search examples, and new fast-search positions are simply not stored. Telemetry records full/fast move counts and rates, average and total simulations, and phase-specific full-search rates.
 
 ## Continuous Latest Training
 
@@ -335,8 +349,9 @@ The baseline long-run configuration is:
 | Architecture | V3 |
 | Training mode | latest |
 | Iterations per notebook chunk | Configurable; 10 by default |
-| Self-play games per iteration | 80 |
-| MCTS simulations | 96 |
+| Self-play games per iteration | 240 with playout-cap randomization |
+| Full / fast MCTS simulations | 96 / 32 |
+| Full-search probability | 100% placement; 25% standard |
 | Self-play batch size | 128 |
 | Optimizer | AdamW |
 | Initial learning rate | 0.0003 |

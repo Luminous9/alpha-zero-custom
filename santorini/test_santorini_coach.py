@@ -3,6 +3,7 @@ import pickle
 import tempfile
 import unittest
 import random
+from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
@@ -68,7 +69,7 @@ class SplitPolicyMCTS:
     def __init__(self):
         self.calls = []
 
-    def getActionProb(self, board, temp=1):
+    def getActionProb(self, board, temp=1, **kwargs):
         self.calls.append(('search', float(temp)))
         return np.array([0.25, 0.75], dtype=np.float32)
 
@@ -93,6 +94,57 @@ class FixedOpeningSampler:
 
 
 class TestSantoriniCoachExamples(unittest.TestCase):
+    def test_playout_cap_keeps_placement_at_full_search_by_default(self):
+        game = SantoriniGame(5, sequential_placement=True)
+        coach = object.__new__(Coach)
+        coach.game = game
+        coach.args = dotdict({
+            'numMCTSSims': 96,
+            'playoutCapRandomization': True,
+            'playoutCapFullProbability': 0.25,
+            'playoutCapFastSims': 32,
+            'playoutCapFullPlacement': True,
+        })
+        placement_board = game.getInitBoard()
+        standard_board = placement_board
+        player = 1
+        for location in ((0, 0), (4, 4), (0, 4), (4, 0)):
+            standard_board, player = game.getNextState(
+                standard_board,
+                player,
+                game.getPlacementAction(location),
+            )
+        standard_board = game.getCanonicalForm(standard_board, player)
+
+        with patch('numpy.random.random', return_value=0.99):
+            self.assertEqual(coach._playoutCapSearch(placement_board), (True, 96))
+            self.assertEqual(coach._playoutCapSearch(standard_board), (False, 32))
+
+    def test_playout_cap_randomization_stores_only_full_search_turns(self):
+        game = TinyGame()
+        nnet = BatchCountingNNet(game)
+        args = dotdict({
+            'numMCTSSims': 2,
+            'cpuct': 1.0,
+            'tempThreshold': 10,
+            'selfPlayBatchSize': 1,
+            'quiet': True,
+            'playoutCapRandomization': True,
+            'playoutCapFullProbability': 0.25,
+            'playoutCapFastSims': 1,
+        })
+        coach = Coach(game, nnet, args)
+        coach._playoutCapSearch = Mock(side_effect=[(True, 2), (False, 1)])
+
+        examples = coach.executeEpisode()
+        telemetry = coach._playoutCapTelemetry()
+
+        self.assertEqual(len(examples), 1)
+        self.assertEqual(telemetry['playout_cap_full_search_moves'], 1)
+        self.assertEqual(telemetry['playout_cap_fast_search_moves'], 1)
+        self.assertEqual(telemetry['playout_cap_full_search_rate'], 0.5)
+        self.assertEqual(telemetry['playout_cap_average_simulations'], 1.5)
+
     def test_validation_split_is_deterministic_and_keeps_duplicate_boards_together(self):
         coach = object.__new__(Coach)
         coach.args = dotdict({'validationFraction': 0.05})
@@ -406,6 +458,35 @@ class TestSantoriniCoachBatchedSelfPlay(unittest.TestCase):
             self.assertEqual(board.shape, (1,))
             self.assertAlmostEqual(float(sum(pi)), 1.0, places=5)
             self.assertIn(value, [-1, 1])
+
+    def test_batched_playout_cap_uses_per_turn_caps_and_full_targets_only(self):
+        game = TinyGame()
+        nnet = BatchCountingNNet(game)
+        args = dotdict({
+            'numMCTSSims': 2,
+            'cpuct': 1.0,
+            'tempThreshold': 10,
+            'selfPlayBatchSize': 2,
+            'quiet': True,
+            'playoutCapRandomization': True,
+            'playoutCapFullProbability': 0.25,
+            'playoutCapFastSims': 1,
+        })
+        coach = Coach(game, nnet, args)
+        coach._playoutCapSearch = Mock(side_effect=[
+            (True, 2), (False, 1),
+            (False, 1), (True, 2),
+        ])
+
+        examples = coach.executeEpisodesBatched(2)
+        telemetry = coach._playoutCapTelemetry()
+
+        self.assertEqual(len(examples), 2)
+        self.assertIn(2, nnet.batch_sizes)
+        self.assertIn(1, nnet.batch_sizes)
+        self.assertEqual(telemetry['playout_cap_full_search_moves'], 2)
+        self.assertEqual(telemetry['playout_cap_fast_search_moves'], 2)
+        self.assertEqual(telemetry['playout_cap_average_simulations'], 1.5)
 
     def test_batched_self_play_uses_opening_sampler(self):
         np.random.seed(13)
