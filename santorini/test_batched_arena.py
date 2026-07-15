@@ -31,6 +31,21 @@ class TinyGame:
         return board.tobytes()
 
 
+class OneMovePlacementGame(TinyGame):
+    def __init__(self):
+        self.actions = []
+
+    def getNextState(self, board, player, action):
+        self.actions.append(int(action))
+        return np.array([action + 1], dtype=np.int64), -player
+
+    def getGameEnded(self, board, player):
+        return 1 if board[0] else 0
+
+    def isPlacementPhase(self, board):
+        return board[0] == 0
+
+
 class BatchCountingNNet:
     def __init__(self):
         self.batch_sizes = []
@@ -65,6 +80,31 @@ class TestBatchedMCTSArena(unittest.TestCase):
         self.assertEqual((one_won, two_won, draws), (2, 2, 0))
         self.assertGreaterEqual(max(player1_nnet.batch_sizes), 2)
         self.assertGreaterEqual(max(player2_nnet.batch_sizes), 2)
+
+    def test_seeded_placement_sampling_is_reproducible_and_varied(self):
+        seeds = list(range(20))
+
+        def play():
+            game = OneMovePlacementGame()
+            arena = BatchedMCTSArena(
+                game,
+                BatchCountingNNet(),
+                BatchCountingNNet(),
+                dotdict({'numMCTSSims': 4, 'cpuct': 1.0}),
+                batch_size=20,
+                quiet=True,
+                placement_temperature=1.0,
+                game_seeds=seeds,
+            )
+            result = arena.playGames(40)
+            return result, game.actions
+
+        first_result, first_actions = play()
+        second_result, second_actions = play()
+
+        self.assertEqual(first_result, second_result)
+        self.assertEqual(first_actions, second_actions)
+        self.assertEqual(set(first_actions), {0, 1})
 
 
 if __name__ == "__main__":

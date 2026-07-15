@@ -20,6 +20,8 @@ class BatchedMCTSArena:
         quiet=False,
         opening_boards=None,
         progress_file=None,
+        placement_temperature=0.0,
+        game_seeds=None,
     ):
         self.game = game
         self.nnets = {
@@ -31,6 +33,8 @@ class BatchedMCTSArena:
         self.quiet = quiet
         self.opening_boards = opening_boards
         self.progress_file = progress_file
+        self.placement_temperature = float(placement_temperature)
+        self.game_seeds = game_seeds
 
     def playGames(self, num):
         num = int(num / 2)
@@ -67,7 +71,12 @@ class BatchedMCTSArena:
             while completed < num:
                 while launched < num and len(active) < self.batch_size:
                     opening_board = self.opening_boards[launched] if self.opening_boards is not None else None
-                    active.append(self._newGame(side_to_player, opening_board=opening_board))
+                    game_seed = self.game_seeds[launched] if self.game_seeds is not None else None
+                    active.append(self._newGame(
+                        side_to_player,
+                        opening_board=opening_board,
+                        game_seed=game_seed,
+                    ))
                     launched += 1
 
                 for game_state in active:
@@ -115,7 +124,7 @@ class BatchedMCTSArena:
 
         return oneWon, twoWon, draws
 
-    def _newGame(self, side_to_player, opening_board=None):
+    def _newGame(self, side_to_player, opening_board=None, game_seed=None):
         return {
             'board': opening_board.copy() if opening_board is not None else self.game.getInitBoard(),
             'curPlayer': 1,
@@ -124,6 +133,7 @@ class BatchedMCTSArena:
                 1: MCTS(self.game, self.nnets[1], self.args),
                 -1: MCTS(self.game, self.nnets[-1], self.args),
             },
+            'rng': np.random.RandomState(game_seed) if game_seed is not None else np.random,
         }
 
     def _getBatchedActions(self, active):
@@ -154,20 +164,34 @@ class BatchedMCTSArena:
                 for (mcts, leaf), policy, value in zip(pending, policies, values):
                     mcts.complete_search(leaf, policy, float(value))
 
-        return [
-            self._selectLegalAction(
-                game_state['canonicalBoard'],
-                game_state['mcts_by_player'][
-                    game_state['side_to_player'][game_state['curPlayer']]
-                ].getActionProbFromTree(game_state['canonicalBoard'], temp=0),
+        actions = []
+        for game_state in active:
+            board = game_state['canonicalBoard']
+            is_placement = bool(
+                hasattr(self.game, 'isPlacementPhase')
+                and self.game.isPlacementPhase(board)
             )
-            for game_state in active
-        ]
+            sample = is_placement and self.placement_temperature > 0
+            temperature = self.placement_temperature if sample else 1.0
+            probs = game_state['mcts_by_player'][
+                game_state['side_to_player'][game_state['curPlayer']]
+            ].getActionProbFromTree(board, temp=temperature)
+            actions.append(self._selectLegalAction(
+                board,
+                probs,
+                sample=sample,
+                rng=game_state['rng'],
+            ))
+        return actions
 
-    def _selectLegalAction(self, canonicalBoard, probs):
+    def _selectLegalAction(self, canonicalBoard, probs, sample=False, rng=None):
         probs = np.array(probs)
         valids = self.game.getValidMoves(canonicalBoard, 1)
         masked_probs = probs * valids
         if masked_probs.sum() > 0:
+            if sample:
+                masked_probs = masked_probs / masked_probs.sum()
+                generator = rng if rng is not None else np.random
+                return int(generator.choice(len(masked_probs), p=masked_probs))
             return int(np.argmax(masked_probs))
         return int(np.flatnonzero(valids)[0])

@@ -148,6 +148,10 @@ Preserving the optimizer means restoring Adam's accumulated first- and second-mo
 
 The saved iteration number is restored so iteration numbering, milestone scheduling, and telemetry continue rather than restarting at one.
 
+When a run resumes exactly on a milestone boundary and the numbered checkpoint was not included in the downloaded export, startup recreates that weight-only milestone from the loaded current model. This lets the next milestone compare against the correct endpoint without requiring an otherwise redundant upload.
+
+Evaluation-only milestone and anchor matches preserve and restore Python, NumPy, Torch, and CUDA random-number-generator state. Loading an opponent or sampling a telemetry game therefore does not change the subsequent self-play or optimization trajectory recorded by `latest-training.pth.tar`.
+
 ## Telemetry
 
 Telemetry is written after every completed training iteration to:
@@ -191,9 +195,40 @@ Entropy should be interpreted diagnostically rather than as a score that must al
 
 Every 10 iterations by default, V3 saves a milestone checkpoint. Once both endpoints exist, it plays a non-gating match between the current checkpoint and the checkpoint 10 iterations earlier.
 
-The result includes wins, draws, decisive-game win rate, and a 95% Wilson confidence interval. The match never accepts, rejects, or rolls back a model. With a fresh run, iteration 10 creates the first milestone and iteration 20 produces the first 10-iteration comparison.
+Each milestone now contains two paired evaluations:
+
+- The standard-play match uses 20 fixed, symmetry-distinct completed openings for 40 games. Every opening is played once with each network in each seat. The suite is sampled once from a fixed telemetry seed and reconstructed identically after a Kaggle resume.
+- The placement-inclusive match starts from the empty board. Placement actions are sampled from each network's MCTS visit distribution using 20 fixed per-game seeds and placement temperature `1.0`; standard actions remain deterministic. Reusing the paired seeds makes the measurement reproducible while avoiding 20 identical copies of the same empty-board game.
+
+The two results are kept separate because a completed-opening match measures standard play cleanly, while the placement-inclusive result measures the combined effect of learned setup and play. Both include wins, draws, decisive-game win rate, and an approximate 95% Wilson confidence interval. The match never accepts, rejects, or rolls back a model. With a fresh run, iteration 10 creates the first milestone and iteration 20 produces the first 10-iteration comparison.
 
 The completed record and confidence interval are logged immediately in the training output and are also retained in TensorBoard and `telemetry.jsonl`.
+
+### Fixed strength anchor
+
+Training can optionally load a fixed V1, V2, or V3 checkpoint as an evaluation-only anchor. The recommended V3 training configuration uses the early V1 `santorini_kaggle_training2` model every 10 iterations because it provides a stable absolute target that does not move with the self-play population.
+
+The anchor uses the same fixed symmetry-distinct completed-opening suite and equal MCTS simulation budgets for both contestants. It therefore measures standard-play strength and is compatible with V1's legacy policy, which cannot select V3 placement actions. Anchor results are logged live and written under `anchor_*` fields in TensorBoard and `telemetry.jsonl`. They never gate, roll back, or otherwise affect training.
+
+### Greedy benchmark
+
+The notebook's final greedy benchmark is also a standard-play evaluation. It uses 20 fixed, distinct symmetry-reduced completed openings, plays both seat assignments, and resets V3's MCTS tree before every game. The fixed `--opening-seed` makes the suite identical across runs, and the JSON result records both the requested and distinct opening counts.
+
+The equivalent terminal command is:
+
+```bash
+.venv/bin/python pit_santorini.py \
+  --architecture v3 \
+  --checkpoint-folder ./temp/santorini_v3_run5 \
+  --checkpoint-file latest.pth.tar \
+  --baseline greedy \
+  --opening-source unique \
+  --opening-seed 20260715 \
+  --games 40 \
+  --sims 64
+```
+
+Using `--opening-source game` with V3 intentionally starts every game from the same empty board. Although MCTS is now reset correctly, deterministic temperature-zero play can still repeat the same trajectory, so that mode is a single-start diagnostic rather than a diverse strength benchmark. Placement-inclusive strength is measured by the seeded milestone match instead.
 
 ## V2 Reference-Search Suite
 
@@ -261,6 +296,9 @@ The baseline long-run configuration is:
 | Training batch size | 512 |
 | Replay history | 20 iterations |
 | Milestone interval | 10 iterations |
+| Standard milestone games | 40 on 20 fixed completed openings |
+| Placement-inclusive milestone games | 40 using 20 fixed seed pairs |
+| Fixed V1 anchor | Optional, 40 games every 10 iterations |
 | Placement temperature | 1.0 |
 | Dirichlet alpha / epsilon | 0.30 / 0.25 |
 
@@ -268,7 +306,7 @@ These values are an initial operating point, not immutable architecture constant
 
 ### Fresh run inputs
 
-A fresh run requires only the repository and a Kaggle GPU. Leave the resume source empty. The reference suite is optional; attach it as a Kaggle Dataset and configure its path if reference metrics are desired.
+A fresh run requires only the repository and a Kaggle GPU. Leave the resume source empty. The reference suite and fixed strength anchor are optional evaluation inputs. Attach either as a Kaggle Dataset and configure `REFERENCE_SUITE` and `ANCHOR_CHECKPOINT` in the notebook. `ANCHOR_CHECKPOINT` may be the exact `best.pth.tar` file or a dataset directory containing a single preferred `best.pth.tar`.
 
 ### Resume inputs
 

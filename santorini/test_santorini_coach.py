@@ -2,10 +2,13 @@ import os
 import pickle
 import tempfile
 import unittest
+import random
 
 import numpy as np
+import torch
 
-from Coach import Coach
+from Coach import Coach, preserve_rng_state
+from santorini.SantoriniGame import SantoriniGame
 from utils import dotdict
 
 
@@ -66,6 +69,23 @@ class FixedOpeningSampler:
 
 
 class TestSantoriniCoachExamples(unittest.TestCase):
+    def test_evaluation_rng_guard_restores_training_randomness(self):
+        random.seed(41)
+        np.random.seed(41)
+        torch.manual_seed(41)
+        expected = (random.random(), np.random.random(), float(torch.rand(1)))
+
+        random.seed(41)
+        np.random.seed(41)
+        torch.manual_seed(41)
+        with preserve_rng_state():
+            random.random()
+            np.random.random()
+            torch.rand(10)
+        actual = (random.random(), np.random.random(), float(torch.rand(1)))
+
+        self.assertEqual(actual, expected)
+
     def make_coach_shell(self, load_folder, load_file='best.pth.tar'):
         coach = object.__new__(Coach)
         coach.args = dotdict({
@@ -200,6 +220,33 @@ class TestSantoriniCoachExamples(unittest.TestCase):
 
 
 class TestSantoriniCoachBatchedSelfPlay(unittest.TestCase):
+    def test_latest_telemetry_suites_are_fixed_distinct_and_reproducible(self):
+        game = SantoriniGame(5, sequential_placement=True)
+        args = dotdict({
+            'trainingMode': 'latest',
+            'numMCTSSims': 2,
+            'cpuct': 1.0,
+            'telemetryMatchGames': 4,
+            'telemetryPlacementGames': 4,
+            'telemetryOpeningSeed': 1234,
+        })
+
+        first = Coach(game, BatchCountingNNet(game), args)
+        second = Coach(game, BatchCountingNNet(game), args)
+
+        self.assertEqual(len(first._telemetry_opening_boards), 2)
+        self.assertEqual(
+            len({board.tobytes() for board in first._telemetry_opening_boards}),
+            2,
+        )
+        for first_board, second_board in zip(
+            first._telemetry_opening_boards,
+            second._telemetry_opening_boards,
+        ):
+            np.testing.assert_array_equal(first_board, second_board)
+        self.assertEqual(first._telemetry_placement_seeds, second._telemetry_placement_seeds)
+        self.assertEqual(len(set(first._telemetry_placement_seeds)), 2)
+
     def test_batched_self_play_uses_batched_prediction(self):
         np.random.seed(13)
         game = TinyGame()

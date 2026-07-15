@@ -1,13 +1,16 @@
 import json
 import logging
 import os
+import random
 import sys
 import time
 from collections import deque
+from contextlib import contextmanager
 from pickle import Pickler, Unpickler
 from random import shuffle
 
 import numpy as np
+import torch
 from tqdm import tqdm
 
 from Arena import Arena
@@ -29,7 +32,31 @@ try:
 except ImportError:
     ReferenceSuite = None
 
+try:
+    from santorini.SantoriniOpeningBook import SantoriniRandomOpeningSampler
+except ImportError:
+    SantoriniRandomOpeningSampler = None
+
+from utils import dotdict
+
 log = logging.getLogger(__name__)
+
+
+@contextmanager
+def preserve_rng_state():
+    """Keep evaluation-only work from changing the resumable training trajectory."""
+    python_state = random.getstate()
+    numpy_state = np.random.get_state()
+    torch_state = torch.get_rng_state()
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    try:
+        yield
+    finally:
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+        torch.set_rng_state(torch_state)
+        if cuda_states is not None:
+            torch.cuda.set_rng_state_all(cuda_states)
 
 
 class Coach():
@@ -38,13 +65,14 @@ class Coach():
     in Game and NeuralNet. args are specified in main.py.
     """
 
-    def __init__(self, game, nnet, args, opening_sampler=None):
+    def __init__(self, game, nnet, args, opening_sampler=None, anchor_nnet=None):
         self.game = game
         self.nnet = nnet
         self.args = args
         self.training_mode = self._arg('trainingMode', 'arena')
         self.pnet = self.nnet.__class__(self.game) if self.training_mode == 'arena' else None
         self.opening_sampler = opening_sampler
+        self.anchor_nnet = anchor_nnet
         self.mcts = MCTS(self.game, self.nnet, self.args)
         self.trainExamplesHistory = []  # history of examples from args.numItersForTrainExamplesHistory latest iterations
         self.skipFirstSelfPlay = False  # can be overriden in loadTrainExamples()
@@ -59,6 +87,8 @@ class Coach():
             if ReferenceSuite is None:
                 raise RuntimeError('Reference-suite telemetry support is unavailable.')
             self._reference_suite = ReferenceSuite(reference_suite_path)
+        self._telemetry_opening_boards = self._buildTelemetryOpeningSuite()
+        self._telemetry_placement_seeds = self._buildTelemetryPlacementSeeds()
         self._writer = None
         telemetry_dir = self._arg('telemetryDir', None)
         if telemetry_dir and SummaryWriter is not None:
@@ -318,7 +348,12 @@ class Coach():
                         folder=self.args.checkpoint,
                         filename=self.getCheckpointFile(i),
                     )
-                    metrics.update(self._runMilestoneMatch(i, milestone_interval))
+                    with preserve_rng_state():
+                        metrics.update(self._runMilestoneMatch(i, milestone_interval))
+                anchor_interval = max(1, int(self._arg('anchorInterval', milestone_interval)))
+                if self.anchor_nnet is not None and i % anchor_interval == 0:
+                    with preserve_rng_state():
+                        metrics.update(self._runAnchorMatch(i))
                 self._writeTelemetry(i, metrics, time.time() - iteration_started, len(trainExamples))
                 if local_iteration == 1 and self._arg('deleteLoadedExamplesAfterFirstIteration', False):
                     self._deleteLoadedTrainExamplesFile()
@@ -682,32 +717,51 @@ class Coach():
                 metrics['{}_normalized_legal_entropy'.format(phase)] = float(np.mean(values['entropy']))
         return metrics
 
-    def _runMilestoneMatch(self, iteration, milestone_interval):
-        game_count = int(self._arg('telemetryMatchGames', 40))
-        previous_iteration = iteration - milestone_interval
-        previous_filename = self.getCheckpointFile(previous_iteration)
-        previous_path = os.path.join(self.args.checkpoint, previous_filename)
-        if game_count <= 0 or previous_iteration <= 0 or not os.path.isfile(previous_path):
-            return {}
+    def _buildTelemetryOpeningSuite(self):
+        if self.training_mode != 'latest' and self.anchor_nnet is None:
+            return []
+        standard_games = int(self._arg('telemetryMatchGames', 40))
+        anchor_games = int(self._arg('anchorGames', 40)) if self.anchor_nnet is not None else 0
+        opening_count = max(standard_games, anchor_games) // 2
+        if opening_count <= 0:
+            return []
+        if SantoriniRandomOpeningSampler is None:
+            raise RuntimeError('Symmetry-distinct telemetry opening support is unavailable.')
+        seed = int(self._arg('telemetryOpeningSeed', 20260715))
+        sampler = SantoriniRandomOpeningSampler(
+            board_size=self.game.n,
+            random_orientation=True,
+            rng=np.random.RandomState(seed),
+        )
+        return sampler.sample_distinct_arena_suite(opening_count)
 
-        log.info(
-            'Running non-gating milestone telemetry: checkpoint %s vs %s (%s games)',
-            iteration,
-            previous_iteration,
-            game_count,
-        )
-        previous = self.nnet.__class__(self.game)
-        previous.load_checkpoint(self.args.checkpoint, previous_filename)
-        arena = BatchedMCTSArena(
-            self.game,
-            previous,
-            self.nnet,
-            self.args,
-            batch_size=max(1, int(self._arg('telemetryMatchBatchSize', self._self_play_batch_size()))),
-            quiet=self._quiet(),
-        )
-        previous_wins, current_wins, draws = arena.playGames(game_count)
-        decisive = previous_wins + current_wins
+    def _buildTelemetryPlacementSeeds(self):
+        if self.training_mode != 'latest':
+            return []
+        game_count = int(self._arg('telemetryPlacementGames', self._arg('telemetryMatchGames', 40)))
+        seed_count = game_count // 2
+        if seed_count <= 0:
+            return []
+        rng = np.random.RandomState(int(self._arg('telemetryOpeningSeed', 20260715)) + 1)
+        seeds = []
+        seen = set()
+        while len(seeds) < seed_count:
+            value = int(rng.randint(0, 2 ** 31 - 1))
+            if value not in seen:
+                seen.add(value)
+                seeds.append(value)
+        return seeds
+
+    def _matchArgs(self, simulations=None):
+        args = dotdict(dict(self.args))
+        if simulations is not None:
+            args.numMCTSSims = int(simulations)
+        args.addDirichletNoise = False
+        return args
+
+    @staticmethod
+    def _matchStatistics(opponent_wins, current_wins, draws):
+        decisive = opponent_wins + current_wins
         win_rate = float(current_wins / decisive) if decisive else None
         confidence_low = confidence_high = None
         if decisive:
@@ -719,34 +773,167 @@ class Coach():
             ) / denominator
             confidence_low = float(center - margin)
             confidence_high = float(center + margin)
-            log.info(
-                'Milestone result: checkpoint %s vs %s = %s-%s-%s '
-                '(current-previous-draws), current win rate %.1f%%, 95%% CI %.1f%%-%.1f%%',
-                iteration,
-                previous_iteration,
-                current_wins,
-                previous_wins,
-                draws,
-                100.0 * win_rate,
-                100.0 * confidence_low,
-                100.0 * confidence_high,
-            )
-        else:
-            log.info(
-                'Milestone result: checkpoint %s vs %s = %s-%s-%s '
-                '(current-previous-draws); no decisive games',
-                iteration,
-                previous_iteration,
-                current_wins,
-                previous_wins,
-                draws,
-            )
+        return win_rate, confidence_low, confidence_high
+
+    def _runPairedMatch(
+        self,
+        opponent,
+        game_count,
+        opening_boards=None,
+        placement_temperature=0.0,
+        game_seeds=None,
+        simulations=None,
+    ):
+        arena = BatchedMCTSArena(
+            self.game,
+            opponent,
+            self.nnet,
+            self._matchArgs(simulations),
+            batch_size=max(1, int(self._arg('telemetryMatchBatchSize', self._self_play_batch_size()))),
+            quiet=self._quiet(),
+            opening_boards=opening_boards,
+            placement_temperature=placement_temperature,
+            game_seeds=game_seeds,
+        )
+        opponent_wins, current_wins, draws = arena.playGames(game_count)
+        return (
+            int(opponent_wins),
+            int(current_wins),
+            int(draws),
+            *self._matchStatistics(opponent_wins, current_wins, draws),
+        )
+
+    @staticmethod
+    def _matchMetrics(prefix, opponent_wins, current_wins, draws, win_rate, low, high):
         return {
-            'milestone_opponent_iteration': int(previous_iteration),
-            'milestone_previous_wins': int(previous_wins),
-            'milestone_current_wins': int(current_wins),
-            'milestone_draws': int(draws),
-            'milestone_current_win_rate': win_rate,
-            'milestone_current_win_rate_95ci_low': confidence_low,
-            'milestone_current_win_rate_95ci_high': confidence_high,
+            '{}_opponent_wins'.format(prefix): opponent_wins,
+            '{}_current_wins'.format(prefix): current_wins,
+            '{}_draws'.format(prefix): draws,
+            '{}_current_win_rate'.format(prefix): win_rate,
+            '{}_current_win_rate_95ci_low'.format(prefix): low,
+            '{}_current_win_rate_95ci_high'.format(prefix): high,
         }
+
+    def _logMatchResult(self, label, iteration, opponent_label, result):
+        opponent_wins, current_wins, draws, win_rate, low, high = result
+        if win_rate is None:
+            log.info(
+                '%s result: checkpoint %s vs %s = %s-%s-%s '
+                '(current-opponent-draws); no decisive games',
+                label,
+                iteration,
+                opponent_label,
+                current_wins,
+                opponent_wins,
+                draws,
+            )
+            return
+        log.info(
+            '%s result: checkpoint %s vs %s = %s-%s-%s '
+            '(current-opponent-draws), current win rate %.1f%%, approximate 95%% CI %.1f%%-%.1f%%',
+            label,
+            iteration,
+            opponent_label,
+            current_wins,
+            opponent_wins,
+            draws,
+            100.0 * win_rate,
+            100.0 * low,
+            100.0 * high,
+        )
+
+    def _runMilestoneMatch(self, iteration, milestone_interval):
+        game_count = int(self._arg('telemetryMatchGames', 40))
+        placement_game_count = int(self._arg('telemetryPlacementGames', game_count))
+        previous_iteration = iteration - milestone_interval
+        previous_filename = self.getCheckpointFile(previous_iteration)
+        previous_path = os.path.join(self.args.checkpoint, previous_filename)
+        if previous_iteration <= 0 or not os.path.isfile(previous_path):
+            return {}
+        if game_count <= 0 and placement_game_count <= 0:
+            return {}
+
+        previous = self.nnet.__class__(self.game)
+        previous.load_checkpoint(self.args.checkpoint, previous_filename)
+        metrics = {'milestone_opponent_iteration': int(previous_iteration)}
+
+        if game_count > 0:
+            opening_count = game_count // 2
+            log.info(
+                'Running standard-play milestone telemetry: checkpoint %s vs %s '
+                '(%s games, %s fixed symmetry-distinct openings)',
+                iteration,
+                previous_iteration,
+                game_count,
+                opening_count,
+            )
+            standard_result = self._runPairedMatch(
+                previous,
+                game_count,
+                opening_boards=self._telemetry_opening_boards[:opening_count],
+            )
+            self._logMatchResult('Standard-play milestone', iteration, previous_iteration, standard_result)
+            metrics.update(self._matchMetrics('milestone', *standard_result))
+            # Preserve the original field name for existing telemetry consumers.
+            metrics['milestone_previous_wins'] = metrics['milestone_opponent_wins']
+            metrics['milestone_opening_count'] = opening_count
+
+        if placement_game_count > 0 and getattr(self.game, 'sequential_placement', False):
+            seed_count = placement_game_count // 2
+            placement_temperature = float(self._arg('telemetryPlacementTemperature', 1.0))
+            log.info(
+                'Running placement-inclusive milestone telemetry: checkpoint %s vs %s '
+                '(%s games, %s paired seeds, placement temperature %.2f)',
+                iteration,
+                previous_iteration,
+                placement_game_count,
+                seed_count,
+                placement_temperature,
+            )
+            placement_result = self._runPairedMatch(
+                previous,
+                placement_game_count,
+                placement_temperature=placement_temperature,
+                game_seeds=self._telemetry_placement_seeds[:seed_count],
+            )
+            self._logMatchResult(
+                'Placement-inclusive milestone',
+                iteration,
+                previous_iteration,
+                placement_result,
+            )
+            metrics.update(self._matchMetrics('placement_milestone', *placement_result))
+            metrics['placement_milestone_seed_count'] = seed_count
+            metrics['placement_milestone_temperature'] = placement_temperature
+        return metrics
+
+    def _runAnchorMatch(self, iteration):
+        game_count = int(self._arg('anchorGames', 40))
+        if self.anchor_nnet is None or game_count <= 0:
+            return {}
+        opening_count = game_count // 2
+        architecture = str(self._arg('anchorArchitecture', 'v1'))
+        simulations = int(self._arg('anchorMCTSSims', self.args.numMCTSSims))
+        log.info(
+            'Running fixed %s anchor telemetry at checkpoint %s '
+            '(%s games, %s fixed symmetry-distinct openings, %s simulations)',
+            architecture,
+            iteration,
+            game_count,
+            opening_count,
+            simulations,
+        )
+        result = self._runPairedMatch(
+            self.anchor_nnet,
+            game_count,
+            opening_boards=self._telemetry_opening_boards[:opening_count],
+            simulations=simulations,
+        )
+        self._logMatchResult('{} anchor'.format(architecture.upper()), iteration, architecture, result)
+        metrics = self._matchMetrics('anchor', *result)
+        metrics.update({
+            'anchor_architecture': architecture,
+            'anchor_opening_count': opening_count,
+            'anchor_mcts_simulations': simulations,
+        })
+        return metrics

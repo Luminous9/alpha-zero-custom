@@ -7,9 +7,10 @@ import coloredlogs
 import numpy as np
 import torch
 
-from Coach import Coach
+from Coach import Coach, preserve_rng_state
 from santorini.pytorch.NNet import build_nnet
 from santorini.pytorch.NNet import args as nnet_args
+from santorini.pytorch.LegacyNNet import LegacyNNetWrapper
 from santorini.SantoriniGame import SantoriniGame as Game
 from santorini.SantoriniOpeningBook import (SantoriniOpeningSampler,
                                             SantoriniMixedOpeningSampler,
@@ -142,8 +143,24 @@ def parse_args():
     parser.add_argument('--reference-suite', type=str)
     parser.add_argument('--telemetry-match-games', type=int, default=40)
     parser.add_argument('--telemetry-match-batch-size', type=int)
+    parser.add_argument(
+        '--telemetry-placement-games',
+        type=int,
+        help='Placement-inclusive milestone games; defaults to --telemetry-match-games.',
+    )
+    parser.add_argument('--telemetry-placement-temperature', type=float, default=1.0)
+    parser.add_argument('--telemetry-opening-seed', type=int, default=20260715)
     parser.add_argument('--no-telemetry-matches', action='store_true')
     parser.add_argument('--telemetry-sample-size', type=int, default=256)
+    parser.add_argument(
+        '--anchor-checkpoint',
+        type=str,
+        help='Exact checkpoint file, or a directory containing one, for fixed-opponent telemetry.',
+    )
+    parser.add_argument('--anchor-architecture', choices=['v1', 'v2', 'v3'], default='v1')
+    parser.add_argument('--anchor-interval', type=int, default=10)
+    parser.add_argument('--anchor-games', type=int, default=40)
+    parser.add_argument('--anchor-mcts-sims', type=int)
     args = parser.parse_args()
     if args.opening_mix_unique_probability < 0.0 or args.opening_mix_unique_probability > 1.0:
         parser.error('--opening-mix-unique-probability must be between 0 and 1.')
@@ -151,6 +168,19 @@ def parse_args():
         parser.error('--start-iteration cannot be negative.')
     if args.start_iteration is not None and not args.load_model:
         parser.error('--start-iteration requires --load-model.')
+    for option, value in (
+        ('--telemetry-match-games', args.telemetry_match_games),
+        ('--telemetry-placement-games', args.telemetry_placement_games),
+        ('--anchor-games', args.anchor_games if args.anchor_checkpoint else None),
+    ):
+        if value is not None and (value < 0 or value % 2):
+            parser.error('{} must be a non-negative even number.'.format(option))
+    if args.telemetry_placement_temperature < 0:
+        parser.error('--telemetry-placement-temperature cannot be negative.')
+    if args.anchor_interval < 1:
+        parser.error('--anchor-interval must be at least 1.')
+    if args.anchor_mcts_sims is not None and args.anchor_mcts_sims < 1:
+        parser.error('--anchor-mcts-sims must be at least 1.')
     return args
 
 
@@ -212,9 +242,62 @@ def build_coach_args(parsed_args):
             getattr(parsed_args, 'telemetry_match_batch_size', None)
             or parsed_args.self_play_batch_size
         ),
+        'telemetryPlacementGames': (
+            0 if getattr(parsed_args, 'no_telemetry_matches', False)
+            else (
+                getattr(parsed_args, 'telemetry_placement_games', None)
+                if getattr(parsed_args, 'telemetry_placement_games', None) is not None
+                else getattr(parsed_args, 'telemetry_match_games', 40)
+            )
+        ),
+        'telemetryPlacementTemperature': getattr(parsed_args, 'telemetry_placement_temperature', 1.0),
+        'telemetryOpeningSeed': getattr(parsed_args, 'telemetry_opening_seed', 20260715),
+        'anchorInterval': getattr(parsed_args, 'anchor_interval', 10),
+        'anchorGames': getattr(parsed_args, 'anchor_games', 40),
+        'anchorMCTSSims': (
+            getattr(parsed_args, 'anchor_mcts_sims', None)
+            or parsed_args.num_mcts_sims
+            or preset['numMCTSSims']
+        ),
+        'anchorArchitecture': getattr(parsed_args, 'anchor_architecture', 'v1'),
         'startIteration': 0,
         'telemetrySampleSize': getattr(parsed_args, 'telemetry_sample_size', 256),
     })
+
+
+def resolve_anchor_checkpoint_path(path):
+    path = os.path.abspath(os.path.expanduser(os.fspath(path)))
+    if os.path.isfile(path):
+        return path
+    if not os.path.exists(path):
+        raise FileNotFoundError('Anchor checkpoint does not exist: {}'.format(path))
+    if not os.path.isdir(path):
+        raise ValueError('Anchor checkpoint path is neither a file nor a directory: {}'.format(path))
+
+    candidates = []
+    for root, _, filenames in os.walk(path):
+        candidates.extend(
+            os.path.join(root, filename)
+            for filename in filenames
+            if filename.endswith('.pth.tar')
+        )
+    candidates.sort()
+    preferred = [candidate for candidate in candidates if os.path.basename(candidate) == 'best.pth.tar']
+    if len(preferred) == 1:
+        return preferred[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise FileNotFoundError('No .pth.tar checkpoint found under anchor directory: {}'.format(path))
+    raise ValueError(
+        'Multiple anchor checkpoints found; pass the exact file path: {}'.format(', '.join(candidates))
+    )
+
+
+def build_anchor_nnet(game, architecture, checkpoint_path):
+    anchor = LegacyNNetWrapper(game) if architecture == 'v1' else build_nnet(game, architecture)
+    anchor.load_checkpoint(os.path.dirname(checkpoint_path), os.path.basename(checkpoint_path))
+    return anchor
 
 
 def opening_book_candidates(parsed_args, coach_args):
@@ -351,6 +434,17 @@ def main():
     log.info('Loading Santorini network architecture %s...', parsed_args.architecture)
     nnet = build_nnet(game, parsed_args.architecture)
 
+    anchor_nnet = None
+    if parsed_args.anchor_checkpoint:
+        anchor_checkpoint = resolve_anchor_checkpoint_path(parsed_args.anchor_checkpoint)
+        log.info(
+            'Loading fixed %s anchor checkpoint "%s"...',
+            parsed_args.anchor_architecture,
+            anchor_checkpoint,
+        )
+        with preserve_rng_state():
+            anchor_nnet = build_anchor_nnet(game, parsed_args.anchor_architecture, anchor_checkpoint)
+
     loaded_metadata = {}
     if coach_args.load_model:
         log.info('Loading checkpoint "%s/%s"...', coach_args.load_folder_file[0], coach_args.load_folder_file[1])
@@ -377,11 +471,29 @@ def main():
                     'Latest-mode resume checkpoint has no iteration metadata. Refusing to restart numbering at 1; '
                     'use --start-iteration with the known last completed iteration.'
                 )
+            if (
+                coach_args.startIteration > 0
+                and coach_args.startIteration % max(1, int(coach_args.milestoneInterval)) == 0
+            ):
+                resume_anchor = 'checkpoint_{}.pth.tar'.format(coach_args.startIteration)
+                resume_anchor_path = os.path.join(coach_args.checkpoint, resume_anchor)
+                if not os.path.isfile(resume_anchor_path):
+                    log.info(
+                        'Creating missing milestone resume anchor "%s" from the loaded model.',
+                        resume_anchor_path,
+                    )
+                    nnet.save_checkpoint(coach_args.checkpoint, resume_anchor)
     else:
         log.warning('Not loading a checkpoint!')
 
     log.info('Loading the Coach...')
-    coach = Coach(game, nnet, coach_args, opening_sampler=opening_sampler)
+    coach = Coach(
+        game,
+        nnet,
+        coach_args,
+        opening_sampler=opening_sampler,
+        anchor_nnet=anchor_nnet,
+    )
 
     if coach_args.load_model and parsed_args.load_examples:
         log.info("Loading 'trainExamples' from file...")
@@ -407,6 +519,14 @@ def main():
         nnet_args.batch_size,
         coach_args.checkpoint,
     )
+    if anchor_nnet is not None:
+        log.info(
+            'Fixed anchor: architecture=%s interval=%s games=%s sims=%s',
+            coach_args.anchorArchitecture,
+            coach_args.anchorInterval,
+            coach_args.anchorGames,
+            coach_args.anchorMCTSSims,
+        )
     log.info('Starting the Santorini learning process')
     coach.learn()
 

@@ -34,11 +34,12 @@ def build_nnet(game, architecture):
     raise ValueError("Unknown architecture: {}".format(architecture))
 
 
-class NeuralMCTSPlayer:
-    def __init__(self, game, checkpoint_folder, checkpoint_file, sims, architecture='v2', action_temp=0.0):
+class NetworkMCTSPlayer:
+    """MCTS player around an already-loaded network, reset before every arena game."""
+
+    def __init__(self, game, nnet, sims, action_temp=0.0):
         self.game = game
-        self.nnet = build_nnet(game, architecture)
-        self.nnet.load_checkpoint(checkpoint_folder, checkpoint_file)
+        self.nnet = nnet
         self.mcts_args = dotdict({'numMCTSSims': sims, 'cpuct': 1.0})
         self.action_temp = action_temp
         self.mcts = None
@@ -53,6 +54,13 @@ class NeuralMCTSPlayer:
         return select_legal_action(self.game, board, probs, sample=self.action_temp > 0)
 
     __call__ = play
+
+
+class NeuralMCTSPlayer(NetworkMCTSPlayer):
+    def __init__(self, game, checkpoint_folder, checkpoint_file, sims, architecture='v2', action_temp=0.0):
+        nnet = build_nnet(game, architecture)
+        nnet.load_checkpoint(checkpoint_folder, checkpoint_file)
+        super().__init__(game, nnet, sims, action_temp=action_temp)
 
 
 def select_legal_action(game, board, probs, sample=False):
@@ -113,27 +121,29 @@ def opening_json_kind(path):
     return "unknown"
 
 
-def board_from_opening_position(position, random_orientation_enabled=True):
+def board_from_opening_position(position, random_orientation_enabled=True, rng=None):
     pieces = np.array(position["pieces"], dtype=int)
     heights = np.zeros_like(pieces, dtype=int)
     board = np.array([pieces, heights], dtype=int)
     if random_orientation_enabled:
-        board = random_board_orientation(board)
+        board = random_board_orientation(board, rng=rng)
     return board
 
 
-def sample_opening_suite(opening_suite_path, count, random_orientation_enabled=True):
+def sample_opening_suite(opening_suite_path, count, random_orientation_enabled=True, rng=None):
     suite = SantoriniOpeningSuite.load(opening_suite_path)
     count = int(count)
     if count <= 0:
         return suite, []
 
     replace = count > len(suite.positions)
-    indices = np.random.choice(len(suite.positions), size=count, replace=replace)
+    rng = rng if rng is not None else np.random
+    indices = rng.choice(len(suite.positions), size=count, replace=replace)
     boards = [
         board_from_opening_position(
             suite.positions[int(index)],
             random_orientation_enabled=random_orientation_enabled,
+            rng=rng,
         )
         for index in indices
     ]
@@ -174,6 +184,7 @@ def build_opening_suite(args):
         return None, None, None, 'random_start'
 
     opening_source = getattr(args, 'opening_source', 'book')
+    rng = np.random.RandomState(int(getattr(args, 'opening_seed', 20260715)))
     if opening_source == 'game':
         print("Using game random starts.")
         return None, None, None, 'random_start'
@@ -187,10 +198,11 @@ def build_opening_suite(args):
         sampler = SantoriniRandomOpeningSampler(
             board_size=5,
             random_orientation=not args.no_opening_random_orientation,
+            rng=rng,
         )
-        opening_boards = sampler.sample_arena_suite(int(args.games / 2))
+        opening_boards = sampler.sample_distinct_arena_suite(int(args.games / 2))
         print(
-            'Sampled {} paired openings from {} symmetry-unique placements.'.format(
+            'Sampled {} fixed, distinct paired openings from {} symmetry-unique placements.'.format(
                 len(opening_boards),
                 len(sampler.positions),
             )
@@ -202,6 +214,7 @@ def build_opening_suite(args):
             args.arena_opening_suite,
             int(args.games / 2),
             random_orientation_enabled=not args.no_opening_random_orientation,
+            rng=rng,
         )
         print(
             'Loaded opening suite "{}" ({} positions).'.format(
@@ -223,6 +236,7 @@ def build_opening_suite(args):
             opening_book_path,
             int(args.games / 2),
             random_orientation_enabled=not args.no_opening_random_orientation,
+            rng=rng,
         )
         print(
             'Loaded opening suite "{}" ({} positions).'.format(
@@ -245,6 +259,7 @@ def build_opening_suite(args):
         arena_top_fraction=args.arena_opening_top_fraction,
         arena_max_abs_value=args.arena_opening_max_abs_value,
         random_orientation=not args.no_opening_random_orientation,
+        rng=rng,
     )
     opening_boards = sampler.sample_arena_suite(int(args.games / 2))
     print(
@@ -384,6 +399,12 @@ def main():
     parser.add_argument('--arena-opening-top-fraction', type=float, default=0.50)
     parser.add_argument('--arena-opening-max-abs-value', type=float, default=0.14)
     parser.add_argument('--no-opening-random-orientation', action='store_true')
+    parser.add_argument(
+        '--opening-seed',
+        type=int,
+        default=20260715,
+        help='Fixed seed used to reconstruct paired book, suite, or unique openings.',
+    )
     parser.add_argument('--json-out', help='Optional path to write evaluation results as JSON.')
     args = parser.parse_args()
     if args.no_opening_book:
@@ -462,13 +483,11 @@ def main():
         else:
             print("Using fresh untrained network.")
 
-        mcts_args = dotdict({'numMCTSSims': args.sims, 'cpuct': 1.0})
-        mcts = MCTS(game, nnet, mcts_args)
-        player1 = lambda x: select_legal_action(
+        player1 = NetworkMCTSPlayer(
             game,
-            x,
-            mcts.getActionProb(x, temp=args.action_temp),
-            sample=args.action_temp > 0,
+            nnet,
+            args.sims,
+            action_temp=args.action_temp,
         )
         player2 = build_baseline(game, args.baseline)
         contestant2_name = args.baseline
@@ -557,6 +576,12 @@ def main():
             'opening_id': args.opening_id,
             'opening_source': args.opening_source,
             'opening_mode': opening_mode,
+            'opening_seed': args.opening_seed,
+            'opening_position_count': len(opening_boards) if opening_boards is not None else 1,
+            'distinct_opening_position_count': (
+                len({board.tobytes() for board in opening_boards})
+                if opening_boards is not None else 1
+            ),
             'contestant1_wins': int(nnet_wins),
             'contestant2_wins': int(opponent_wins),
             'neural_mcts_wins': int(nnet_wins),

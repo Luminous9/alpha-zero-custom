@@ -139,6 +139,22 @@ class TestSantoriniOpeningSampler(unittest.TestCase):
             self.assertEqual(opening_board.shape, (2, 5, 5))
             self.assertEqual(int(np.count_nonzero(opening_board[0])), 4)
 
+    def test_random_opening_sampler_can_build_fixed_distinct_suite(self):
+        first = SantoriniRandomOpeningSampler(
+            board_size=5,
+            random_orientation=True,
+            rng=np.random.RandomState(17),
+        ).sample_distinct_arena_suite(20)
+        second = SantoriniRandomOpeningSampler(
+            board_size=5,
+            random_orientation=True,
+            rng=np.random.RandomState(17),
+        ).sample_distinct_arena_suite(20)
+
+        self.assertEqual(len({board.tobytes() for board in first}), 20)
+        for first_board, second_board in zip(first, second):
+            np.testing.assert_array_equal(first_board, second_board)
+
     def test_mixed_opening_sampler_switches_between_sources(self):
         primary = FixedSampler(1)
         unique = FixedSampler(2)

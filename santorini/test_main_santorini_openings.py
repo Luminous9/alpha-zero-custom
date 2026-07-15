@@ -3,7 +3,7 @@ import json
 import os
 import tempfile
 
-from main_santorini import build_opening_sampler
+from main_santorini import build_opening_sampler, resolve_anchor_checkpoint_path
 from santorini.SantoriniOpeningBook import (
     SantoriniMixedOpeningSampler,
     SantoriniOpeningSampler,
@@ -39,6 +39,17 @@ def make_coach_args():
 
 
 class TestMainSantoriniOpenings(unittest.TestCase):
+    def test_anchor_checkpoint_directory_prefers_single_best_checkpoint(self):
+        with tempfile.TemporaryDirectory() as folder:
+            nested = os.path.join(folder, 'dataset')
+            os.makedirs(nested)
+            best = os.path.join(nested, 'best.pth.tar')
+            latest = os.path.join(nested, 'latest.pth.tar')
+            open(best, 'wb').close()
+            open(latest, 'wb').close()
+
+            self.assertEqual(resolve_anchor_checkpoint_path(folder), best)
+
     def test_default_opening_sampler_mixes_book_filter_and_unique_random_positions(self):
         sampler = build_opening_sampler(make_args(), make_coach_args())
 

@@ -8,6 +8,7 @@ from io import StringIO
 import numpy as np
 
 from pit_santorini import (
+    NetworkMCTSPlayer,
     batched_arena_requested,
     build_opening_suite,
     display_name_from_folder,
@@ -90,6 +91,7 @@ class TestPitSantoriniOpening(unittest.TestCase):
             'arena_opening_top_fraction': 0.50,
             'arena_opening_max_abs_value': 0.14,
             'no_opening_random_orientation': True,
+            'opening_seed': 20260715,
             'games': 4,
             'arena_batch_size': 1,
             'action_temp': 0.0,
@@ -146,6 +148,7 @@ class TestPitSantoriniOpening(unittest.TestCase):
 
         with redirect_stdout(StringIO()):
             opening_book_path, opening_boards, opening_position, opening_mode = build_opening_suite(args)
+            _, repeated_boards, _, _ = build_opening_suite(args)
 
         self.assertIsNone(opening_book_path)
         self.assertEqual(len(opening_boards), 2)
@@ -154,6 +157,9 @@ class TestPitSantoriniOpening(unittest.TestCase):
         self.assertEqual(opening_boards[0].shape, (2, 5, 5))
         self.assertEqual(int(np.count_nonzero(opening_boards[0][0])), 4)
         self.assertEqual(int(np.sum(opening_boards[0][1])), 0)
+        self.assertEqual(len({board.tobytes() for board in opening_boards}), 2)
+        for board, repeated in zip(opening_boards, repeated_boards):
+            np.testing.assert_array_equal(board, repeated)
 
     def test_build_opening_suite_can_use_game_random_starts(self):
         args = self.make_opening_args(opening_source='game', games=4)
@@ -308,6 +314,15 @@ class TestPitSantoriniOpening(unittest.TestCase):
 
         self.assertEqual(select_legal_action(game, board, [0.1, 0.9, 1.0]), 1)
         self.assertEqual(select_legal_action(game, board, [0.0, 1.0, 0.0], sample=True), 1)
+
+    def test_loaded_network_player_resets_mcts_for_each_game(self):
+        player = NetworkMCTSPlayer(TinyActionGame(), object(), sims=4)
+
+        player.startGame()
+        first_tree = player.mcts
+        player.startGame()
+
+        self.assertIsNot(player.mcts, first_tree)
 
     def test_batched_arena_validation_requires_two_checkpoint_pit(self):
         args = self.make_opening_args(arena_batch_size=4)

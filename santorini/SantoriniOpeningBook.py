@@ -96,8 +96,26 @@ class SantoriniRandomOpeningSampler:
             return []
         return [self._sample_board() for _ in range(count)]
 
+    def sample_distinct_arena_suite(self, count):
+        """Sample symmetry-distinct completed openings without replacement."""
+        count = int(count)
+        if count <= 0:
+            return []
+        if count > len(self.positions):
+            raise ValueError(
+                'Requested {} distinct openings, but only {} are available.'.format(
+                    count,
+                    len(self.positions),
+                )
+            )
+        indices = self.rng.choice(len(self.positions), size=count, replace=False)
+        return [self._board_from_index(int(index)) for index in indices]
+
     def _sample_board(self):
-        p1_locations, p2_locations = self.positions[int(self.rng.randint(len(self.positions)))]
+        return self._board_from_index(int(self.rng.randint(len(self.positions))))
+
+    def _board_from_index(self, index):
+        p1_locations, p2_locations = self.positions[index]
         board = opening_board_from_locations(p1_locations, p2_locations, self.board_size)
         if self.random_orientation:
             board = random_board_orientation(board, self.rng)
