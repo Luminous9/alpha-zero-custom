@@ -134,8 +134,12 @@ class TestSantoriniNNet(unittest.TestCase):
     def test_single_training_step_runs(self):
         old_epochs = nnet_args.epochs
         old_batch_size = nnet_args.batch_size
+        old_max_train_steps = nnet_args.max_train_steps
+        old_on_the_fly_symmetry = nnet_args.on_the_fly_symmetry
         nnet_args.epochs = 1
         nnet_args.batch_size = 2
+        nnet_args.max_train_steps = None
+        nnet_args.on_the_fly_symmetry = False
         try:
             examples = []
             for _ in range(2):
@@ -148,12 +152,103 @@ class TestSantoriniNNet(unittest.TestCase):
         finally:
             nnet_args.epochs = old_epochs
             nnet_args.batch_size = old_batch_size
+            nnet_args.max_train_steps = old_max_train_steps
+            nnet_args.on_the_fly_symmetry = old_on_the_fly_symmetry
+
+    def test_training_step_cap_preserves_small_replay_epoch_limit(self):
+        old_epochs = nnet_args.epochs
+        old_batch_size = nnet_args.batch_size
+        old_max_train_steps = nnet_args.max_train_steps
+        old_on_the_fly_symmetry = nnet_args.on_the_fly_symmetry
+        nnet_args.epochs = 3
+        nnet_args.batch_size = 2
+        nnet_args.max_train_steps = 4
+        nnet_args.on_the_fly_symmetry = False
+        try:
+            board = self.game.getCanonicalForm(self.game.getInitBoard(), 1)
+            valids = self.game.getValidMoves(board, 1).astype(np.float32)
+            examples = [(board, valids / valids.sum(), 1.0) for _ in range(6)]
+
+            with patch.object(self.nnet.optimizer, 'step', wraps=self.nnet.optimizer.step) as step:
+                metrics = self.nnet.train(examples)
+
+            self.assertEqual(step.call_count, 4)
+            self.assertEqual(metrics['training_steps'], 4)
+            self.assertEqual(metrics['uncapped_training_steps'], 9)
+            self.assertAlmostEqual(metrics['effective_replay_epochs'], 4 * 2 / 6)
+            self.assertEqual(metrics['epoch'], 2)
+        finally:
+            nnet_args.epochs = old_epochs
+            nnet_args.batch_size = old_batch_size
+            nnet_args.max_train_steps = old_max_train_steps
+            nnet_args.on_the_fly_symmetry = old_on_the_fly_symmetry
+
+    def test_on_the_fly_symmetry_matches_game_transforms(self):
+        game = SantoriniGame(5, sequential_placement=True)
+        nnet = V3NNetWrapper(game)
+        board = game.getInitBoard()
+        player = 1
+        for location in ((0, 0), (1, 1), (2, 2), (3, 3)):
+            board, player = game.getNextState(board, player, game.getPlacementAction(location))
+        board = game.getCanonicalForm(board, player)
+        policy = game.getValidMoves(board, 1).astype(np.float32)
+        policy /= policy.sum()
+
+        encoded = nnet.encode_board(board)
+        encoded_boards = np.repeat(encoded[None, ...], 8, axis=0)
+        policies = np.repeat(policy[None, ...], 8, axis=0)
+        transformed_boards, transformed_policies = nnet._apply_symmetries(
+            encoded_boards,
+            policies,
+            np.arange(8),
+        )
+
+        for symmetry_id, (expected_board, expected_policy) in enumerate(game.getSymmetries(board, policy)):
+            np.testing.assert_array_equal(
+                transformed_boards[symmetry_id],
+                nnet.encode_board(expected_board),
+            )
+            np.testing.assert_allclose(transformed_policies[symmetry_id], expected_policy)
+
+    def test_on_the_fly_step_budget_uses_virtual_symmetry_examples(self):
+        old_epochs = nnet_args.epochs
+        old_batch_size = nnet_args.batch_size
+        old_max_train_steps = nnet_args.max_train_steps
+        old_on_the_fly_symmetry = nnet_args.on_the_fly_symmetry
+        nnet_args.epochs = 3
+        nnet_args.batch_size = 2
+        nnet_args.max_train_steps = 4
+        nnet_args.on_the_fly_symmetry = True
+        try:
+            game = SantoriniGame(5, sequential_placement=True)
+            nnet = V3NNetWrapper(game)
+            board = game.getInitBoard()
+            policy = game.getValidMoves(board, 1).astype(np.float32)
+            policy /= policy.sum()
+
+            metrics = nnet.train([(board, policy, 1.0), (board, policy, -1.0)])
+
+            self.assertEqual(metrics['training_steps'], 4)
+            self.assertEqual(metrics['virtual_replay_examples'], 16)
+            self.assertEqual(metrics['symmetry_augmentation_multiplier'], 8)
+            self.assertEqual(metrics['uncapped_training_steps'], 24)
+            self.assertAlmostEqual(metrics['effective_replay_epochs'], 0.5)
+            self.assertAlmostEqual(metrics['average_draws_per_stored_position'], 4.0)
+        finally:
+            nnet_args.epochs = old_epochs
+            nnet_args.batch_size = old_batch_size
+            nnet_args.max_train_steps = old_max_train_steps
+            nnet_args.on_the_fly_symmetry = old_on_the_fly_symmetry
 
     def test_resumable_checkpoint_restores_adam_state(self):
         old_epochs = nnet_args.epochs
         old_batch_size = nnet_args.batch_size
+        old_max_train_steps = nnet_args.max_train_steps
+        old_on_the_fly_symmetry = nnet_args.on_the_fly_symmetry
         nnet_args.epochs = 1
         nnet_args.batch_size = 1
+        nnet_args.max_train_steps = None
+        nnet_args.on_the_fly_symmetry = False
         try:
             board = self.game.getCanonicalForm(self.game.getInitBoard(), 1)
             valids = self.game.getValidMoves(board, 1).astype(np.float32)
@@ -169,6 +264,8 @@ class TestSantoriniNNet(unittest.TestCase):
         finally:
             nnet_args.epochs = old_epochs
             nnet_args.batch_size = old_batch_size
+            nnet_args.max_train_steps = old_max_train_steps
+            nnet_args.on_the_fly_symmetry = old_on_the_fly_symmetry
 
     def test_mcts_can_use_santorini_network(self):
         mcts_args = dotdict({'numMCTSSims': 2, 'cpuct': 1.0})

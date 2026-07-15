@@ -20,13 +20,13 @@ class MCTS():
         self.Qsa = {}  # stores Q values for s,a (as defined in the paper)
         self.Nsa = {}  # stores #times edge s,a was visited
         self.Ns = {}  # stores #times board s was visited
-        self.Ps = {}  # stores initial policy (returned by neural net)
-        self.Qs = {}  # stores per-state Q values indexed by action
-        self.Nsas = {}  # stores per-state edge visit counts indexed by action
-        self.As = {}  # stores legal action indices for each state
+        self.Ps = {}  # stores policy values compacted to each state's legal actions
+        self.Qs = {}  # stores Q values compacted to each state's legal actions
+        self.Nsas = {}  # stores visit counts compacted to each state's legal actions
+        self.As = {}  # maps compact edge slots to global action indices
 
         self.Es = {}  # stores game.getGameEnded ended for board s
-        self.Vs = {}  # stores game.getValidMoves for board s
+        self.Vs = {}  # temporarily caches dense valid masks until a leaf is expanded
         self.noised_roots = set()
 
     def getActionProb(self, canonicalBoard, temp=1):
@@ -52,8 +52,10 @@ class MCTS():
         """
         s = self.game.stringRepresentation(canonicalBoard)
         if s in self.Nsas:
+            actions = self.As[s]
             counts = self.Nsas[s].astype(np.float64)
         else:
+            actions = np.arange(self.game.getActionSize(), dtype=np.int32)
             counts = np.array(
                 [self.Nsa[(s, a)] if (s, a) in self.Nsa else 0 for a in range(self.game.getActionSize())],
                 dtype=np.float64,
@@ -62,7 +64,8 @@ class MCTS():
         counts_sum = float(np.sum(counts))
         if counts_sum == 0:
             if s in self.Ps:
-                probs = self.Ps[s]
+                probs = np.zeros(self.game.getActionSize(), dtype=np.float32)
+                probs[actions] = self.Ps[s]
             else:
                 valids = self.game.getValidMoves(canonicalBoard, 1)
                 probs = valids / np.sum(valids)
@@ -70,15 +73,36 @@ class MCTS():
 
         if temp == 0:
             bestAs = np.array(np.argwhere(counts == np.max(counts))).flatten()
-            bestA = np.random.choice(bestAs)
-            probs = [0] * len(counts)
+            bestA = int(actions[int(np.random.choice(bestAs))])
+            probs = [0] * self.game.getActionSize()
             probs[bestA] = 1
             return probs
 
         counts = counts ** (1. / temp)
         counts_sum = float(np.sum(counts))
-        probs = counts / counts_sum
+        probs = np.zeros(self.game.getActionSize(), dtype=np.float64)
+        probs[actions] = counts / counts_sum
         return list(probs)
+
+    def getDenseActionCounts(self, state_key):
+        """Return dense visit counts for callers that export MCTS statistics."""
+        counts = np.zeros(self.game.getActionSize(), dtype=np.int32)
+        if state_key in self.Nsas:
+            counts[self.As[state_key]] = self.Nsas[state_key]
+            return counts
+        for action in range(self.game.getActionSize()):
+            counts[action] = self.Nsa.get((state_key, action), 0)
+        return counts
+
+    def getDenseActionValues(self, state_key):
+        """Return dense Q values for callers that export MCTS statistics."""
+        values = np.zeros(self.game.getActionSize(), dtype=np.float32)
+        if state_key in self.Qs:
+            values[self.As[state_key]] = self.Qs[state_key]
+            return values
+        for action in range(self.game.getActionSize()):
+            values[action] = self.Qsa.get((state_key, action), 0.0)
+        return values
 
     def search(self, canonicalBoard):
         """
@@ -121,7 +145,7 @@ class MCTS():
 
             if s not in self.Es:
                 self.Es[s], valids = self._get_game_ended_and_valids(board)
-                if valids is not None:
+                if self.Es[s] == 0 and valids is not None:
                     self.Vs[s] = valids
             if self.Es[s] != 0:
                 return {
@@ -138,9 +162,9 @@ class MCTS():
                     'state_key': s,
                 }
 
-            a = self._best_action(s)
+            a, action_index = self._best_action(s)
             next_s, next_player = self.game.getNextState(board, 1, a)
-            path.append((s, a, next_player != 1))
+            path.append((s, a, action_index, next_player != 1))
             board = self.game.getCanonicalForm(next_s, next_player)
 
     def complete_search(self, leaf, policy=None, value=None):
@@ -154,37 +178,37 @@ class MCTS():
         else:
             propagated_value = leaf['value']
 
-        for s, a, player_changed in reversed(leaf['path']):
+        for s, a, action_index, player_changed in reversed(leaf['path']):
             parent_value = -propagated_value if player_changed else propagated_value
-            self._update_edge(s, a, parent_value)
+            self._update_edge(s, a, parent_value, action_index=action_index)
             self.Ns[s] += 1
             propagated_value = parent_value
 
         return propagated_value
 
     def _expand_leaf(self, s, canonicalBoard, policy):
-        self.Ps[s] = policy
         valids = self.Vs.get(s)
         if valids is None:
             valids = self.game.getValidMoves(canonicalBoard, 1)
-        self.Ps[s] = self.Ps[s] * valids  # masking invalid moves
-        sum_Ps_s = np.sum(self.Ps[s])
+        actions = np.flatnonzero(valids).astype(np.int32)
+        legal_policy = np.asarray(policy, dtype=np.float32)[actions].copy()
+        sum_Ps_s = np.sum(legal_policy)
         if sum_Ps_s > 0:
-            self.Ps[s] /= sum_Ps_s  # renormalize
+            legal_policy /= sum_Ps_s
         else:
             # if all valid moves were masked make all valid moves equally probable
 
             # NB! All valid moves may be masked if either your NNet architecture is insufficient or you've get overfitting or something else.
             # If you have got dozens or hundreds of these messages you should pay attention to your NNet and/or training process.
             log.error("All valid moves were masked, doing a workaround.")
-            self.Ps[s] = self.Ps[s] + valids
-            self.Ps[s] /= np.sum(self.Ps[s])
+            legal_policy = np.full(len(actions), 1.0 / len(actions), dtype=np.float32)
 
-        self.Vs[s] = valids
-        self.As[s] = np.flatnonzero(valids)
-        self.Qs[s] = np.zeros(self.game.getActionSize(), dtype=np.float32)
-        self.Nsas[s] = np.zeros(self.game.getActionSize(), dtype=np.int32)
+        self.Ps[s] = legal_policy
+        self.As[s] = actions
+        self.Qs[s] = np.zeros(len(actions), dtype=np.float32)
+        self.Nsas[s] = np.zeros(len(actions), dtype=np.int32)
         self.Ns[s] = 0
+        self.Vs.pop(s, None)
 
     def add_root_noise(self, canonicalBoard):
         get_arg = self.args.get if hasattr(self.args, 'get') else lambda key, default: getattr(self.args, key, default)
@@ -193,13 +217,15 @@ class MCTS():
         s = self.game.stringRepresentation(canonicalBoard)
         if s in self.noised_roots or s not in self.Ps:
             return
-        actions = self.As[s]
-        if len(actions) == 0:
+        if len(self.As[s]) == 0:
             return
         epsilon = float(get_arg('dirichletEpsilon', 0.25))
         alpha = float(get_arg('dirichletAlpha', 0.30))
-        noise = np.random.dirichlet([alpha] * len(actions))
-        self.Ps[s][actions] = (1.0 - epsilon) * self.Ps[s][actions] + epsilon * noise
+        noise = np.random.dirichlet([alpha] * len(self.As[s]))
+        self.Ps[s] = np.asarray(
+            (1.0 - epsilon) * self.Ps[s] + epsilon * noise,
+            dtype=np.float32,
+        )
         self.noised_roots.add(s)
 
     def _get_game_ended_and_valids(self, canonicalBoard):
@@ -209,37 +235,40 @@ class MCTS():
 
     def _best_action(self, s):
         actions = self.As[s]
-        edge_counts = self.Nsas[s][actions]
+        edge_counts = self.Nsas[s]
         visited = edge_counts > 0
         u = np.empty(len(actions), dtype=np.float32)
 
         if np.any(visited):
-            visited_actions = actions[visited]
             u[visited] = (
-                self.Qs[s][visited_actions]
+                self.Qs[s][visited]
                 + self.args.cpuct
-                * self.Ps[s][visited_actions]
+                * self.Ps[s][visited]
                 * math.sqrt(self.Ns[s])
-                / (1 + self.Nsas[s][visited_actions])
+                / (1 + edge_counts[visited])
             )
 
         if np.any(~visited):
-            unvisited_actions = actions[~visited]
             u[~visited] = (
                 self.args.cpuct
-                * self.Ps[s][unvisited_actions]
+                * self.Ps[s][~visited]
                 * math.sqrt(self.Ns[s] + EPS)
             )
 
-        return int(actions[int(np.argmax(u))])
+        action_index = int(np.argmax(u))
+        return int(actions[action_index]), action_index
 
-    def _update_edge(self, s, a, v):
+    def _update_edge(self, s, a, v, action_index=None):
         if s in self.Qs:
-            visits = self.Nsas[s][a]
-            self.Qs[s][a] = (visits * self.Qs[s][a] + v) / (visits + 1)
-            self.Nsas[s][a] = visits + 1
-            self.Qsa[(s, a)] = float(self.Qs[s][a])
-            self.Nsa[(s, a)] = int(self.Nsas[s][a])
+            if action_index is None:
+                action_index = int(np.searchsorted(self.As[s], a))
+                if action_index >= len(self.As[s]) or int(self.As[s][action_index]) != int(a):
+                    raise ValueError('Action {} is not legal for the selected MCTS state.'.format(a))
+            visits = self.Nsas[s][action_index]
+            self.Qs[s][action_index] = (visits * self.Qs[s][action_index] + v) / (visits + 1)
+            self.Nsas[s][action_index] = visits + 1
+            self.Qsa[(s, a)] = float(self.Qs[s][action_index])
+            self.Nsa[(s, a)] = int(self.Nsas[s][action_index])
         elif (s, a) in self.Qsa:
             self.Qsa[(s, a)] = (self.Nsa[(s, a)] * self.Qsa[(s, a)] + v) / (self.Nsa[(s, a)] + 1)
             self.Nsa[(s, a)] += 1

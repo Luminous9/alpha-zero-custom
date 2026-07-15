@@ -2,8 +2,14 @@ import unittest
 import json
 import os
 import tempfile
+from unittest.mock import patch
 
-from main_santorini import build_opening_sampler, resolve_anchor_checkpoint_path
+from main_santorini import (
+    build_coach_args,
+    build_opening_sampler,
+    parse_args,
+    resolve_anchor_checkpoint_path,
+)
 from santorini.SantoriniOpeningBook import (
     SantoriniMixedOpeningSampler,
     SantoriniOpeningSampler,
@@ -39,6 +45,18 @@ def make_coach_args():
 
 
 class TestMainSantoriniOpenings(unittest.TestCase):
+    def test_v3_defaults_to_twenty_iteration_milestones(self):
+        with patch('sys.argv', ['main_santorini.py', '--architecture', 'v3']):
+            parsed = parse_args()
+
+        self.assertEqual(build_coach_args(parsed).milestoneInterval, 20)
+
+    def test_v2_retains_ten_iteration_milestone_default(self):
+        with patch('sys.argv', ['main_santorini.py', '--architecture', 'v2']):
+            parsed = parse_args()
+
+        self.assertEqual(build_coach_args(parsed).milestoneInterval, 10)
+
     def test_anchor_checkpoint_directory_prefers_single_best_checkpoint(self):
         with tempfile.TemporaryDirectory() as folder:
             nested = os.path.join(folder, 'dataset')

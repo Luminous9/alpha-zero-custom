@@ -410,6 +410,10 @@ class SantoriniGame(Game):
 
         return syms
 
+    def getPolicySymmetryPermutation(self, rotations, flip):
+        """Return old/new policy indices for one dihedral board transform."""
+        return self._policy_symmetry_permutations[(int(rotations) % 4, bool(flip))]
+
     def _transform_policy(self, pi, rotations, flip):
         return self._transform_policy_array(np.asarray(pi), rotations, flip)
 

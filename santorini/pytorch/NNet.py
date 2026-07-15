@@ -28,6 +28,8 @@ args = dotdict({
     'num_channels': 64,
     'num_residual_blocks': 5,
     'value_hidden_size': 128,
+    'max_train_steps': None,
+    'on_the_fly_symmetry': False,
     'quiet': False,
 })
 
@@ -52,6 +54,7 @@ class NNetWrapper(NeuralNet):
     architecture = 'v2'
 
     def __init__(self, game):
+        self.game = game
         self.net_args = self._make_net_args()
         self.nnet = SantoriniNNet(game, self.net_args)
         _, self.board_x, self.board_y = game.getBoardSize()
@@ -76,6 +79,8 @@ class NNetWrapper(NeuralNet):
         self.net_args.dropout = args.dropout
         self.net_args.epochs = args.epochs
         self.net_args.batch_size = args.batch_size
+        self.net_args.max_train_steps = args.max_train_steps
+        self.net_args.on_the_fly_symmetry = args.on_the_fly_symmetry
         self.net_args.quiet = args.quiet
         return self.net_args
 
@@ -107,24 +112,51 @@ class NNetWrapper(NeuralNet):
             parameter_group['lr'] = runtime_args.lr
         encoded_boards, target_pis, target_vs = self._encode_training_examples(examples)
 
+        symmetry_multiplier = 8 if runtime_args.on_the_fly_symmetry else 1
+        virtual_example_count = len(examples) * symmetry_multiplier
+        epoch_batch_count = max(1, int(np.ceil(virtual_example_count / runtime_args.batch_size)))
+        uncapped_training_steps = runtime_args.epochs * epoch_batch_count
+        training_steps = uncapped_training_steps
+        if runtime_args.max_train_steps is not None:
+            training_steps = min(training_steps, int(runtime_args.max_train_steps))
+
         metrics = {}
+        completed_steps = 0
         for epoch in range(runtime_args.epochs):
+            steps_this_epoch = min(epoch_batch_count, training_steps - completed_steps)
+            if steps_this_epoch <= 0:
+                break
             self.nnet.train()
             pi_losses = AverageMeter()
             v_losses = AverageMeter()
 
-            batch_count = max(1, int(np.ceil(len(examples) / runtime_args.batch_size)))
-
             if runtime_args.quiet:
-                log.info('Training epoch %s/%s (%s batches)', epoch + 1, runtime_args.epochs, batch_count)
+                log.info(
+                    'Training epoch %s/%s (%s/%s batches; %s/%s total steps)',
+                    epoch + 1,
+                    runtime_args.epochs,
+                    steps_this_epoch,
+                    epoch_batch_count,
+                    completed_steps + steps_this_epoch,
+                    training_steps,
+                )
             else:
                 print('EPOCH ::: ' + str(epoch + 1))
 
-            t = tqdm(range(batch_count), desc='Training Net', disable=runtime_args.quiet)
+            t = tqdm(range(steps_this_epoch), desc='Training Net', disable=runtime_args.quiet)
             for _ in t:
                 sample_ids = np.random.randint(len(examples), size=runtime_args.batch_size)
-                boards = torch.from_numpy(encoded_boards[sample_ids])
-                batch_target_pis = torch.from_numpy(target_pis[sample_ids])
+                batch_boards = encoded_boards[sample_ids]
+                batch_pis = target_pis[sample_ids]
+                if runtime_args.on_the_fly_symmetry:
+                    symmetry_ids = np.random.randint(8, size=runtime_args.batch_size)
+                    batch_boards, batch_pis = self._apply_symmetries(
+                        batch_boards,
+                        batch_pis,
+                        symmetry_ids,
+                    )
+                boards = torch.from_numpy(batch_boards)
+                batch_target_pis = torch.from_numpy(batch_pis)
                 batch_target_vs = torch.from_numpy(target_vs[sample_ids])
 
                 if self.net_args.cuda:
@@ -146,6 +178,8 @@ class NNetWrapper(NeuralNet):
                 total_loss.backward()
                 self.optimizer.step()
 
+            completed_steps += steps_this_epoch
+
             if runtime_args.quiet:
                 log.info(
                     'Finished epoch %s/%s: pi_loss=%.4f v_loss=%.4f',
@@ -159,8 +193,53 @@ class NNetWrapper(NeuralNet):
                 'value_loss': float(v_losses.avg),
                 'total_loss': float(pi_losses.avg + v_losses.avg),
                 'epoch': epoch + 1,
+                'training_steps': int(completed_steps),
+                'uncapped_training_steps': int(uncapped_training_steps),
+                'virtual_replay_examples': int(virtual_example_count),
+                'symmetry_augmentation_multiplier': int(symmetry_multiplier),
+                'effective_replay_epochs': float(
+                    completed_steps * runtime_args.batch_size / virtual_example_count
+                ),
+                'average_draws_per_stored_position': float(
+                    completed_steps * runtime_args.batch_size / len(examples)
+                ),
             }
         return metrics
+
+    def _apply_symmetries(self, encoded_boards, target_pis, symmetry_ids):
+        """Apply selected D4 symmetries to an encoded board/policy batch."""
+        encoded_boards = np.asarray(encoded_boards)
+        target_pis = np.asarray(target_pis)
+        symmetry_ids = np.asarray(symmetry_ids, dtype=np.int8)
+        if len(encoded_boards) != len(target_pis) or len(encoded_boards) != len(symmetry_ids):
+            raise ValueError('Boards, policies, and symmetry ids must have matching lengths.')
+
+        transformed_boards = np.empty_like(encoded_boards)
+        transformed_pis = np.empty_like(target_pis)
+        for symmetry_id in range(8):
+            batch_indices = np.flatnonzero(symmetry_ids == symmetry_id)
+            if len(batch_indices) == 0:
+                continue
+            rotations = symmetry_id // 2
+            flip = bool(symmetry_id % 2)
+            boards = np.rot90(
+                encoded_boards[batch_indices],
+                rotations,
+                axes=(-2, -1),
+            )
+            if flip:
+                boards = np.flip(boards, axis=-1)
+            transformed_boards[batch_indices] = boards
+
+            old_indices, new_indices = self.game.getPolicySymmetryPermutation(rotations, flip)
+            transformed_pis[
+                batch_indices[:, None],
+                new_indices[None, :],
+            ] = target_pis[
+                batch_indices[:, None],
+                old_indices[None, :],
+            ]
+        return transformed_boards, transformed_pis
 
     def _encode_training_examples(self, examples):
         boards, pis, vs = list(zip(*examples))

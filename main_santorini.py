@@ -112,6 +112,22 @@ def parse_args():
     )
     parser.add_argument('--epochs', type=int)
     parser.add_argument('--batch-size', type=int)
+    parser.add_argument(
+        '--max-train-steps',
+        type=int,
+        help=(
+            'Cap optimizer steps per iteration after applying --epochs. '
+            'Small replay buffers still use fewer steps when their requested epochs finish first.'
+        ),
+    )
+    parser.add_argument(
+        '--symmetry-augmentation',
+        choices=['expanded', 'on-the-fly'],
+        help=(
+            'Store all eight symmetries during self-play, or store one position and '
+            'sample a random symmetry for every training draw. V3 defaults to on-the-fly.'
+        ),
+    )
     parser.add_argument('--self-play-batch-size', type=int, default=1)
     parser.add_argument('--arena-batch-size', type=int)
     parser.add_argument(
@@ -139,7 +155,7 @@ def parse_args():
     parser.add_argument('--no-dirichlet-noise', action='store_true')
     parser.add_argument('--compact-replay', action='store_true')
     parser.add_argument('--telemetry-dir', type=str)
-    parser.add_argument('--milestone-interval', type=int, default=10)
+    parser.add_argument('--milestone-interval', type=int)
     parser.add_argument('--reference-suite', type=str)
     parser.add_argument('--telemetry-match-games', type=int, default=40)
     parser.add_argument('--telemetry-match-batch-size', type=int)
@@ -179,8 +195,12 @@ def parse_args():
         parser.error('--telemetry-placement-temperature cannot be negative.')
     if args.anchor_interval < 1:
         parser.error('--anchor-interval must be at least 1.')
+    if args.milestone_interval is not None and args.milestone_interval < 1:
+        parser.error('--milestone-interval must be at least 1.')
     if args.anchor_mcts_sims is not None and args.anchor_mcts_sims < 1:
         parser.error('--anchor-mcts-sims must be at least 1.')
+    if args.max_train_steps is not None and args.max_train_steps < 1:
+        parser.error('--max-train-steps must be at least 1.')
     return args
 
 
@@ -192,6 +212,9 @@ def build_coach_args(parsed_args):
 
     training_mode = getattr(parsed_args, 'training_mode', None) or (
         'latest' if parsed_args.architecture == 'v3' else 'arena'
+    )
+    symmetry_augmentation = getattr(parsed_args, 'symmetry_augmentation', None) or (
+        'on-the-fly' if parsed_args.architecture == 'v3' else 'expanded'
     )
     load_file = getattr(parsed_args, 'load_file', None) or (
         'latest-training.pth.tar' if training_mode == 'latest' else 'best.pth.tar'
@@ -231,8 +254,12 @@ def build_coach_args(parsed_args):
         'dirichletAlpha': getattr(parsed_args, 'dirichlet_alpha', 0.30),
         'dirichletEpsilon': getattr(parsed_args, 'dirichlet_epsilon', 0.25),
         'compactReplay': getattr(parsed_args, 'compact_replay', False) or training_mode == 'latest',
+        'symmetryAugmentation': symmetry_augmentation,
         'telemetryDir': getattr(parsed_args, 'telemetry_dir', None) or os.path.join(checkpoint, 'telemetry'),
-        'milestoneInterval': getattr(parsed_args, 'milestone_interval', 10),
+        'milestoneInterval': (
+            getattr(parsed_args, 'milestone_interval', None)
+            or (20 if parsed_args.architecture == 'v3' else 10)
+        ),
         'referenceSuite': getattr(parsed_args, 'reference_suite', None),
         'telemetryMatchGames': (
             0 if getattr(parsed_args, 'no_telemetry_matches', False)
@@ -416,8 +443,10 @@ def main():
     preset = PRESETS[parsed_args.preset]
     nnet_args.epochs = parsed_args.epochs or preset['epochs']
     nnet_args.batch_size = parsed_args.batch_size or preset['batch_size']
+    nnet_args.max_train_steps = parsed_args.max_train_steps
     nnet_args.quiet = parsed_args.quiet
     coach_args = build_coach_args(parsed_args)
+    nnet_args.on_the_fly_symmetry = coach_args.symmetryAugmentation == 'on-the-fly'
     if parsed_args.architecture == 'v3':
         opening_sampler = None
         log.info('V3 learns placement from the empty board; opening samplers are disabled.')
@@ -506,7 +535,7 @@ def main():
         )
 
     log.info(
-        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s batch=%s checkpoint=%s',
+        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s max_train_steps=%s batch=%s symmetry=%s checkpoint=%s',
         parsed_args.architecture,
         parsed_args.preset,
         coach_args.numIters,
@@ -516,7 +545,9 @@ def main():
         coach_args.arenaCompare,
         coach_args.arenaBatchSize,
         nnet_args.epochs,
+        nnet_args.max_train_steps,
         nnet_args.batch_size,
+        coach_args.symmetryAugmentation,
         coach_args.checkpoint,
     )
     if anchor_nnet is not None:

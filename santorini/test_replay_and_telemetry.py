@@ -5,7 +5,12 @@ import unittest
 
 import numpy as np
 
-from santorini.ReplayBuffer import load_compact_replay, save_compact_replay
+from santorini.ReplayBuffer import (
+    collapse_compact_replay_symmetries,
+    load_compact_replay,
+    save_compact_replay,
+    trim_compact_replay,
+)
 from santorini.SantoriniGame import SantoriniGame
 from santorini.SantoriniTelemetry import ReferenceSuite, resolve_reference_suite_path
 
@@ -60,6 +65,67 @@ class TestReplayAndTelemetry(unittest.TestCase):
             np.testing.assert_array_equal(actual[0], expected[0])
             np.testing.assert_allclose(actual[1], expected[1])
             self.assertEqual(actual[2], expected[2])
+
+    def test_trim_compact_replay_keeps_latest_windows_atomically(self):
+        policy = np.zeros(1625, dtype=np.float32)
+        policy[[64, 129]] = [0.25, 0.75]
+        history = [
+            deque([(np.full((2, 5, 5), window), policy, float(window)) for _ in range(window + 1)])
+            for window in range(4)
+        ]
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, 'latest.examples.npz')
+            save_compact_replay(path, history)
+
+            result = trim_compact_replay(path, keep_last_windows=2)
+            loaded = load_compact_replay(path)
+
+        self.assertEqual(result, {
+            'before_windows': 4,
+            'after_windows': 2,
+            'before_examples': 10,
+            'after_examples': 7,
+            'trimmed': True,
+        })
+        self.assertEqual([len(window) for window in loaded], [3, 4])
+        np.testing.assert_array_equal(loaded[0][0][0], np.full((2, 5, 5), 2))
+        np.testing.assert_array_equal(loaded[1][0][0], np.full((2, 5, 5), 3))
+
+    def test_trim_compact_replay_rejects_empty_history_request(self):
+        with self.assertRaisesRegex(ValueError, 'at least 1'):
+            trim_compact_replay('unused.npz', keep_last_windows=0)
+
+    def test_collapse_compact_replay_symmetries_keeps_one_per_group(self):
+        policy = np.zeros(1625, dtype=np.float32)
+        policy[64] = 1.0
+        history = []
+        for window in range(2):
+            examples = []
+            for position in range(window + 1):
+                for symmetry in range(8):
+                    board = np.full((2, 5, 5), 100 * window + 10 * position + symmetry)
+                    examples.append((board, policy, float(position)))
+            history.append(deque(examples))
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, 'latest.examples.npz')
+            save_compact_replay(path, history)
+
+            result = collapse_compact_replay_symmetries(path, group_size=8)
+            loaded = load_compact_replay(path)
+
+        self.assertEqual(result, {
+            'windows': 2,
+            'before_examples': 24,
+            'after_examples': 3,
+            'symmetry_group_size': 8,
+            'collapsed': True,
+        })
+        self.assertEqual([len(window) for window in loaded], [1, 2])
+        self.assertEqual(int(loaded[0][0][0][0, 0, 0]), 0)
+        self.assertEqual(int(loaded[1][0][0][0, 0, 0]), 100)
+        self.assertEqual(int(loaded[1][1][0][0, 0, 0]), 110)
 
     def test_v2_reference_policy_evaluates_against_v3_action_space(self):
         game = SantoriniGame(5, sequential_placement=True)

@@ -69,6 +69,28 @@ class FixedOpeningSampler:
 
 
 class TestSantoriniCoachExamples(unittest.TestCase):
+    def test_on_the_fly_symmetry_stores_one_position_instead_of_eight(self):
+        game = SantoriniGame(5, sequential_placement=True)
+        policy = game.getValidMoves(game.getInitBoard(), 1).astype(np.float32)
+        policy /= policy.sum()
+
+        expanded = object.__new__(Coach)
+        expanded.game = game
+        expanded.args = dotdict({'symmetryAugmentation': 'expanded'})
+        expanded_examples = []
+        expanded._appendTrainingPosition(expanded_examples, game.getInitBoard(), 1, policy)
+
+        on_the_fly = object.__new__(Coach)
+        on_the_fly.game = game
+        on_the_fly.args = dotdict({'symmetryAugmentation': 'on-the-fly'})
+        on_the_fly_examples = []
+        on_the_fly._appendTrainingPosition(on_the_fly_examples, game.getInitBoard(), 1, policy)
+
+        self.assertEqual(len(expanded_examples), 8)
+        self.assertEqual(len(on_the_fly_examples), 1)
+        np.testing.assert_array_equal(on_the_fly_examples[0][0], game.getInitBoard())
+        np.testing.assert_allclose(on_the_fly_examples[0][2], policy)
+
     def test_evaluation_rng_guard_restores_training_randomness(self):
         random.seed(41)
         np.random.seed(41)

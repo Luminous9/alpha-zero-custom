@@ -97,8 +97,8 @@ def label_candidate(task):
     mcts = MCTS(_worker_game, _worker_nnet, _worker_search_args)
     policy = np.asarray(mcts.getActionProb(board, temp=1), dtype=np.float32)
     state_key = _worker_game.stringRepresentation(board)
-    counts = mcts.Nsas.get(state_key, np.zeros(_worker_game.getActionSize(), dtype=np.int32))
-    q_values = mcts.Qs.get(state_key, np.zeros(_worker_game.getActionSize(), dtype=np.float32))
+    counts = mcts.getDenseActionCounts(state_key)
+    q_values = mcts.getDenseActionValues(state_key)
     root_value = float(np.sum(counts * q_values) / max(1, np.sum(counts)))
     return index, board, policy, root_value, stage
 

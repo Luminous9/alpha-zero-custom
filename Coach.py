@@ -103,6 +103,16 @@ class Coach():
     def _arena_batch_size(self):
         return max(1, int(getattr(self.args, 'arenaBatchSize', 1)))
 
+    def _uses_on_the_fly_symmetry(self):
+        return self._arg('symmetryAugmentation', 'expanded') == 'on-the-fly'
+
+    def _appendTrainingPosition(self, examples, canonical_board, player, policy):
+        if self._uses_on_the_fly_symmetry():
+            examples.append([canonical_board, player, policy, None])
+            return
+        for sym_board, sym_policy in self.game.getSymmetries(canonical_board, policy):
+            examples.append([sym_board, player, sym_policy, None])
+
     def _initial_board(self):
         if self.opening_sampler is not None:
             return self.opening_sampler.sample_self_play_board()
@@ -150,9 +160,7 @@ class Coach():
             temp = self._temperature(canonicalBoard, episodeStep)
 
             pi = self.mcts.getActionProb(canonicalBoard, temp=temp)
-            sym = self.game.getSymmetries(canonicalBoard, pi)
-            for b, p in sym:
-                trainExamples.append([b, self.curPlayer, p, None])
+            self._appendTrainingPosition(trainExamples, canonicalBoard, self.curPlayer, pi)
 
             action = np.random.choice(len(pi), p=pi)
             if hasattr(self.game, 'isPlacementAction') and self.game.isPlacementAction(action):
@@ -209,9 +217,12 @@ class Coach():
                 still_active = []
 
                 for episode, pi in zip(activeEpisodes, action_probs):
-                    sym = self.game.getSymmetries(episode['canonicalBoard'], pi)
-                    for b, p in sym:
-                        episode['trainExamples'].append([b, episode['curPlayer'], p, None])
+                    self._appendTrainingPosition(
+                        episode['trainExamples'],
+                        episode['canonicalBoard'],
+                        episode['curPlayer'],
+                        pi,
+                    )
 
                     action = np.random.choice(len(pi), p=pi)
                     if hasattr(self.game, 'isPlacementAction') and self.game.isPlacementAction(action):
@@ -334,6 +345,8 @@ class Coach():
                 metadata = {
                     'iteration': i,
                     'training_mode': self.training_mode,
+                    'max_train_steps': getattr(getattr(self.nnet, 'net_args', None), 'max_train_steps', None),
+                    'symmetry_augmentation': self._arg('symmetryAugmentation', 'expanded'),
                 }
                 self.nnet.save_checkpoint(
                     folder=self.args.checkpoint,

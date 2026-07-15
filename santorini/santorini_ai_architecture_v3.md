@@ -82,6 +82,8 @@ After four workers have been placed, channel 64 is permanently illegal. Legal ac
 
 Board transformations also transform the spatial action origin. This applies to both move/build actions and placement actions, allowing placement examples to use the same geometric augmentation as standard positions.
 
+V3 stores one canonical board/policy example per played position. Each time an example is sampled for training, one of the eight rotation/reflection symmetries is selected uniformly and applied to both the encoded board and the spatial policy. This preserves geometric augmentation without materializing eight replay entries per position. Older replay files that already contain expanded symmetries remain valid: their examples receive another uniformly sampled symmetry during training and age out normally as new single-position windows enter the retained history.
+
 ## Training From Scratch
 
 The production V3 run starts from random weights. V2 weights, V2 replay data, and the earlier V3 bootstrap are not training inputs.
@@ -94,6 +96,17 @@ Every self-play game begins at the empty board. The resulting replay therefore c
 - late tactical positions.
 
 The policy target is the MCTS visit distribution. The value target is the final game outcome from the acting player's perspective.
+
+### Capped optimizer steps
+
+Training requests up to three replay-equivalent epochs, but the production Kaggle configuration caps each iteration at 1,500 optimizer steps. For scheduling, each stored position represents eight virtual symmetry examples, matching the sample count used by the earlier expanded replay. The actual step count is:
+
+```text
+virtual_examples = stored_examples * 8
+min(epochs * ceil(virtual_examples / batch_size), max_train_steps)
+```
+
+Small replay buffers therefore retain the original three-epoch warm-up rate without storing eight copies. Once the replay is large, the cap prevents training time from growing with replay size. Telemetry records the completed steps, virtual replay size, uncapped requested steps, effective replay-equivalent epochs, and average draws per stored position.
 
 ### Exploration
 
@@ -131,9 +144,19 @@ Latest mode stores replay history in `latest.examples.npz` using a compact spars
 - history-window lengths: retained so iteration boundaries can be reconstructed;
 - action size and format version: stored for validation.
 
-The default full preset retains 20 iterations and caps each iteration queue at 200,000 examples. Compact replay avoids storing a dense 1,625-value vector for every example on disk.
+The default full preset retains 20 iterations and caps each iteration queue at 200,000 examples. Compact replay avoids storing a dense 1,625-value vector for every example on disk. With on-the-fly symmetry, a steady 20-iteration V3 replay contains one entry per played position instead of eight pre-expanded entries.
 
 Replay writes are non-atomic by default to avoid temporarily requiring space for both the old and new archive. Atomic saving remains available when additional disk space is acceptable.
+
+The replay-maintenance utility can retain only the newest history windows and, when transitioning a legacy expanded replay to on-the-fly augmentation, collapse each consecutive eight-symmetry group to one representative:
+
+```bash
+.venv/bin/python trim_santorini_replay.py latest.examples.npz \
+  --keep-last-windows 5 \
+  --collapse-symmetry-group-size 8
+```
+
+The utility validates history lengths, sparse-policy offsets, and array counts before atomically replacing the archive.
 
 ## Checkpoints and Exact Resume
 
@@ -193,7 +216,7 @@ Entropy should be interpreted diagnostically rather than as a score that must al
 
 ### Milestone matches
 
-Every 10 iterations by default, V3 saves a milestone checkpoint. Once both endpoints exist, it plays a non-gating match between the current checkpoint and the checkpoint 10 iterations earlier.
+Every 20 iterations by default, V3 saves a milestone checkpoint. Once both endpoints exist, it plays a non-gating match between the current checkpoint and the checkpoint 20 iterations earlier. Each milestone retains 40 standard and 40 placement-inclusive games; reducing frequency preserves the existing per-match confidence while halving evaluation overhead.
 
 Each milestone now contains two paired evaluations:
 
@@ -293,9 +316,11 @@ The baseline long-run configuration is:
 | MCTS simulations | 64 |
 | Self-play batch size | 128 |
 | Training epochs | 3 |
+| Maximum optimizer steps | 1,500 per iteration |
 | Training batch size | 512 |
+| Symmetry augmentation | Random on-the-fly rotation/reflection |
 | Replay history | 20 iterations |
-| Milestone interval | 10 iterations |
+| Milestone interval | 20 iterations |
 | Standard milestone games | 40 on 20 fixed completed openings |
 | Placement-inclusive milestone games | 40 using 20 fixed seed pairs |
 | Fixed V1 anchor | Optional, 40 games every 10 iterations |
@@ -336,6 +361,12 @@ Existing benchmark artifacts provide the initial hardware expectations:
 - On the tested M1 CPU, V3 MCTS was approximately 1.7 to 2.0 times slower than V2, but remained fast enough for interactive 64-simulation play.
 
 The benchmark JSON files are retained as evidence rather than treating theoretical convolution counts as wall-clock predictions.
+
+### Compact MCTS edge storage
+
+MCTS stores policy priors, Q values, and visit counts only for a state's legal actions. A compact slot maps each legal edge back to its global 1,625-action index. Dense visit policies and Q/count arrays are reconstructed only for public outputs and reference-suite export, so replay targets and external artifacts retain their established action format. Dense valid-action masks are discarded as soon as a leaf is expanded.
+
+In the isolated M1 hot-path benchmark used for this refactor (80 standard roots, 64 simulations per root, fixed uniform batched predictions), compact storage improved throughput from approximately 12,338 to 13,547 simulations per second, or 9.8%. For a representative root with 56 legal actions, NumPy edge-array storage fell from approximately 21.6 KB to 896 bytes. End-to-end Kaggle improvement can differ because GPU inference and training occupy additional wall time.
 
 ## Implemented Validation
 
