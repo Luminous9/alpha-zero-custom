@@ -82,6 +82,8 @@ class Coach():
         self._completed_game_results = []
         self._placement_choices = []
         self._completed_openings = []
+        self._placement_geometry_records = []
+        self._placement_policy_geometry = self._newPlacementPolicyGeometry()
         self._policy_target_stats = self._newPolicyTargetStats()
         self._playout_cap_stats = self._newPlayoutCapStats()
         self._reference_suite = None
@@ -277,6 +279,7 @@ class Coach():
                            the player eventually won the game, else -1.
         """
         trainExamples = []
+        placementActions = []
         board = self._initial_board()
         self.curPlayer = 1
         episodeStep = 0
@@ -319,6 +322,7 @@ class Coach():
             action = np.random.choice(len(action_policy), p=action_policy)
             if hasattr(self.game, 'isPlacementAction') and self.game.isPlacementAction(action):
                 self._recordPlacementChoice(episodeStep, action)
+                placementActions.append(action)
             board, self.curPlayer = self.game.getNextState(board, self.curPlayer, action)
             if episodeStep == 4 and getattr(self.game, 'sequential_placement', False):
                 self._completed_openings.append(board[0].tobytes())
@@ -326,8 +330,10 @@ class Coach():
             r = self.game.getGameEnded(board, self.curPlayer)
 
             if r != 0:
+                player_one_result = int(self.curPlayer * r)
                 self._completed_game_lengths.append(episodeStep)
-                self._completed_game_results.append(int(self.curPlayer * r))
+                self._completed_game_results.append(player_one_result)
+                self._recordCompletedPlacementGeometry(placementActions, player_one_result)
                 return [(x[0], x[2], r * ((-1) ** (x[1] != self.curPlayer))) for x in trainExamples]
 
     def executeEpisodesBatched(self, numEpisodes):
@@ -407,8 +413,13 @@ class Coach():
 
                     r = self.game.getGameEnded(episode['board'], episode['curPlayer'])
                     if r != 0:
+                        player_one_result = int(episode['curPlayer'] * r)
                         self._completed_game_lengths.append(episode['episodeStep'])
-                        self._completed_game_results.append(int(episode['curPlayer'] * r))
+                        self._completed_game_results.append(player_one_result)
+                        self._recordCompletedPlacementGeometry(
+                            episode['placementActions'],
+                            player_one_result,
+                        )
                         completedExamples.extend(
                             (x[0], x[2], r * ((-1) ** (x[1] != episode['curPlayer'])))
                             for x in episode['trainExamples']
@@ -495,6 +506,8 @@ class Coach():
             self._completed_game_results = []
             self._placement_choices = []
             self._completed_openings = []
+            self._placement_geometry_records = []
+            self._placement_policy_geometry = self._newPlacementPolicyGeometry()
             self._policy_target_stats = self._newPolicyTargetStats()
             self._playout_cap_stats = self._newPlayoutCapStats()
             iterationTrainExamples = None
@@ -891,6 +904,7 @@ class Coach():
         }
         payload.update(training_metrics or {})
         payload.update(self._placementTelemetry())
+        payload.update(self._placementGeometryTelemetry())
         payload.update(self._policyTargetTelemetry())
         payload.update(self._playoutCapTelemetry())
         payload.update(self._policyTelemetry())
@@ -913,6 +927,131 @@ class Coach():
         square = int(action) // self.game.local_action_size
         self._placement_choices.append((int(ply), square))
 
+    def _placementCoordinates(self, action):
+        square = int(action) // self.game.local_action_size
+        return divmod(square, self.game.n)
+
+    @staticmethod
+    def _chebyshevDistance(first, second):
+        return max(abs(first[0] - second[0]), abs(first[1] - second[1]))
+
+    def _recordCompletedPlacementGeometry(self, placement_actions, player_one_result):
+        if not getattr(self.game, 'sequential_placement', False) or len(placement_actions) < 2:
+            return
+        first, second = [self._placementCoordinates(action) for action in placement_actions[:2]]
+        center = ((self.game.n - 1) / 2.0, (self.game.n - 1) / 2.0)
+        center_distances = [
+            max(abs(location[0] - center[0]), abs(location[1] - center[1]))
+            for location in (first, second)
+        ]
+        central_low = (self.game.n - 3) // 2
+        central_high = central_low + 2
+        both_central = all(
+            central_low <= row <= central_high and central_low <= column <= central_high
+            for row, column in (first, second)
+        )
+        separation = self._chebyshevDistance(first, second)
+        self._placement_geometry_records.append({
+            'mean_center_distance': float(np.mean(center_distances)),
+            'both_central': bool(both_central),
+            'worker_separation': float(separation),
+            'result': int(player_one_result),
+        })
+
+    @staticmethod
+    def _newPlacementPolicyGeometry():
+        return {
+            'expected_center_distance': [],
+            'center_mass': [],
+            'inner_ring_mass': [],
+            'outer_ring_mass': [],
+            'expected_worker_separation': [],
+        }
+
+    def _recordPlacementPolicyGeometry(self, canonical_board, policy):
+        if not getattr(self.game, 'sequential_placement', False):
+            return
+        occupied = int(np.count_nonzero(canonical_board[0]))
+        if occupied not in (0, 1):
+            return
+
+        local_action = int(getattr(self.game, 'PLACEMENT_LOCAL_ACTION', 64))
+        action_indices = (
+            np.arange(self.game.n * self.game.n, dtype=np.int64) * self.game.local_action_size
+            + local_action
+        )
+        probabilities = np.asarray(policy, dtype=np.float64)[action_indices]
+        total_mass = float(probabilities.sum())
+        if total_mass <= 0:
+            return
+        probabilities /= total_mass
+
+        center = ((self.game.n - 1) / 2.0, (self.game.n - 1) / 2.0)
+        locations = [divmod(square, self.game.n) for square in range(self.game.n * self.game.n)]
+        center_distances = np.asarray([
+            max(abs(row - center[0]), abs(column - center[1]))
+            for row, column in locations
+        ], dtype=np.float64)
+        stats = self._placement_policy_geometry
+        stats['expected_center_distance'].append(float(probabilities @ center_distances))
+        stats['center_mass'].append(float(probabilities[center_distances == 0].sum()))
+        stats['inner_ring_mass'].append(float(probabilities[center_distances == 1].sum()))
+        stats['outer_ring_mass'].append(float(probabilities[center_distances >= 2].sum()))
+
+        if occupied == 1:
+            existing = tuple(int(value) for value in np.argwhere(canonical_board[0] != 0)[0])
+            separations = np.asarray([
+                self._chebyshevDistance(existing, location) for location in locations
+            ], dtype=np.float64)
+            stats['expected_worker_separation'].append(float(probabilities @ separations))
+
+    def _placementGeometryTelemetry(self):
+        records = self._placement_geometry_records
+        if not records:
+            return {}
+
+        def mean(records_for_metric, key):
+            return float(np.mean([record[key] for record in records_for_metric]))
+
+        separations = np.asarray(
+            [record['worker_separation'] for record in records],
+            dtype=np.float64,
+        )
+        winners = [record for record in records if record['result'] > 0]
+        losers = [record for record in records if record['result'] < 0]
+        payload = {
+            'p1_placement_games': int(len(records)),
+            'p1_placement_mean_center_distance': mean(records, 'mean_center_distance'),
+            'p1_placement_both_central_rate': mean(records, 'both_central'),
+            'p1_placement_mean_worker_separation': float(separations.mean()),
+            'p1_placement_adjacent_rate': float(np.mean(separations == 1)),
+            'p1_placement_moderate_separation_rate': float(np.mean(separations == 2)),
+            'p1_placement_far_separation_rate': float(np.mean(separations >= 3)),
+            'p1_winner_placement_games': int(len(winners)),
+            'p1_loser_placement_games': int(len(losers)),
+            'p1_winner_mean_center_distance': (
+                mean(winners, 'mean_center_distance') if winners else None
+            ),
+            'p1_loser_mean_center_distance': (
+                mean(losers, 'mean_center_distance') if losers else None
+            ),
+            'p1_winner_mean_worker_separation': (
+                mean(winners, 'worker_separation') if winners else None
+            ),
+            'p1_loser_mean_worker_separation': (
+                mean(losers, 'worker_separation') if losers else None
+            ),
+        }
+        policy_stats = self._placement_policy_geometry
+        for key in ('expected_center_distance', 'center_mass', 'inner_ring_mass', 'outer_ring_mass'):
+            values = policy_stats[key]
+            if values:
+                payload['p1_policy_{}'.format(key)] = float(np.mean(values))
+        separations = policy_stats['expected_worker_separation']
+        if separations:
+            payload['p1_policy_expected_worker_separation'] = float(np.mean(separations))
+        return payload
+
     @staticmethod
     def _newPolicyTargetStats():
         return {
@@ -932,6 +1071,8 @@ class Coach():
         bucket['entropy'].append(entropy)
         bucket['support'].append(support)
         bucket['one_hot'].append(support <= 1)
+        if phase == 'placement':
+            self._recordPlacementPolicyGeometry(canonical_board, policy)
 
     def _policyTargetTelemetry(self):
         payload = {}

@@ -238,6 +238,17 @@ For each of the four placement plies, telemetry records:
 
 It also records the number of unique completed openings seen during the iteration. These metrics help detect premature opening collapse and visualize learned setup preferences.
 
+Player 1's two selected worker locations are also paired per completed self-play game. Geometry uses Chebyshev distance, matching the workers' eight-direction movement, and records:
+
+- mean worker distance from the center (`0` center, `1` inner ring, `2` outer ring);
+- the rate at which both workers occupy the central `3 x 3`;
+- mean worker-to-worker separation and the rates of adjacent (`1`), moderate (`2`), and far (`3-4`) separation; and
+- center distance and separation separately for games Player 1 eventually won and lost.
+
+For uniformly random distinct placements on a `5 x 5` board, the comparison baselines are `1.60` mean center distance, `12%` both-central placements, and `2.36` mean worker separation. Centrality has a natural direction, but separation is descriptive: neither maximum nor minimum distance is assumed to be optimal.
+
+The full-search visit targets for Player 1's first two placement turns additionally report expected center distance, center/inner/outer-ring probability mass, and expected second-worker separation. These target-weighted measurements are less sensitive than selected actions to temperature sampling, although root Dirichlet exploration is still present and averages out across the iteration.
+
 ### Raw-policy metrics
 
 On a sample of replay boards, V3 records metrics separately for placement and standard positions:

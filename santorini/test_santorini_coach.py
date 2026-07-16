@@ -94,6 +94,72 @@ class FixedOpeningSampler:
 
 
 class TestSantoriniCoachExamples(unittest.TestCase):
+    def test_player_one_placement_geometry_tracks_center_separation_and_outcomes(self):
+        game = SantoriniGame(5, sequential_placement=True)
+        coach = object.__new__(Coach)
+        coach.game = game
+        coach._placement_geometry_records = []
+        coach._placement_policy_geometry = coach._newPlacementPolicyGeometry()
+
+        coach._recordCompletedPlacementGeometry([
+            game.getPlacementAction((2, 2)),
+            game.getPlacementAction((2, 4)),
+        ], player_one_result=1)
+        coach._recordCompletedPlacementGeometry([
+            game.getPlacementAction((0, 0)),
+            game.getPlacementAction((4, 4)),
+        ], player_one_result=-1)
+
+        telemetry = coach._placementGeometryTelemetry()
+        self.assertEqual(telemetry['p1_placement_games'], 2)
+        self.assertAlmostEqual(telemetry['p1_placement_mean_center_distance'], 1.5)
+        self.assertEqual(telemetry['p1_placement_both_central_rate'], 0.0)
+        self.assertAlmostEqual(telemetry['p1_placement_mean_worker_separation'], 3.0)
+        self.assertEqual(telemetry['p1_placement_adjacent_rate'], 0.0)
+        self.assertEqual(telemetry['p1_placement_moderate_separation_rate'], 0.5)
+        self.assertEqual(telemetry['p1_placement_far_separation_rate'], 0.5)
+        self.assertEqual(telemetry['p1_winner_placement_games'], 1)
+        self.assertEqual(telemetry['p1_loser_placement_games'], 1)
+        self.assertAlmostEqual(telemetry['p1_winner_mean_center_distance'], 1.0)
+        self.assertAlmostEqual(telemetry['p1_loser_mean_center_distance'], 2.0)
+        self.assertAlmostEqual(telemetry['p1_winner_mean_worker_separation'], 2.0)
+        self.assertAlmostEqual(telemetry['p1_loser_mean_worker_separation'], 4.0)
+
+    def test_player_one_placement_policy_geometry_uses_visit_distribution(self):
+        game = SantoriniGame(5, sequential_placement=True)
+        coach = object.__new__(Coach)
+        coach.game = game
+        coach._placement_geometry_records = [{
+            'mean_center_distance': 0.0,
+            'both_central': True,
+            'worker_separation': 1.0,
+            'result': 1,
+        }]
+        coach._placement_policy_geometry = coach._newPlacementPolicyGeometry()
+
+        first_policy = np.zeros(game.getActionSize(), dtype=np.float32)
+        first_policy[game.getPlacementAction((2, 2))] = 0.25
+        first_policy[game.getPlacementAction((0, 0))] = 0.75
+        coach._recordPlacementPolicyGeometry(game.getInitBoard(), first_policy)
+
+        second_board, player = game.getNextState(
+            game.getInitBoard(),
+            1,
+            game.getPlacementAction((2, 2)),
+        )
+        self.assertEqual(player, 1)
+        second_policy = np.zeros(game.getActionSize(), dtype=np.float32)
+        second_policy[game.getPlacementAction((2, 3))] = 0.4
+        second_policy[game.getPlacementAction((4, 4))] = 0.6
+        coach._recordPlacementPolicyGeometry(second_board, second_policy)
+
+        telemetry = coach._placementGeometryTelemetry()
+        self.assertAlmostEqual(telemetry['p1_policy_expected_center_distance'], 1.55)
+        self.assertAlmostEqual(telemetry['p1_policy_center_mass'], 0.125)
+        self.assertAlmostEqual(telemetry['p1_policy_inner_ring_mass'], 0.2)
+        self.assertAlmostEqual(telemetry['p1_policy_outer_ring_mass'], 0.675)
+        self.assertAlmostEqual(telemetry['p1_policy_expected_worker_separation'], 1.6)
+
     def test_playout_cap_keeps_placement_at_full_search_by_default(self):
         game = SantoriniGame(5, sequential_placement=True)
         coach = object.__new__(Coach)
