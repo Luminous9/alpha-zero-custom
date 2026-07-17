@@ -30,11 +30,61 @@ class MCTS():
         self.noised_roots = set()
         self.root_action_overrides = {}
         self.tactical_roots = {}
+        self.raw_values = {}
+        self.gumbel_roots = {}
 
     def _arg(self, key, default=None):
         if hasattr(self.args, 'get'):
             return self.args.get(key, default)
         return getattr(self.args, key, default)
+
+    def usesGumbelSearch(self):
+        return str(self._arg('searchMode', 'puct')).lower() == 'gumbel'
+
+    @staticmethod
+    def _gumbel_considered_visits(max_num_considered_actions, num_simulations):
+        """Port of mctx's Sequential Halving visit schedule."""
+        if num_simulations <= 0:
+            return ()
+        if max_num_considered_actions <= 1:
+            return tuple(range(num_simulations))
+        log2max = int(math.ceil(math.log2(max_num_considered_actions)))
+        sequence = []
+        visits = [0] * max_num_considered_actions
+        num_considered = max_num_considered_actions
+        while len(sequence) < num_simulations:
+            extra_visits = max(
+                1,
+                int(num_simulations / (log2max * num_considered)),
+            )
+            for _ in range(extra_visits):
+                sequence.extend(visits[:num_considered])
+                for index in range(num_considered):
+                    visits[index] += 1
+            num_considered = max(2, num_considered // 2)
+        return tuple(sequence[:num_simulations])
+
+    def prepareSearchRoot(self, canonicalBoard, num_simulations, rng=None):
+        """Register a root and its simulation budget for the selected search mode."""
+        if not self.usesGumbelSearch():
+            return
+        state_key = self.game.stringRepresentation(canonicalBoard)
+        if state_key in self.gumbel_roots:
+            return
+        already_expanded = state_key in self.Ps
+        self.gumbel_roots[state_key] = {
+            # This MCTS implementation spends its first simulation expanding
+            # a new root. A child retained from the prior move is already
+            # expanded and can spend its entire budget on root edges.
+            'edge_budget': max(
+                0,
+                int(num_simulations) - (0 if already_expanded else 1),
+            ),
+            'gumbel': None,
+            'considered_visits': None,
+            'baseline_visits': None,
+            'rng': rng,
+        }
 
     @staticmethod
     def _uniform_policy(action_size, actions):
@@ -152,8 +202,8 @@ class MCTS():
         canonicalBoard.
 
         Returns:
-            probs: a policy vector where the probability of the ith action is
-                   proportional to Nsa[(s,a)]**(1./temp)
+            probs: PUCT visit-count probabilities, or the one-hot action
+                   selected by Gumbel Sequential Halving.
         """
         simulations = (
             int(self.args.numMCTSSims)
@@ -164,11 +214,20 @@ class MCTS():
         tactical = self.prepareTacticalRoot(canonicalBoard)
         if tactical is not None and tactical['policy'] is not None:
             return list(tactical['policy'])
+        self.prepareSearchRoot(canonicalBoard, simulations)
         for i in range(simulations):
             self.search(canonicalBoard)
             if i == 0 and add_root_noise:
                 self.add_root_noise(canonicalBoard)
 
+        return self.getActionProbFromTree(canonicalBoard, temp=temp)
+
+    def getTrainingPolicyFromTree(self, canonicalBoard, temp=1):
+        """Return the replay policy target produced by the selected search."""
+        if self.usesGumbelSearch():
+            return list(self._gumbel_improved_policy(
+                self.game.stringRepresentation(canonicalBoard)
+            ))
         return self.getActionProbFromTree(canonicalBoard, temp=temp)
 
     def getActionProbFromTree(self, canonicalBoard, temp=1):
@@ -177,6 +236,10 @@ class MCTS():
         additional simulations.
         """
         s = self.game.stringRepresentation(canonicalBoard)
+        if self.usesGumbelSearch() and s in self.Ps:
+            if s not in self.gumbel_roots:
+                self.prepareSearchRoot(canonicalBoard, 1)
+            return list(self._gumbel_action_policy(s))
         if s in self.Nsas:
             actions = self.As[s]
             counts = self.Nsas[s].astype(np.float64)
@@ -300,7 +363,8 @@ class MCTS():
         """
         if leaf['needs_eval']:
             self._expand_leaf(leaf['state_key'], leaf['board'], policy)
-            propagated_value = value
+            propagated_value = float(value)
+            self.raw_values[leaf['state_key']] = propagated_value
         else:
             propagated_value = leaf['value']
 
@@ -340,6 +404,8 @@ class MCTS():
         self.Vs.pop(s, None)
 
     def add_root_noise(self, canonicalBoard):
+        if self.usesGumbelSearch():
+            return
         get_arg = self.args.get if hasattr(self.args, 'get') else lambda key, default: getattr(self.args, key, default)
         if not bool(get_arg('addDirichletNoise', False)):
             return
@@ -363,6 +429,11 @@ class MCTS():
         return self.game.getGameEnded(canonicalBoard, 1), None
 
     def _best_action(self, s):
+        if self.usesGumbelSearch():
+            if s in self.gumbel_roots:
+                return self._best_gumbel_root_action(s)
+            return self._best_gumbel_interior_action(s)
+
         actions = self.As[s]
         edge_counts = self.Nsas[s]
         visited = edge_counts > 0
@@ -386,6 +457,107 @@ class MCTS():
 
         action_index = int(np.argmax(u))
         return int(actions[action_index]), action_index
+
+    def _completed_qvalues(self, s):
+        """Published completed-by-mixed-value Q transform used by mctx."""
+        priors = np.asarray(self.Ps[s], dtype=np.float64)
+        qvalues = np.asarray(self.Qs[s], dtype=np.float64)
+        visits = np.asarray(self.Nsas[s], dtype=np.float64)
+        raw_value = float(self.raw_values.get(s, 0.0))
+        visited = visits > 0
+        total_visits = float(np.sum(visits))
+        if np.any(visited):
+            visited_prior_mass = float(np.sum(priors[visited]))
+            if visited_prior_mass > 0:
+                weighted_q = float(np.sum(
+                    priors[visited] * qvalues[visited] / visited_prior_mass
+                ))
+            else:
+                weighted_q = float(np.mean(qvalues[visited]))
+            mixed_value = (raw_value + total_visits * weighted_q) / (total_visits + 1.0)
+        else:
+            mixed_value = raw_value
+        completed = np.where(visited, qvalues, mixed_value)
+        value_range = float(np.max(completed) - np.min(completed))
+        if value_range > EPS:
+            completed = (completed - np.min(completed)) / value_range
+        else:
+            completed = np.zeros_like(completed)
+        max_visits = float(np.max(visits)) if len(visits) else 0.0
+        return (50.0 + max_visits) * 0.1 * completed
+
+    def _policy_logits(self, s):
+        return np.log(np.maximum(np.asarray(self.Ps[s], dtype=np.float64), 1e-30))
+
+    @staticmethod
+    def _softmax(logits):
+        shifted = np.asarray(logits, dtype=np.float64) - float(np.max(logits))
+        weights = np.exp(shifted)
+        return weights / np.sum(weights)
+
+    def _initialize_gumbel_root(self, s):
+        root = self.gumbel_roots[s]
+        if root['gumbel'] is not None:
+            return root
+        action_count = len(self.As[s])
+        max_considered = min(
+            int(self._arg('gumbelMaxConsideredActions', 16)),
+            action_count,
+        )
+        generator = root['rng'] if root['rng'] is not None else np.random
+        root['gumbel'] = (
+            float(self._arg('gumbelScale', 1.0))
+            * generator.gumbel(size=action_count)
+        )
+        root['considered_visits'] = self._gumbel_considered_visits(
+            max_considered,
+            root['edge_budget'],
+        )
+        root['baseline_visits'] = self.Nsas[s].copy()
+        return root
+
+    def _best_gumbel_root_action(self, s):
+        root = self._initialize_gumbel_root(s)
+        visits = self.Nsas[s]
+        root_visits = visits - root['baseline_visits']
+        simulation_index = int(np.sum(root_visits))
+        schedule = root['considered_visits']
+        if simulation_index >= len(schedule):
+            # Defensive fallback for callers that search beyond the registered
+            # root budget: continue allocating according to improved policy.
+            return self._best_gumbel_interior_action(s)
+        considered_visit = schedule[simulation_index]
+        score = root['gumbel'] + self._policy_logits(s) + self._completed_qvalues(s)
+        score = np.where(root_visits == considered_visit, score, -np.inf)
+        action_index = int(np.argmax(score))
+        return int(self.As[s][action_index]), action_index
+
+    def _best_gumbel_interior_action(self, s):
+        improved = self._softmax(self._policy_logits(s) + self._completed_qvalues(s))
+        visits = np.asarray(self.Nsas[s], dtype=np.float64)
+        score = improved - visits / (1.0 + float(np.sum(visits)))
+        action_index = int(np.argmax(score))
+        return int(self.As[s][action_index]), action_index
+
+    def _gumbel_improved_policy(self, s):
+        dense = np.zeros(self.game.getActionSize(), dtype=np.float64)
+        if s not in self.Ps:
+            return dense
+        dense[self.As[s]] = self._softmax(
+            self._policy_logits(s) + self._completed_qvalues(s)
+        )
+        return dense
+
+    def _gumbel_action_policy(self, s):
+        dense = np.zeros(self.game.getActionSize(), dtype=np.float64)
+        root = self._initialize_gumbel_root(s)
+        visits = self.Nsas[s]
+        root_visits = visits - root['baseline_visits']
+        considered_visit = int(np.max(root_visits)) if len(root_visits) else 0
+        score = root['gumbel'] + self._policy_logits(s) + self._completed_qvalues(s)
+        score = np.where(root_visits == considered_visit, score, -np.inf)
+        dense[int(self.As[s][int(np.argmax(score))])] = 1.0
+        return dense
 
     def _update_edge(self, s, a, v, action_index=None):
         if s in self.Qs:

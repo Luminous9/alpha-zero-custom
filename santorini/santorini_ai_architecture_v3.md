@@ -95,7 +95,7 @@ Every self-play game begins at the empty board. The resulting replay therefore c
 - midgame positions; and
 - late tactical positions.
 
-The policy target is the MCTS visit distribution at temperature `1.0`. The action played in self-play is sampled from a separately temperature-adjusted copy of those same root visits. The value target is the final game outcome from the acting player's perspective.
+Under the default PUCT search, the policy target is the MCTS visit distribution at temperature `1.0`. The action played in self-play is sampled from a separately temperature-adjusted copy of those same root visits. The optional experimental Gumbel mode instead stores its completed-Q improved policy and acts with its Sequential Halving selection. The value target is the final game outcome from the acting player's perspective.
 
 ### Fresh-data replay reuse
 
@@ -134,6 +134,35 @@ V3 separates the policy saved for training from the policy used to choose the se
 - The default Dirichlet parameters are alpha `0.30` and epsilon `0.25`.
 
 Action temperature controls how self-play samples from the MCTS visit distribution; it does not enforce a fixed percentage of deliberately bad moves. Target temperature controls only the replay label. Dirichlet noise supplies additional root exploration, while the legal-action mask prevents invalid placement or move/build actions.
+
+### Experimental Gumbel search
+
+PUCT remains the production default. Passing `--search-mode gumbel` enables an experimental Full Gumbel AlphaZero-style search intended for controlled comparisons at the available 32/96-simulation budgets. Its root uses Gumbel Top-k sampling without replacement and Sequential Halving, while interior nodes deterministically allocate visits toward `softmax(policy logits + completed Q)`. The replay policy is that same completed-Q improved distribution rather than raw visit proportions, and the selected root action is the highest-scoring surviving candidate. The implementation follows [Policy improvement by planning with Gumbel](https://openreview.net/forum?id=bERaNdoegnO) and DeepMind's [mctx reference implementation](https://github.com/google-deepmind/mctx).
+
+Gumbel mode does not add root Dirichlet noise; its sampled root Gumbels provide exploration. It uses the published completed-by-mixed-value Q transform defaults (`value_scale=0.1`, `maxvisit_init=50`) and considers at most 16 root actions by default. `--gumbel-max-considered-actions` and `--gumbel-scale` are available for experiments. Tactical shortcuts still run before either search mode, compact legal-edge storage is unchanged, and no checkpoint or replay format migration is required.
+
+The Kaggle notebook exposes `SEARCH_MODE`, but leaves it at `"puct"`. A Gumbel run should initially be treated as an ablation from a shared checkpoint, not silently substituted into the established training trajectory. In this mode the PUCT action-temperature and policy-target-temperature settings do not shape the Gumbel action or target; they remain present for configuration compatibility.
+
+Before a training ablation, the two searches can be compared directly with the same network, paired openings, seats, tactical shortcuts, and simulation budget. A zero Gumbel scale is recommended for this deterministic perfect-information evaluation; self-play retains scale `1.0` for exploration.
+
+```bash
+.venv/bin/python pit_santorini.py \
+  --architecture v3 \
+  --checkpoint-folder ./temp/santorini_v3_run8 \
+  --checkpoint-file latest.pth.tar \
+  --search-mode gumbel \
+  --gumbel-scale 0 \
+  --opponent-architecture v3 \
+  --opponent-checkpoint-folder ./temp/santorini_v3_run8 \
+  --opponent-checkpoint-file latest.pth.tar \
+  --opponent-search-mode puct \
+  --opening-source unique \
+  --opening-seed 20260715 \
+  --games 200 \
+  --sims 96 \
+  --arena-batch-size 128 \
+  --json-out ./temp/gumbel_vs_puct_s96.json
+```
 
 ### Exact tactical shortcuts
 
@@ -370,6 +399,7 @@ The baseline long-run configuration is:
 | Iterations per notebook chunk | Configurable; 10 by default |
 | Self-play games per iteration | 240 with playout-cap randomization |
 | Full / fast MCTS simulations | 96 / 32 |
+| Search mode | PUCT (`gumbel` is opt-in experimental) |
 | Full-search probability | 100% placement; 25% standard |
 | Self-play batch size | 128 |
 | Optimizer | AdamW |

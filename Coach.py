@@ -273,6 +273,11 @@ class Coach():
             return None
         return mcts.prepareTacticalRoot(canonical_board)
 
+    @staticmethod
+    def _prepareSearchRoot(mcts, canonical_board, simulations):
+        if hasattr(mcts, 'prepareSearchRoot'):
+            mcts.prepareSearchRoot(canonical_board, simulations)
+
     def _policyTargetTemperature(self, action_temperature):
         target_temperature = self._arg('policyTargetTemperature', None)
         return action_temperature if target_temperature is None else float(target_temperature)
@@ -286,11 +291,20 @@ class Coach():
     ):
         target_temperature = self._policyTargetTemperature(action_temperature)
         if training_policy is None:
-            training_policy = mcts.getActionProbFromTree(
-                canonical_board,
-                temp=target_temperature,
-            )
-        if float(action_temperature) == float(target_temperature):
+            if hasattr(mcts, 'getTrainingPolicyFromTree'):
+                training_policy = mcts.getTrainingPolicyFromTree(
+                    canonical_board,
+                    temp=target_temperature,
+                )
+            else:
+                training_policy = mcts.getActionProbFromTree(
+                    canonical_board,
+                    temp=target_temperature,
+                )
+        gumbel_search = bool(
+            hasattr(mcts, 'usesGumbelSearch') and mcts.usesGumbelSearch()
+        )
+        if float(action_temperature) == float(target_temperature) and not gumbel_search:
             action_policy = training_policy
         else:
             action_policy = mcts.getActionProbFromTree(
@@ -341,12 +355,19 @@ class Coach():
                     )
             elif full_search:
                 target_temperature = self._policyTargetTemperature(action_temperature)
-                training_policy = self.mcts.getActionProb(
+                searched_policy = self.mcts.getActionProb(
                     canonicalBoard,
                     temp=target_temperature,
                     num_simulations=simulations,
                     add_root_noise=True,
                 )
+                if hasattr(self.mcts, 'getTrainingPolicyFromTree'):
+                    training_policy = self.mcts.getTrainingPolicyFromTree(
+                        canonicalBoard,
+                        temp=target_temperature,
+                    )
+                else:
+                    training_policy = searched_policy
                 training_policy, action_policy = self._selfPlayPoliciesFromTree(
                     self.mcts,
                     canonicalBoard,
@@ -433,6 +454,15 @@ class Coach():
                     episode['tactical'] = self._prepareTacticalRoot(
                         episode['mcts'], episode['canonicalBoard']
                     )
+                    if not (
+                        episode['tactical'] is not None
+                        and episode['tactical']['policy'] is not None
+                    ):
+                        self._prepareSearchRoot(
+                            episode['mcts'],
+                            episode['canonicalBoard'],
+                            episode['searchSims'],
+                        )
                     self._recordTacticalRoot(episode['tactical'], episode['searchSims'])
 
                 training_policies, action_policies = self._getBatchedSelfPlayPolicies(activeEpisodes)
@@ -636,6 +666,11 @@ class Coach():
                     'iteration': i,
                     'training_mode': self.training_mode,
                     'num_mcts_sims': int(self.args.numMCTSSims),
+                    'search_mode': self._arg('searchMode', 'puct'),
+                    'gumbel_max_considered_actions': self._arg(
+                        'gumbelMaxConsideredActions', 16
+                    ),
+                    'gumbel_scale': self._arg('gumbelScale', 1.0),
                     'policy_target_temperature': self._arg('policyTargetTemperature', None),
                     'max_train_steps': getattr(getattr(self.nnet, 'net_args', None), 'max_train_steps', None),
                     'symmetry_augmentation': self._arg('symmetryAugmentation', 'expanded'),
@@ -952,6 +987,11 @@ class Coach():
         payload = {
             'iteration': int(iteration),
             'num_mcts_sims': int(self.args.numMCTSSims),
+            'search_mode': self._arg('searchMode', 'puct'),
+            'gumbel_max_considered_actions': int(
+                self._arg('gumbelMaxConsideredActions', 16)
+            ),
+            'gumbel_scale': float(self._arg('gumbelScale', 1.0)),
             'policy_target_temperature': self._arg('policyTargetTemperature', None),
             'standard_action_temperature_threshold': int(self.args.tempThreshold),
             'placement_action_temperature': float(self._arg('placementTemperature', 1.0)),

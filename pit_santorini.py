@@ -34,13 +34,38 @@ def build_nnet(game, architecture):
     raise ValueError("Unknown architecture: {}".format(architecture))
 
 
+def search_args(sims, search_mode='puct', gumbel_max_considered_actions=16, gumbel_scale=1.0):
+    return dotdict({
+        'numMCTSSims': int(sims),
+        'cpuct': 1.0,
+        'searchMode': search_mode,
+        'gumbelMaxConsideredActions': int(gumbel_max_considered_actions),
+        'gumbelScale': float(gumbel_scale),
+        'tacticalShortcuts': True,
+    })
+
+
 class NetworkMCTSPlayer:
     """MCTS player around an already-loaded network, reset before every arena game."""
 
-    def __init__(self, game, nnet, sims, action_temp=0.0):
+    def __init__(
+        self,
+        game,
+        nnet,
+        sims,
+        action_temp=0.0,
+        search_mode='puct',
+        gumbel_max_considered_actions=16,
+        gumbel_scale=1.0,
+    ):
         self.game = game
         self.nnet = nnet
-        self.mcts_args = dotdict({'numMCTSSims': sims, 'cpuct': 1.0})
+        self.mcts_args = search_args(
+            sims,
+            search_mode=search_mode,
+            gumbel_max_considered_actions=gumbel_max_considered_actions,
+            gumbel_scale=gumbel_scale,
+        )
         self.action_temp = action_temp
         self.mcts = None
 
@@ -57,10 +82,29 @@ class NetworkMCTSPlayer:
 
 
 class NeuralMCTSPlayer(NetworkMCTSPlayer):
-    def __init__(self, game, checkpoint_folder, checkpoint_file, sims, architecture='v2', action_temp=0.0):
+    def __init__(
+        self,
+        game,
+        checkpoint_folder,
+        checkpoint_file,
+        sims,
+        architecture='v2',
+        action_temp=0.0,
+        search_mode='puct',
+        gumbel_max_considered_actions=16,
+        gumbel_scale=1.0,
+    ):
         nnet = build_nnet(game, architecture)
         nnet.load_checkpoint(checkpoint_folder, checkpoint_file)
-        super().__init__(game, nnet, sims, action_temp=action_temp)
+        super().__init__(
+            game,
+            nnet,
+            sims,
+            action_temp=action_temp,
+            search_mode=search_mode,
+            gumbel_max_considered_actions=gumbel_max_considered_actions,
+            gumbel_scale=gumbel_scale,
+        )
 
 
 def select_legal_action(game, board, probs, sample=False):
@@ -94,8 +138,6 @@ def validate_batched_arena_args(parser, args):
         parser.error('--arena-batch-size > 1 currently requires --opponent-checkpoint-folder.')
     if args.action_temp != 0:
         parser.error('--arena-batch-size > 1 requires deterministic play with --action-temp 0.')
-    if args.opponent_sims is not None and args.opponent_sims != args.sims:
-        parser.error('--arena-batch-size > 1 requires --opponent-sims to match --sims.')
 
 
 def load_opening_board(opening_book_path, opening_id):
@@ -366,6 +408,9 @@ def main():
     parser.add_argument('--baseline', choices=['random', 'greedy'], default='random')
     parser.add_argument('--games', type=int, default=4)
     parser.add_argument('--sims', type=int, default=25)
+    parser.add_argument('--search-mode', choices=['puct', 'gumbel'], default='puct')
+    parser.add_argument('--gumbel-max-considered-actions', type=int, default=16)
+    parser.add_argument('--gumbel-scale', type=float, default=1.0)
     parser.add_argument('--checkpoint-folder', default='./temp/santorini_quick/')
     parser.add_argument('--checkpoint-file', default='best.pth.tar')
     parser.add_argument('--architecture', choices=['v1', 'v2', 'v3'], default='v2')
@@ -373,6 +418,9 @@ def main():
     parser.add_argument('--opponent-checkpoint-file', default='best.pth.tar')
     parser.add_argument('--opponent-architecture', choices=['v1', 'v2', 'v3'], default='v2')
     parser.add_argument('--opponent-sims', type=int)
+    parser.add_argument('--opponent-search-mode', choices=['puct', 'gumbel'], default='puct')
+    parser.add_argument('--opponent-gumbel-max-considered-actions', type=int, default=16)
+    parser.add_argument('--opponent-gumbel-scale', type=float, default=1.0)
     parser.add_argument(
         '--arena-batch-size',
         type=int,
@@ -418,7 +466,12 @@ def main():
         parser.error('--action-temp must be non-negative.')
     if args.arena_batch_size < 1:
         parser.error('--arena-batch-size must be at least 1.')
+    if args.gumbel_max_considered_actions < 1 or args.opponent_gumbel_max_considered_actions < 1:
+        parser.error('Gumbel max considered actions must be at least 1.')
+    if args.gumbel_scale < 0 or args.opponent_gumbel_scale < 0:
+        parser.error('Gumbel scale cannot be negative.')
     validate_batched_arena_args(parser, args)
+    np.random.seed(args.opening_seed)
 
     uses_v3 = args.architecture == 'v3' or (
         args.opponent_checkpoint_folder and args.opponent_architecture == 'v3'
@@ -463,6 +516,9 @@ def main():
             args.sims,
             architecture=args.architecture,
             action_temp=args.action_temp,
+            search_mode=args.search_mode,
+            gumbel_max_considered_actions=args.gumbel_max_considered_actions,
+            gumbel_scale=args.gumbel_scale,
         )
         opponent_player_obj = NeuralMCTSPlayer(
             game,
@@ -471,10 +527,16 @@ def main():
             args.opponent_sims or args.sims,
             architecture=args.opponent_architecture,
             action_temp=args.action_temp,
+            search_mode=args.opponent_search_mode,
+            gumbel_max_considered_actions=args.opponent_gumbel_max_considered_actions,
+            gumbel_scale=args.opponent_gumbel_scale,
         )
         player1 = nnet_player_obj
         player2 = opponent_player_obj
         contestant2_name = display_name_from_folder(args.opponent_checkpoint_folder)
+        if contestant1_name == contestant2_name or args.search_mode != args.opponent_search_mode:
+            contestant1_name = "{} [{}]".format(contestant1_name, args.search_mode)
+            contestant2_name = "{} [{}]".format(contestant2_name, args.opponent_search_mode)
     else:
         nnet = build_nnet(game, args.architecture)
         if not args.fresh and os.path.exists(checkpoint_path):
@@ -488,25 +550,52 @@ def main():
             nnet,
             args.sims,
             action_temp=args.action_temp,
+            search_mode=args.search_mode,
+            gumbel_max_considered_actions=args.gumbel_max_considered_actions,
+            gumbel_scale=args.gumbel_scale,
         )
         player2 = build_baseline(game, args.baseline)
         contestant2_name = args.baseline
 
     if args.action_temp > 0:
         print("Sampling neural MCTS actions with temperature {}.".format(args.action_temp))
+    print("Contestant 1 search: {} ({} sims).".format(args.search_mode, args.sims))
+    if args.opponent_checkpoint_folder:
+        print("Contestant 2 search: {} ({} sims).".format(
+            args.opponent_search_mode,
+            args.opponent_sims or args.sims,
+        ))
 
     seat_stats = None
     use_batched_arena = batched_arena_requested(args)
     if use_batched_arena:
         print("Using batched arena with batch size {}.".format(args.arena_batch_size))
+        player1_args = search_args(
+            args.sims,
+            args.search_mode,
+            args.gumbel_max_considered_actions,
+            args.gumbel_scale,
+        )
+        player2_args = search_args(
+            args.opponent_sims or args.sims,
+            args.opponent_search_mode,
+            args.opponent_gumbel_max_considered_actions,
+            args.opponent_gumbel_scale,
+        )
         arena = BatchedMCTSArena(
             game,
             player1.nnet,
             player2.nnet,
-            dotdict({'numMCTSSims': args.sims, 'cpuct': 1.0}),
+            player1_args,
             batch_size=args.arena_batch_size,
             opening_boards=opening_boards,
             progress_file=sys.stdout,
+            game_seeds=list(np.random.RandomState(args.opening_seed).randint(
+                0,
+                2**31 - 1,
+                size=args.games // 2,
+            )),
+            player_args={1: player1_args, -1: player2_args},
         )
         nnet_wins, opponent_wins, draws = arena.playGames(args.games)
     elif opening_position is not None:
@@ -559,6 +648,9 @@ def main():
             'baseline': args.baseline,
             'games': args.games,
             'sims': args.sims,
+            'search_mode': args.search_mode,
+            'gumbel_max_considered_actions': args.gumbel_max_considered_actions,
+            'gumbel_scale': args.gumbel_scale,
             'action_temp': args.action_temp,
             'checkpoint_folder': args.checkpoint_folder,
             'checkpoint_file': args.checkpoint_file,
@@ -567,6 +659,9 @@ def main():
             'opponent_checkpoint_file': args.opponent_checkpoint_file,
             'opponent_architecture': args.opponent_architecture,
             'opponent_sims': args.opponent_sims or args.sims,
+            'opponent_search_mode': args.opponent_search_mode,
+            'opponent_gumbel_max_considered_actions': args.opponent_gumbel_max_considered_actions,
+            'opponent_gumbel_scale': args.opponent_gumbel_scale,
             'arena_batch_size': args.arena_batch_size,
             'fresh': args.fresh,
             'contestant1_name': contestant1_name,

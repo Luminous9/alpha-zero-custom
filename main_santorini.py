@@ -103,6 +103,14 @@ def parse_args():
     parser.add_argument('--maxlen-of-queue', type=int)
     parser.add_argument('--num-mcts-sims', type=int)
     parser.add_argument(
+        '--search-mode',
+        choices=['puct', 'gumbel'],
+        default='puct',
+        help='MCTS root/interior policy. Gumbel is experimental; PUCT remains the default.',
+    )
+    parser.add_argument('--gumbel-max-considered-actions', type=int, default=16)
+    parser.add_argument('--gumbel-scale', type=float, default=1.0)
+    parser.add_argument(
         '--no-tactical-shortcuts',
         action='store_true',
         help='Disable exact immediate-win and one-ply forced-defense MCTS shortcuts.',
@@ -281,6 +289,10 @@ def parse_args():
         parser.error('--milestone-interval must be at least 1.')
     if args.anchor_mcts_sims is not None and args.anchor_mcts_sims < 1:
         parser.error('--anchor-mcts-sims must be at least 1.')
+    if args.gumbel_max_considered_actions < 1:
+        parser.error('--gumbel-max-considered-actions must be at least 1.')
+    if args.gumbel_scale < 0:
+        parser.error('--gumbel-scale cannot be negative.')
     if args.max_train_steps is not None and args.max_train_steps < 1:
         parser.error('--max-train-steps must be at least 1.')
     if args.replay_reuse is not None and args.replay_reuse <= 0:
@@ -332,6 +344,11 @@ def build_coach_args(parsed_args):
         'updateThreshold': parsed_args.update_threshold or preset['updateThreshold'],
         'maxlenOfQueue': parsed_args.maxlen_of_queue or preset['maxlenOfQueue'],
         'numMCTSSims': parsed_args.num_mcts_sims or preset['numMCTSSims'],
+        'searchMode': getattr(parsed_args, 'search_mode', 'puct'),
+        'gumbelMaxConsideredActions': getattr(
+            parsed_args, 'gumbel_max_considered_actions', 16
+        ),
+        'gumbelScale': getattr(parsed_args, 'gumbel_scale', 1.0),
         'arenaCompare': parsed_args.arena_compare or preset['arenaCompare'],
         'cpuct': parsed_args.cpuct,
         'checkpoint': checkpoint,
@@ -682,12 +699,15 @@ def main():
         )
 
     log.info(
-        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s tactical=%s playout_cap=%s full_prob=%.2f fast_sims=%s placement_full=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s max_train_steps=%s replay_reuse=%s validation=%.3f batch=%s symmetry=%s policy_target_temp=%s optimizer=%s lr=%g weight_decay=%g lr_schedule=%s checkpoint=%s',
+        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s search=%s gumbel_actions=%s gumbel_scale=%.2f tactical=%s playout_cap=%s full_prob=%.2f fast_sims=%s placement_full=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s max_train_steps=%s replay_reuse=%s validation=%.3f batch=%s symmetry=%s policy_target_temp=%s optimizer=%s lr=%g weight_decay=%g lr_schedule=%s checkpoint=%s',
         parsed_args.architecture,
         parsed_args.preset,
         coach_args.numIters,
         coach_args.numEps,
         coach_args.numMCTSSims,
+        coach_args.searchMode,
+        coach_args.gumbelMaxConsideredActions,
+        coach_args.gumbelScale,
         coach_args.tacticalShortcuts,
         coach_args.playoutCapRandomization,
         coach_args.playoutCapFullProbability,

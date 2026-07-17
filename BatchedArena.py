@@ -22,6 +22,7 @@ class BatchedMCTSArena:
         progress_file=None,
         placement_temperature=0.0,
         game_seeds=None,
+        player_args=None,
     ):
         self.game = game
         self.nnets = {
@@ -29,6 +30,7 @@ class BatchedMCTSArena:
             -1: player2_nnet,
         }
         self.args = args
+        self.player_args = player_args or {1: args, -1: args}
         self.batch_size = max(1, int(batch_size))
         self.quiet = quiet
         self.opening_boards = opening_boards
@@ -130,8 +132,8 @@ class BatchedMCTSArena:
             'curPlayer': 1,
             'side_to_player': side_to_player,
             'mcts_by_player': {
-                1: MCTS(self.game, self.nnets[1], self.args),
-                -1: MCTS(self.game, self.nnets[-1], self.args),
+                1: MCTS(self.game, self.nnets[1], self.player_args[1]),
+                -1: MCTS(self.game, self.nnets[-1], self.player_args[-1]),
             },
             'rng': np.random.RandomState(game_seed) if game_seed is not None else np.random,
         }
@@ -142,8 +144,23 @@ class BatchedMCTSArena:
             game_state['tactical'] = game_state['mcts_by_player'][player].prepareTacticalRoot(
                 game_state['canonicalBoard']
             )
+            if not (
+                game_state['tactical'] is not None
+                and game_state['tactical']['policy'] is not None
+            ):
+                mcts = game_state['mcts_by_player'][player]
+                if hasattr(mcts, 'prepareSearchRoot'):
+                    search_args = self.player_args[player]
+                    mcts.prepareSearchRoot(
+                        game_state['canonicalBoard'],
+                        search_args.numMCTSSims,
+                        rng=game_state['rng'],
+                    )
 
-        for _ in range(self.args.numMCTSSims):
+        max_simulations = max(
+            int(search_args.numMCTSSims) for search_args in self.player_args.values()
+        )
+        for simulation_index in range(max_simulations):
             pending_by_player = {1: [], -1: []}
 
             for game_state in active:
@@ -151,6 +168,8 @@ class BatchedMCTSArena:
                 if tactical is not None and tactical['policy'] is not None:
                     continue
                 player = game_state['side_to_player'][game_state['curPlayer']]
+                if simulation_index >= int(self.player_args[player].numMCTSSims):
+                    continue
                 mcts = game_state['mcts_by_player'][player]
                 leaf = mcts.select_leaf(game_state['canonicalBoard'])
                 if leaf['needs_eval']:

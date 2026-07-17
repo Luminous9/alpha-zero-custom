@@ -16,6 +16,7 @@ from pit_santorini import (
     load_opening_board,
     opening_book_candidates,
     play_opening_games_by_seat,
+    search_args,
     select_legal_action,
     validate_batched_arena_args,
 )
@@ -330,7 +331,7 @@ class TestPitSantoriniOpening(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "opponent-checkpoint-folder"):
             validate_batched_arena_args(ErrorParser(), args)
 
-    def test_batched_arena_validation_requires_deterministic_matching_sims(self):
+    def test_batched_arena_validation_requires_deterministic_play(self):
         parser = ErrorParser()
         args = self.make_opening_args(
             arena_batch_size=4,
@@ -346,8 +347,17 @@ class TestPitSantoriniOpening(unittest.TestCase):
             sims=25,
             opponent_sims=50,
         )
-        with self.assertRaisesRegex(ValueError, "opponent-sims"):
-            validate_batched_arena_args(parser, args)
+        validate_batched_arena_args(parser, args)
+
+    def test_search_args_keep_contestant_modes_independent(self):
+        puct = search_args(96, 'puct')
+        gumbel = search_args(32, 'gumbel', 8, 0.0)
+
+        self.assertEqual((puct.numMCTSSims, puct.searchMode), (96, 'puct'))
+        self.assertEqual(
+            (gumbel.numMCTSSims, gumbel.searchMode, gumbel.gumbelMaxConsideredActions, gumbel.gumbelScale),
+            (32, 'gumbel', 8, 0.0),
+        )
 
     def test_batched_arena_requested_accepts_batch_sizes_above_one(self):
         self.assertFalse(batched_arena_requested(self.make_opening_args(arena_batch_size=1)))

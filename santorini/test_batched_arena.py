@@ -106,6 +106,69 @@ class TestBatchedMCTSArena(unittest.TestCase):
         self.assertEqual(first_actions, second_actions)
         self.assertEqual(set(first_actions), {0, 1})
 
+    def test_gumbel_search_runs_batched_and_is_seed_reproducible(self):
+        seeds = list(range(8))
+
+        def play():
+            game = OneMovePlacementGame()
+            arena = BatchedMCTSArena(
+                game,
+                BatchCountingNNet(),
+                BatchCountingNNet(),
+                dotdict({
+                    'numMCTSSims': 4,
+                    'cpuct': 1.0,
+                    'searchMode': 'gumbel',
+                    'gumbelMaxConsideredActions': 2,
+                    'gumbelScale': 1.0,
+                }),
+                batch_size=8,
+                quiet=True,
+                placement_temperature=1.0,
+                game_seeds=seeds,
+            )
+            arena.playGames(16)
+            return game.actions
+
+        first_actions = play()
+        second_actions = play()
+
+        self.assertEqual(first_actions, second_actions)
+        self.assertEqual(set(first_actions), {0, 1})
+
+    def test_contestants_can_use_independent_search_modes_and_budgets(self):
+        shared = dotdict({'numMCTSSims': 2, 'cpuct': 1.0})
+        player_args = {
+            1: dotdict({
+                'numMCTSSims': 4,
+                'cpuct': 1.0,
+                'searchMode': 'gumbel',
+                'gumbelMaxConsideredActions': 2,
+                'gumbelScale': 0.0,
+            }),
+            -1: dotdict({
+                'numMCTSSims': 2,
+                'cpuct': 1.0,
+                'searchMode': 'puct',
+            }),
+        }
+        arena = BatchedMCTSArena(
+            TinyGame(),
+            BatchCountingNNet(),
+            BatchCountingNNet(),
+            shared,
+            batch_size=2,
+            quiet=True,
+            player_args=player_args,
+        )
+
+        game_state = arena._newGame({1: 1, -1: -1}, game_seed=7)
+        result = arena.playGames(4)
+
+        self.assertTrue(game_state['mcts_by_player'][1].usesGumbelSearch())
+        self.assertFalse(game_state['mcts_by_player'][-1].usesGumbelSearch())
+        self.assertEqual(sum(result), 4)
+
 
 if __name__ == "__main__":
     unittest.main()
