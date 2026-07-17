@@ -34,13 +34,22 @@ def build_nnet(game, architecture):
     raise ValueError("Unknown architecture: {}".format(architecture))
 
 
-def search_args(sims, search_mode='puct', gumbel_max_considered_actions=16, gumbel_scale=1.0):
+def search_args(
+    sims,
+    search_mode='puct',
+    gumbel_max_considered_actions=16,
+    gumbel_scale=1.0,
+    gumbel_placement_scale=None,
+):
+    if gumbel_placement_scale is None:
+        gumbel_placement_scale = gumbel_scale
     return dotdict({
         'numMCTSSims': int(sims),
         'cpuct': 1.0,
         'searchMode': search_mode,
         'gumbelMaxConsideredActions': int(gumbel_max_considered_actions),
         'gumbelScale': float(gumbel_scale),
+        'gumbelPlacementScale': float(gumbel_placement_scale),
         'tacticalShortcuts': True,
     })
 
@@ -57,6 +66,7 @@ class NetworkMCTSPlayer:
         search_mode='puct',
         gumbel_max_considered_actions=16,
         gumbel_scale=1.0,
+        gumbel_placement_scale=None,
     ):
         self.game = game
         self.nnet = nnet
@@ -65,6 +75,7 @@ class NetworkMCTSPlayer:
             search_mode=search_mode,
             gumbel_max_considered_actions=gumbel_max_considered_actions,
             gumbel_scale=gumbel_scale,
+            gumbel_placement_scale=gumbel_placement_scale,
         )
         self.action_temp = action_temp
         self.mcts = None
@@ -93,6 +104,7 @@ class NeuralMCTSPlayer(NetworkMCTSPlayer):
         search_mode='puct',
         gumbel_max_considered_actions=16,
         gumbel_scale=1.0,
+        gumbel_placement_scale=None,
     ):
         nnet = build_nnet(game, architecture)
         nnet.load_checkpoint(checkpoint_folder, checkpoint_file)
@@ -104,6 +116,7 @@ class NeuralMCTSPlayer(NetworkMCTSPlayer):
             search_mode=search_mode,
             gumbel_max_considered_actions=gumbel_max_considered_actions,
             gumbel_scale=gumbel_scale,
+            gumbel_placement_scale=gumbel_placement_scale,
         )
 
 
@@ -411,6 +424,11 @@ def main():
     parser.add_argument('--search-mode', choices=['puct', 'gumbel'], default='puct')
     parser.add_argument('--gumbel-max-considered-actions', type=int, default=16)
     parser.add_argument('--gumbel-scale', type=float, default=1.0)
+    parser.add_argument(
+        '--gumbel-placement-scale',
+        type=float,
+        help='Gumbel scale for placement roots; defaults to --gumbel-scale.',
+    )
     parser.add_argument('--checkpoint-folder', default='./temp/santorini_quick/')
     parser.add_argument('--checkpoint-file', default='best.pth.tar')
     parser.add_argument('--architecture', choices=['v1', 'v2', 'v3'], default='v2')
@@ -421,6 +439,11 @@ def main():
     parser.add_argument('--opponent-search-mode', choices=['puct', 'gumbel'], default='puct')
     parser.add_argument('--opponent-gumbel-max-considered-actions', type=int, default=16)
     parser.add_argument('--opponent-gumbel-scale', type=float, default=1.0)
+    parser.add_argument(
+        '--opponent-gumbel-placement-scale',
+        type=float,
+        help='Opponent Gumbel scale for placement roots; defaults to --opponent-gumbel-scale.',
+    )
     parser.add_argument(
         '--arena-batch-size',
         type=int,
@@ -470,6 +493,12 @@ def main():
         parser.error('Gumbel max considered actions must be at least 1.')
     if args.gumbel_scale < 0 or args.opponent_gumbel_scale < 0:
         parser.error('Gumbel scale cannot be negative.')
+    if args.gumbel_placement_scale is None:
+        args.gumbel_placement_scale = args.gumbel_scale
+    if args.opponent_gumbel_placement_scale is None:
+        args.opponent_gumbel_placement_scale = args.opponent_gumbel_scale
+    if args.gumbel_placement_scale < 0 or args.opponent_gumbel_placement_scale < 0:
+        parser.error('Gumbel placement scale cannot be negative.')
     validate_batched_arena_args(parser, args)
     np.random.seed(args.opening_seed)
 
@@ -519,6 +548,7 @@ def main():
             search_mode=args.search_mode,
             gumbel_max_considered_actions=args.gumbel_max_considered_actions,
             gumbel_scale=args.gumbel_scale,
+            gumbel_placement_scale=args.gumbel_placement_scale,
         )
         opponent_player_obj = NeuralMCTSPlayer(
             game,
@@ -530,6 +560,7 @@ def main():
             search_mode=args.opponent_search_mode,
             gumbel_max_considered_actions=args.opponent_gumbel_max_considered_actions,
             gumbel_scale=args.opponent_gumbel_scale,
+            gumbel_placement_scale=args.opponent_gumbel_placement_scale,
         )
         player1 = nnet_player_obj
         player2 = opponent_player_obj
@@ -553,17 +584,25 @@ def main():
             search_mode=args.search_mode,
             gumbel_max_considered_actions=args.gumbel_max_considered_actions,
             gumbel_scale=args.gumbel_scale,
+            gumbel_placement_scale=args.gumbel_placement_scale,
         )
         player2 = build_baseline(game, args.baseline)
         contestant2_name = args.baseline
 
     if args.action_temp > 0:
         print("Sampling neural MCTS actions with temperature {}.".format(args.action_temp))
-    print("Contestant 1 search: {} ({} sims).".format(args.search_mode, args.sims))
+    print("Contestant 1 search: {} ({} sims; Gumbel standard/placement scales {}/{}).".format(
+        args.search_mode,
+        args.sims,
+        args.gumbel_scale,
+        args.gumbel_placement_scale,
+    ))
     if args.opponent_checkpoint_folder:
-        print("Contestant 2 search: {} ({} sims).".format(
+        print("Contestant 2 search: {} ({} sims; Gumbel standard/placement scales {}/{}).".format(
             args.opponent_search_mode,
             args.opponent_sims or args.sims,
+            args.opponent_gumbel_scale,
+            args.opponent_gumbel_placement_scale,
         ))
 
     seat_stats = None
@@ -575,12 +614,14 @@ def main():
             args.search_mode,
             args.gumbel_max_considered_actions,
             args.gumbel_scale,
+            args.gumbel_placement_scale,
         )
         player2_args = search_args(
             args.opponent_sims or args.sims,
             args.opponent_search_mode,
             args.opponent_gumbel_max_considered_actions,
             args.opponent_gumbel_scale,
+            args.opponent_gumbel_placement_scale,
         )
         arena = BatchedMCTSArena(
             game,
@@ -651,6 +692,7 @@ def main():
             'search_mode': args.search_mode,
             'gumbel_max_considered_actions': args.gumbel_max_considered_actions,
             'gumbel_scale': args.gumbel_scale,
+            'gumbel_placement_scale': args.gumbel_placement_scale,
             'action_temp': args.action_temp,
             'checkpoint_folder': args.checkpoint_folder,
             'checkpoint_file': args.checkpoint_file,
@@ -662,6 +704,7 @@ def main():
             'opponent_search_mode': args.opponent_search_mode,
             'opponent_gumbel_max_considered_actions': args.opponent_gumbel_max_considered_actions,
             'opponent_gumbel_scale': args.opponent_gumbel_scale,
+            'opponent_gumbel_placement_scale': args.opponent_gumbel_placement_scale,
             'arena_batch_size': args.arena_batch_size,
             'fresh': args.fresh,
             'contestant1_name': contestant1_name,

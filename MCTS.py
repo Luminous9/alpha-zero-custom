@@ -72,6 +72,15 @@ class MCTS():
         if state_key in self.gumbel_roots:
             return
         already_expanded = state_key in self.Ps
+        is_placement = bool(
+            hasattr(self.game, 'isPlacementPhase')
+            and self.game.isPlacementPhase(canonicalBoard)
+        )
+        gumbel_scale = float(self._arg('gumbelScale', 1.0))
+        if is_placement:
+            placement_scale = self._arg('gumbelPlacementScale', None)
+            if placement_scale is not None:
+                gumbel_scale = float(placement_scale)
         self.gumbel_roots[state_key] = {
             # This MCTS implementation spends its first simulation expanding
             # a new root. A child retained from the prior move is already
@@ -84,6 +93,7 @@ class MCTS():
             'considered_visits': None,
             'baseline_visits': None,
             'rng': rng,
+            'gumbel_scale': gumbel_scale,
         }
 
     @staticmethod
@@ -506,7 +516,7 @@ class MCTS():
         )
         generator = root['rng'] if root['rng'] is not None else np.random
         root['gumbel'] = (
-            float(self._arg('gumbelScale', 1.0))
+            root['gumbel_scale']
             * generator.gumbel(size=action_count)
         )
         root['considered_visits'] = self._gumbel_considered_visits(

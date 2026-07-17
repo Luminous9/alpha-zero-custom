@@ -139,9 +139,11 @@ Action temperature controls how self-play samples from the MCTS visit distributi
 
 PUCT remains the production default. Passing `--search-mode gumbel` enables an experimental Full Gumbel AlphaZero-style search intended for controlled comparisons at the available 32/96-simulation budgets. Its root uses Gumbel Top-k sampling without replacement and Sequential Halving, while interior nodes deterministically allocate visits toward `softmax(policy logits + completed Q)`. The replay policy is that same completed-Q improved distribution rather than raw visit proportions, and the selected root action is the highest-scoring surviving candidate. The implementation follows [Policy improvement by planning with Gumbel](https://openreview.net/forum?id=bERaNdoegnO) and DeepMind's [mctx reference implementation](https://github.com/google-deepmind/mctx).
 
-Gumbel mode does not add root Dirichlet noise; its sampled root Gumbels provide exploration. It uses the published completed-by-mixed-value Q transform defaults (`value_scale=0.1`, `maxvisit_init=50`) and considers at most 16 root actions by default. `--gumbel-max-considered-actions` and `--gumbel-scale` are available for experiments. Tactical shortcuts still run before either search mode, compact legal-edge storage is unchanged, and no checkpoint or replay format migration is required.
+Gumbel mode does not add root Dirichlet noise; its sampled root Gumbels provide exploration. It uses the published completed-by-mixed-value Q transform defaults (`value_scale=0.1`, `maxvisit_init=50`) and considers at most 16 root actions by default. `--gumbel-max-considered-actions` and `--gumbel-scale` are available for experiments. `--gumbel-placement-scale` can override the scale only for the four placement roots and otherwise inherits the standard scale. Tactical shortcuts still run before either search mode, compact legal-edge storage is unchanged, and no checkpoint or replay format migration is required.
 
-The Kaggle notebook exposes `SEARCH_MODE`, but leaves it at `"puct"`. A Gumbel run should initially be treated as an ablation from a shared checkpoint, not silently substituted into the established training trajectory. In this mode the PUCT action-temperature and policy-target-temperature settings do not shape the Gumbel action or target; they remain present for configuration compatibility.
+The Kaggle notebook exposes `SEARCH_MODE` and currently selects `"gumbel"` for the post-Run-9 continuation; `"puct"` remains available for control branches. In Gumbel mode the PUCT action-temperature and policy-target-temperature settings do not shape the Gumbel action or target; they remain present for configuration compatibility.
+
+Training and evaluation use separate exploration scales. `--gumbel-scale` and `--gumbel-placement-scale` control self-play. `--evaluation-gumbel-scale` and `--evaluation-gumbel-placement-scale` override milestone and fixed-anchor arenas without changing self-play or its resumable RNG trajectory. The recommended experimental setup uses self-play scales `1.0` standard / `1.5` placement and evaluation scales `0.0` standard / `1.0` placement. Thus standard strength telemetry is deterministic while empty-board telemetry retains reproducibly varied placement searches.
 
 Before a training ablation, the two searches can be compared directly with the same network, paired openings, seats, tactical shortcuts, and simulation budget. A zero Gumbel scale is recommended for this deterministic perfect-information evaluation; self-play retains scale `1.0` for exploration.
 
@@ -162,6 +164,30 @@ Before a training ablation, the two searches can be compared directly with the s
   --sims 96 \
   --arena-batch-size 128 \
   --json-out ./temp/gumbel_vs_puct_s96.json
+```
+
+A placement-inclusive comparison can keep exploratory Gumbels only for the four placement roots, then make standard play deterministic. Both contestants must use the same two scales:
+
+```bash
+.venv/bin/python pit_santorini.py \
+  --architecture v3 \
+  --checkpoint-folder ./temp/santorini_v3_run9_gumbel \
+  --checkpoint-file latest.pth.tar \
+  --search-mode gumbel \
+  --gumbel-scale 0 \
+  --gumbel-placement-scale 1 \
+  --opponent-architecture v3 \
+  --opponent-checkpoint-folder ./temp/santorini_v3_run9_puct \
+  --opponent-checkpoint-file latest.pth.tar \
+  --opponent-search-mode gumbel \
+  --opponent-gumbel-scale 0 \
+  --opponent-gumbel-placement-scale 1 \
+  --opening-source game \
+  --opening-seed 20260715 \
+  --games 200 \
+  --sims 128 \
+  --arena-batch-size 128 \
+  --json-out ./temp/run9_placement_gumbel1_standard0_s128.json
 ```
 
 ### Exact tactical shortcuts
@@ -399,7 +425,7 @@ The baseline long-run configuration is:
 | Iterations per notebook chunk | Configurable; 10 by default |
 | Self-play games per iteration | 240 with playout-cap randomization |
 | Full / fast MCTS simulations | 96 / 32 |
-| Search mode | PUCT (`gumbel` is opt-in experimental) |
+| Search mode | Gumbel for current continuation; PUCT available as control |
 | Full-search probability | 100% placement; 25% standard |
 | Self-play batch size | 128 |
 | Optimizer | AdamW |

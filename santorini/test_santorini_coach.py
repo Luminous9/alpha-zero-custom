@@ -350,6 +350,26 @@ class TestSantoriniCoachExamples(unittest.TestCase):
 
         self.assertEqual(actual, expected)
 
+    def test_match_args_override_self_play_gumbel_scales(self):
+        coach = object.__new__(Coach)
+        coach.args = dotdict({
+            'numMCTSSims': 96,
+            'gumbelScale': 1.0,
+            'gumbelPlacementScale': 1.5,
+            'evaluationGumbelScale': 0.0,
+            'evaluationGumbelPlacementScale': 1.0,
+            'addDirichletNoise': True,
+        })
+
+        match_args = coach._matchArgs(simulations=128)
+
+        self.assertEqual(match_args.numMCTSSims, 128)
+        self.assertEqual(match_args.gumbelScale, 0.0)
+        self.assertEqual(match_args.gumbelPlacementScale, 1.0)
+        self.assertFalse(match_args.addDirichletNoise)
+        self.assertEqual(coach.args.gumbelScale, 1.0)
+        self.assertEqual(coach.args.gumbelPlacementScale, 1.5)
+
     def make_coach_shell(self, load_folder, load_file='best.pth.tar'):
         coach = object.__new__(Coach)
         coach.args = dotdict({

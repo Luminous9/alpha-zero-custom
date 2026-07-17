@@ -671,6 +671,16 @@ class Coach():
                         'gumbelMaxConsideredActions', 16
                     ),
                     'gumbel_scale': self._arg('gumbelScale', 1.0),
+                    'gumbel_placement_scale': self._arg(
+                        'gumbelPlacementScale', self._arg('gumbelScale', 1.0)
+                    ),
+                    'evaluation_gumbel_scale': self._arg(
+                        'evaluationGumbelScale', self._arg('gumbelScale', 1.0)
+                    ),
+                    'evaluation_gumbel_placement_scale': self._arg(
+                        'evaluationGumbelPlacementScale',
+                        self._arg('gumbelPlacementScale', self._arg('gumbelScale', 1.0)),
+                    ),
                     'policy_target_temperature': self._arg('policyTargetTemperature', None),
                     'max_train_steps': getattr(getattr(self.nnet, 'net_args', None), 'max_train_steps', None),
                     'symmetry_augmentation': self._arg('symmetryAugmentation', 'expanded'),
@@ -992,6 +1002,16 @@ class Coach():
                 self._arg('gumbelMaxConsideredActions', 16)
             ),
             'gumbel_scale': float(self._arg('gumbelScale', 1.0)),
+            'gumbel_placement_scale': float(
+                self._arg('gumbelPlacementScale', self._arg('gumbelScale', 1.0))
+            ),
+            'evaluation_gumbel_scale': float(
+                self._arg('evaluationGumbelScale', self._arg('gumbelScale', 1.0))
+            ),
+            'evaluation_gumbel_placement_scale': float(self._arg(
+                'evaluationGumbelPlacementScale',
+                self._arg('gumbelPlacementScale', self._arg('gumbelScale', 1.0)),
+            )),
             'policy_target_temperature': self._arg('policyTargetTemperature', None),
             'standard_action_temperature_threshold': int(self.args.tempThreshold),
             'placement_action_temperature': float(self._arg('placementTemperature', 1.0)),
@@ -1377,6 +1397,14 @@ class Coach():
         if simulations is not None:
             args.numMCTSSims = int(simulations)
         args.addDirichletNoise = False
+        args.gumbelScale = float(self._arg(
+            'evaluationGumbelScale',
+            self._arg('gumbelScale', 1.0),
+        ))
+        args.gumbelPlacementScale = float(self._arg(
+            'evaluationGumbelPlacementScale',
+            self._arg('gumbelPlacementScale', self._arg('gumbelScale', 1.0)),
+        ))
         return args
 
     @staticmethod

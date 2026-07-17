@@ -111,6 +111,21 @@ def parse_args():
     parser.add_argument('--gumbel-max-considered-actions', type=int, default=16)
     parser.add_argument('--gumbel-scale', type=float, default=1.0)
     parser.add_argument(
+        '--gumbel-placement-scale',
+        type=float,
+        help='Gumbel scale for placement roots; defaults to --gumbel-scale.',
+    )
+    parser.add_argument(
+        '--evaluation-gumbel-scale',
+        type=float,
+        help='Standard-play Gumbel scale for milestone and anchor evaluation; defaults to self-play scale.',
+    )
+    parser.add_argument(
+        '--evaluation-gumbel-placement-scale',
+        type=float,
+        help='Placement Gumbel scale for milestone evaluation; defaults to self-play placement scale.',
+    )
+    parser.add_argument(
         '--no-tactical-shortcuts',
         action='store_true',
         help='Disable exact immediate-win and one-ply forced-defense MCTS shortcuts.',
@@ -293,6 +308,15 @@ def parse_args():
         parser.error('--gumbel-max-considered-actions must be at least 1.')
     if args.gumbel_scale < 0:
         parser.error('--gumbel-scale cannot be negative.')
+    if args.gumbel_placement_scale is not None and args.gumbel_placement_scale < 0:
+        parser.error('--gumbel-placement-scale cannot be negative.')
+    if args.evaluation_gumbel_scale is not None and args.evaluation_gumbel_scale < 0:
+        parser.error('--evaluation-gumbel-scale cannot be negative.')
+    if (
+        args.evaluation_gumbel_placement_scale is not None
+        and args.evaluation_gumbel_placement_scale < 0
+    ):
+        parser.error('--evaluation-gumbel-placement-scale cannot be negative.')
     if args.max_train_steps is not None and args.max_train_steps < 1:
         parser.error('--max-train-steps must be at least 1.')
     if args.replay_reuse is not None and args.replay_reuse <= 0:
@@ -349,6 +373,25 @@ def build_coach_args(parsed_args):
             parsed_args, 'gumbel_max_considered_actions', 16
         ),
         'gumbelScale': getattr(parsed_args, 'gumbel_scale', 1.0),
+        'gumbelPlacementScale': (
+            parsed_args.gumbel_placement_scale
+            if getattr(parsed_args, 'gumbel_placement_scale', None) is not None
+            else getattr(parsed_args, 'gumbel_scale', 1.0)
+        ),
+        'evaluationGumbelScale': (
+            parsed_args.evaluation_gumbel_scale
+            if getattr(parsed_args, 'evaluation_gumbel_scale', None) is not None
+            else getattr(parsed_args, 'gumbel_scale', 1.0)
+        ),
+        'evaluationGumbelPlacementScale': (
+            parsed_args.evaluation_gumbel_placement_scale
+            if getattr(parsed_args, 'evaluation_gumbel_placement_scale', None) is not None
+            else (
+                parsed_args.gumbel_placement_scale
+                if getattr(parsed_args, 'gumbel_placement_scale', None) is not None
+                else getattr(parsed_args, 'gumbel_scale', 1.0)
+            )
+        ),
         'arenaCompare': parsed_args.arena_compare or preset['arenaCompare'],
         'cpuct': parsed_args.cpuct,
         'checkpoint': checkpoint,
@@ -699,7 +742,7 @@ def main():
         )
 
     log.info(
-        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s search=%s gumbel_actions=%s gumbel_scale=%.2f tactical=%s playout_cap=%s full_prob=%.2f fast_sims=%s placement_full=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s max_train_steps=%s replay_reuse=%s validation=%.3f batch=%s symmetry=%s policy_target_temp=%s optimizer=%s lr=%g weight_decay=%g lr_schedule=%s checkpoint=%s',
+        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s search=%s gumbel_actions=%s gumbel_scale=%.2f gumbel_placement_scale=%.2f eval_gumbel_scale=%.2f eval_gumbel_placement_scale=%.2f tactical=%s playout_cap=%s full_prob=%.2f fast_sims=%s placement_full=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s max_train_steps=%s replay_reuse=%s validation=%.3f batch=%s symmetry=%s policy_target_temp=%s optimizer=%s lr=%g weight_decay=%g lr_schedule=%s checkpoint=%s',
         parsed_args.architecture,
         parsed_args.preset,
         coach_args.numIters,
@@ -708,6 +751,9 @@ def main():
         coach_args.searchMode,
         coach_args.gumbelMaxConsideredActions,
         coach_args.gumbelScale,
+        coach_args.gumbelPlacementScale,
+        coach_args.evaluationGumbelScale,
+        coach_args.evaluationGumbelPlacementScale,
         coach_args.tacticalShortcuts,
         coach_args.playoutCapRandomization,
         coach_args.playoutCapFullProbability,

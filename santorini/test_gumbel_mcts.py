@@ -31,6 +31,11 @@ class UniformNetwork:
         return np.full(4, 0.25, dtype=np.float32), 0.0
 
 
+class PhaseFourActionGame(FourActionGame):
+    def isPlacementPhase(self, board):
+        return int(board[0]) == 0
+
+
 class TestGumbelMCTS(unittest.TestCase):
     def _mcts(self, simulations=9):
         return MCTS(
@@ -112,6 +117,35 @@ class TestGumbelMCTS(unittest.TestCase):
         np.testing.assert_allclose(
             action_policy,
             mcts.getTrainingPolicyFromTree(root, temp=1),
+        )
+
+    def test_placement_scale_overrides_standard_scale_by_phase(self):
+        game = PhaseFourActionGame()
+        mcts = MCTS(
+            game,
+            UniformNetwork(),
+            dotdict({
+                'numMCTSSims': 4,
+                'cpuct': 1.0,
+                'searchMode': 'gumbel',
+                'gumbelMaxConsideredActions': 4,
+                'gumbelScale': 0.0,
+                'gumbelPlacementScale': 1.5,
+            }),
+        )
+        placement = np.array([0], dtype=np.int8)
+        standard = np.array([5], dtype=np.int8)
+
+        mcts.prepareSearchRoot(placement, 4)
+        mcts.prepareSearchRoot(standard, 4)
+
+        self.assertEqual(
+            mcts.gumbel_roots[game.stringRepresentation(placement)]['gumbel_scale'],
+            1.5,
+        )
+        self.assertEqual(
+            mcts.gumbel_roots[game.stringRepresentation(standard)]['gumbel_scale'],
+            0.0,
         )
 
 

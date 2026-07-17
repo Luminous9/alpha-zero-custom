@@ -351,12 +351,18 @@ class TestPitSantoriniOpening(unittest.TestCase):
 
     def test_search_args_keep_contestant_modes_independent(self):
         puct = search_args(96, 'puct')
-        gumbel = search_args(32, 'gumbel', 8, 0.0)
+        gumbel = search_args(32, 'gumbel', 8, 0.0, 1.5)
 
         self.assertEqual((puct.numMCTSSims, puct.searchMode), (96, 'puct'))
         self.assertEqual(
-            (gumbel.numMCTSSims, gumbel.searchMode, gumbel.gumbelMaxConsideredActions, gumbel.gumbelScale),
-            (32, 'gumbel', 8, 0.0),
+            (
+                gumbel.numMCTSSims,
+                gumbel.searchMode,
+                gumbel.gumbelMaxConsideredActions,
+                gumbel.gumbelScale,
+                gumbel.gumbelPlacementScale,
+            ),
+            (32, 'gumbel', 8, 0.0, 1.5),
         )
 
     def test_batched_arena_requested_accepts_batch_sizes_above_one(self):
