@@ -86,6 +86,7 @@ class Coach():
         self._placement_policy_geometry = self._newPlacementPolicyGeometry()
         self._policy_target_stats = self._newPolicyTargetStats()
         self._playout_cap_stats = self._newPlayoutCapStats()
+        self._tactical_stats = self._newTacticalStats()
         self._reference_suite = None
         reference_suite_path = self._arg('referenceSuite', None)
         if reference_suite_path:
@@ -236,6 +237,42 @@ class Coach():
             )
         return payload
 
+    @staticmethod
+    def _newTacticalStats():
+        return {
+            'immediate_win': 0,
+            'single_forced_block': 0,
+            'forced_block_pruned': 0,
+            'proven_loss_in_two': 0,
+            'simulations_skipped': 0,
+        }
+
+    def _recordTacticalRoot(self, tactical, simulations):
+        if tactical is None:
+            return
+        kind = tactical['kind']
+        self._tactical_stats[kind] += 1
+        if tactical['policy'] is not None:
+            self._tactical_stats['simulations_skipped'] += int(simulations)
+
+    def _tacticalTelemetry(self):
+        if not bool(self._arg('tacticalShortcuts', True)):
+            return {}
+        stats = self._tactical_stats
+        return {
+            'tactical_immediate_win_roots': int(stats['immediate_win']),
+            'tactical_single_forced_block_roots': int(stats['single_forced_block']),
+            'tactical_forced_block_pruned_roots': int(stats['forced_block_pruned']),
+            'tactical_proven_loss_in_two_roots': int(stats['proven_loss_in_two']),
+            'tactical_simulations_skipped': int(stats['simulations_skipped']),
+        }
+
+    @staticmethod
+    def _prepareTacticalRoot(mcts, canonical_board):
+        if not hasattr(mcts, 'prepareTacticalRoot'):
+            return None
+        return mcts.prepareTacticalRoot(canonical_board)
+
     def _policyTargetTemperature(self, action_temperature):
         target_temperature = self._arg('policyTargetTemperature', None)
         return action_temperature if target_temperature is None else float(target_temperature)
@@ -290,7 +327,19 @@ class Coach():
             full_search, simulations = self._playoutCapSearch(canonicalBoard)
             configured_temperature = self._temperature(canonicalBoard, episodeStep)
             action_temperature = configured_temperature if full_search else 0
-            if full_search:
+            tactical = self._prepareTacticalRoot(self.mcts, canonicalBoard)
+            self._recordTacticalRoot(tactical, simulations)
+            exact_tactical_policy = tactical is not None and tactical['policy'] is not None
+            if exact_tactical_policy:
+                training_policy = action_policy = tactical['policy']
+                if full_search:
+                    self._appendTrainingPosition(
+                        trainExamples,
+                        canonicalBoard,
+                        self.curPlayer,
+                        training_policy,
+                    )
+            elif full_search:
                 target_temperature = self._policyTargetTemperature(action_temperature)
                 training_policy = self.mcts.getActionProb(
                     canonicalBoard,
@@ -317,7 +366,11 @@ class Coach():
                     num_simulations=simulations,
                     add_root_noise=False,
                 )
-            self._recordPlayoutCapSearch(canonicalBoard, full_search, simulations)
+            self._recordPlayoutCapSearch(
+                canonicalBoard,
+                full_search,
+                0 if exact_tactical_policy else simulations,
+            )
 
             action = np.random.choice(len(action_policy), p=action_policy)
             if hasattr(self.game, 'isPlacementAction') and self.game.isPlacementAction(action):
@@ -377,6 +430,10 @@ class Coach():
                     )
                     if not episode['fullSearch']:
                         episode['temp'] = 0
+                    episode['tactical'] = self._prepareTacticalRoot(
+                        episode['mcts'], episode['canonicalBoard']
+                    )
+                    self._recordTacticalRoot(episode['tactical'], episode['searchSims'])
 
                 training_policies, action_policies = self._getBatchedSelfPlayPolicies(activeEpisodes)
                 still_active = []
@@ -396,7 +453,12 @@ class Coach():
                     self._recordPlayoutCapSearch(
                         episode['canonicalBoard'],
                         episode['fullSearch'],
-                        episode['searchSims'],
+                        (
+                            0
+                            if episode['tactical'] is not None
+                            and episode['tactical']['policy'] is not None
+                            else episode['searchSims']
+                        ),
                     )
 
                     action = np.random.choice(len(action_policy), p=action_policy)
@@ -443,6 +505,9 @@ class Coach():
             pending = []
 
             for episode in episodes:
+                tactical = episode.get('tactical')
+                if tactical is not None and tactical['policy'] is not None:
+                    continue
                 if simulation_index >= int(episode.get('searchSims', self.args.numMCTSSims)):
                     continue
                 leaf = episode['mcts'].select_leaf(episode['canonicalBoard'])
@@ -466,12 +531,19 @@ class Coach():
 
             if simulation_index == 0:
                 for episode in episodes:
-                    if episode.get('fullSearch', True):
+                    tactical = episode.get('tactical')
+                    if (
+                        episode.get('fullSearch', True)
+                        and not (tactical is not None and tactical['policy'] is not None)
+                    ):
                         episode['mcts'].add_root_noise(episode['canonicalBoard'])
 
         pairs = []
         for episode in episodes:
-            if episode.get('fullSearch', True):
+            tactical = episode.get('tactical')
+            if tactical is not None and tactical['policy'] is not None:
+                pairs.append((tactical['policy'], tactical['policy']))
+            elif episode.get('fullSearch', True):
                 pairs.append(self._selfPlayPoliciesFromTree(
                     episode['mcts'],
                     episode['canonicalBoard'],
@@ -510,6 +582,7 @@ class Coach():
             self._placement_policy_geometry = self._newPlacementPolicyGeometry()
             self._policy_target_stats = self._newPolicyTargetStats()
             self._playout_cap_stats = self._newPlayoutCapStats()
+            self._tactical_stats = self._newTacticalStats()
             iterationTrainExamples = None
             # examples of the iteration
             if not self.skipFirstSelfPlay or local_iteration > 1:
@@ -576,6 +649,7 @@ class Coach():
                     'playout_cap_full_probability': self._arg('playoutCapFullProbability', None),
                     'playout_cap_fast_sims': self._arg('playoutCapFastSims', None),
                     'playout_cap_full_placement': self._arg('playoutCapFullPlacement', True),
+                    'tactical_shortcuts': self._arg('tacticalShortcuts', True),
                 }
                 self.nnet.save_checkpoint(
                     folder=self.args.checkpoint,
@@ -891,6 +965,7 @@ class Coach():
                 if self._arg('playoutCapRandomization', False) else None
             ),
             'playout_cap_full_placement': bool(self._arg('playoutCapFullPlacement', True)),
+            'tactical_shortcuts': bool(self._arg('tacticalShortcuts', True)),
             'duration_seconds': float(duration_seconds),
             'replay_examples': int(replay_examples),
             'games': int(len(lengths)),
@@ -907,6 +982,7 @@ class Coach():
         payload.update(self._placementGeometryTelemetry())
         payload.update(self._policyTargetTelemetry())
         payload.update(self._playoutCapTelemetry())
+        payload.update(self._tacticalTelemetry())
         payload.update(self._policyTelemetry())
         if self._reference_suite is not None:
             payload.update(self._reference_suite.evaluate(self.game, self.nnet))
@@ -935,44 +1011,73 @@ class Coach():
     def _chebyshevDistance(first, second):
         return max(abs(first[0] - second[0]), abs(first[1] - second[1]))
 
-    def _recordCompletedPlacementGeometry(self, placement_actions, player_one_result):
-        if not getattr(self.game, 'sequential_placement', False) or len(placement_actions) < 2:
-            return
-        first, second = [self._placementCoordinates(action) for action in placement_actions[:2]]
+    def _workerPairGeometry(self, locations):
         center = ((self.game.n - 1) / 2.0, (self.game.n - 1) / 2.0)
         center_distances = [
             max(abs(location[0] - center[0]), abs(location[1] - center[1]))
-            for location in (first, second)
+            for location in locations
         ]
         central_low = (self.game.n - 3) // 2
         central_high = central_low + 2
-        both_central = all(
-            central_low <= row <= central_high and central_low <= column <= central_high
-            for row, column in (first, second)
-        )
-        separation = self._chebyshevDistance(first, second)
-        self._placement_geometry_records.append({
+        return {
             'mean_center_distance': float(np.mean(center_distances)),
-            'both_central': bool(both_central),
-            'worker_separation': float(separation),
+            'both_central': bool(all(
+                central_low <= row <= central_high and central_low <= column <= central_high
+                for row, column in locations
+            )),
+            'worker_separation': float(self._chebyshevDistance(*locations)),
+        }
+
+    def _recordCompletedPlacementGeometry(self, placement_actions, player_one_result):
+        if not getattr(self.game, 'sequential_placement', False) or len(placement_actions) < 2:
+            return
+        player_one = [self._placementCoordinates(action) for action in placement_actions[:2]]
+        record = {
             'result': int(player_one_result),
-        })
+            'p1': self._workerPairGeometry(player_one),
+        }
+        if len(placement_actions) >= 4:
+            player_two = [self._placementCoordinates(action) for action in placement_actions[2:4]]
+            record['p2'] = self._workerPairGeometry(player_two)
+            opponent_distances = np.asarray([
+                [self._chebyshevDistance(p2_location, p1_location) for p1_location in player_one]
+                for p2_location in player_two
+            ], dtype=np.float64)
+            nearest_distances = opponent_distances.min(axis=1)
+            center = (self.game.n // 2, self.game.n // 2)
+            record.update({
+                'center_owner': (
+                    1 if center in player_one else (-1 if center in player_two else 0)
+                ),
+                'minimum_opponent_distance': float(opponent_distances.min()),
+                'p2_mean_nearest_p1_distance': float(nearest_distances.mean()),
+                'p2_adjacent_to_p1_rate': float(np.mean(nearest_distances == 1)),
+            })
+        self._placement_geometry_records.append(record)
 
     @staticmethod
     def _newPlacementPolicyGeometry():
-        return {
-            'expected_center_distance': [],
-            'center_mass': [],
-            'inner_ring_mass': [],
-            'outer_ring_mass': [],
-            'expected_worker_separation': [],
+        stats = {
+            player: {
+                'expected_center_distance': [],
+                'center_mass': [],
+                'inner_ring_mass': [],
+                'outer_ring_mass': [],
+                'expected_worker_separation': [],
+            }
+            for player in ('p1', 'p2')
         }
+        stats.update({
+            'p2_first_center_available': [],
+            'p2_center_mass_when_available': [],
+        })
+        return stats
 
     def _recordPlacementPolicyGeometry(self, canonical_board, policy):
         if not getattr(self.game, 'sequential_placement', False):
             return
         occupied = int(np.count_nonzero(canonical_board[0]))
-        if occupied not in (0, 1):
+        if occupied not in (0, 1, 2, 3):
             return
 
         local_action = int(getattr(self.game, 'PLACEMENT_LOCAL_ACTION', 64))
@@ -992,14 +1097,25 @@ class Coach():
             max(abs(row - center[0]), abs(column - center[1]))
             for row, column in locations
         ], dtype=np.float64)
-        stats = self._placement_policy_geometry
+        player = 'p1' if occupied < 2 else 'p2'
+        stats = self._placement_policy_geometry[player]
         stats['expected_center_distance'].append(float(probabilities @ center_distances))
         stats['center_mass'].append(float(probabilities[center_distances == 0].sum()))
         stats['inner_ring_mass'].append(float(probabilities[center_distances == 1].sum()))
         stats['outer_ring_mass'].append(float(probabilities[center_distances >= 2].sum()))
 
-        if occupied == 1:
-            existing = tuple(int(value) for value in np.argwhere(canonical_board[0] != 0)[0])
+        if player == 'p2':
+            center_location = (self.game.n // 2, self.game.n // 2)
+            center_available = bool(canonical_board[0][center_location] == 0)
+            if occupied == 2:
+                self._placement_policy_geometry['p2_first_center_available'].append(center_available)
+            if center_available:
+                self._placement_policy_geometry['p2_center_mass_when_available'].append(
+                    float(probabilities[center_distances == 0].sum())
+                )
+
+        if occupied in (1, 3):
+            existing = tuple(int(value) for value in np.argwhere(canonical_board[0] > 0)[0])
             separations = np.asarray([
                 self._chebyshevDistance(existing, location) for location in locations
             ], dtype=np.float64)
@@ -1010,46 +1126,89 @@ class Coach():
         if not records:
             return {}
 
-        def mean(records_for_metric, key):
-            return float(np.mean([record[key] for record in records_for_metric]))
+        payload = {}
+        for player, win_result in (('p1', 1), ('p2', -1)):
+            player_records = [record for record in records if player in record]
+            if not player_records:
+                continue
+            winners = [record for record in player_records if record['result'] == win_result]
+            losers = [record for record in player_records if record['result'] == -win_result]
+            separations = np.asarray([
+                record[player]['worker_separation'] for record in player_records
+            ], dtype=np.float64)
 
-        separations = np.asarray(
-            [record['worker_separation'] for record in records],
-            dtype=np.float64,
-        )
-        winners = [record for record in records if record['result'] > 0]
-        losers = [record for record in records if record['result'] < 0]
-        payload = {
-            'p1_placement_games': int(len(records)),
-            'p1_placement_mean_center_distance': mean(records, 'mean_center_distance'),
-            'p1_placement_both_central_rate': mean(records, 'both_central'),
-            'p1_placement_mean_worker_separation': float(separations.mean()),
-            'p1_placement_adjacent_rate': float(np.mean(separations == 1)),
-            'p1_placement_moderate_separation_rate': float(np.mean(separations == 2)),
-            'p1_placement_far_separation_rate': float(np.mean(separations >= 3)),
-            'p1_winner_placement_games': int(len(winners)),
-            'p1_loser_placement_games': int(len(losers)),
-            'p1_winner_mean_center_distance': (
-                mean(winners, 'mean_center_distance') if winners else None
-            ),
-            'p1_loser_mean_center_distance': (
-                mean(losers, 'mean_center_distance') if losers else None
-            ),
-            'p1_winner_mean_worker_separation': (
-                mean(winners, 'worker_separation') if winners else None
-            ),
-            'p1_loser_mean_worker_separation': (
-                mean(losers, 'worker_separation') if losers else None
-            ),
-        }
+            def mean(records_for_metric, key):
+                return float(np.mean([record[player][key] for record in records_for_metric]))
+
+            payload.update({
+                '{}_placement_games'.format(player): int(len(player_records)),
+                '{}_placement_mean_center_distance'.format(player): (
+                    mean(player_records, 'mean_center_distance')
+                ),
+                '{}_placement_both_central_rate'.format(player): mean(player_records, 'both_central'),
+                '{}_placement_mean_worker_separation'.format(player): float(separations.mean()),
+                '{}_placement_adjacent_rate'.format(player): float(np.mean(separations == 1)),
+                '{}_placement_moderate_separation_rate'.format(player): float(np.mean(separations == 2)),
+                '{}_placement_far_separation_rate'.format(player): float(np.mean(separations >= 3)),
+                '{}_winner_placement_games'.format(player): int(len(winners)),
+                '{}_loser_placement_games'.format(player): int(len(losers)),
+                '{}_winner_mean_center_distance'.format(player): (
+                    mean(winners, 'mean_center_distance') if winners else None
+                ),
+                '{}_loser_mean_center_distance'.format(player): (
+                    mean(losers, 'mean_center_distance') if losers else None
+                ),
+                '{}_winner_mean_worker_separation'.format(player): (
+                    mean(winners, 'worker_separation') if winners else None
+                ),
+                '{}_loser_mean_worker_separation'.format(player): (
+                    mean(losers, 'worker_separation') if losers else None
+                ),
+            })
+
+        interaction_records = [record for record in records if 'p2' in record]
+        if interaction_records:
+            payload.update({
+                'placement_center_owned_by_p1_rate': float(np.mean([
+                    record['center_owner'] == 1 for record in interaction_records
+                ])),
+                'placement_center_owned_by_p2_rate': float(np.mean([
+                    record['center_owner'] == -1 for record in interaction_records
+                ])),
+                'placement_center_unoccupied_rate': float(np.mean([
+                    record['center_owner'] == 0 for record in interaction_records
+                ])),
+                'placement_mean_minimum_opponent_distance': float(np.mean([
+                    record['minimum_opponent_distance'] for record in interaction_records
+                ])),
+                'p2_placement_mean_nearest_p1_distance': float(np.mean([
+                    record['p2_mean_nearest_p1_distance'] for record in interaction_records
+                ])),
+                'p2_placement_adjacent_to_p1_rate': float(np.mean([
+                    record['p2_adjacent_to_p1_rate'] for record in interaction_records
+                ])),
+            })
+
         policy_stats = self._placement_policy_geometry
-        for key in ('expected_center_distance', 'center_mass', 'inner_ring_mass', 'outer_ring_mass'):
-            values = policy_stats[key]
-            if values:
-                payload['p1_policy_{}'.format(key)] = float(np.mean(values))
-        separations = policy_stats['expected_worker_separation']
-        if separations:
-            payload['p1_policy_expected_worker_separation'] = float(np.mean(separations))
+        for player in ('p1', 'p2'):
+            for key in (
+                'expected_center_distance',
+                'center_mass',
+                'inner_ring_mass',
+                'outer_ring_mass',
+                'expected_worker_separation',
+            ):
+                values = policy_stats[player][key]
+                if values:
+                    payload['{}_policy_{}'.format(player, key)] = float(np.mean(values))
+        center_available = policy_stats['p2_first_center_available']
+        if center_available:
+            payload['p2_first_placement_center_available_rate'] = float(np.mean(center_available))
+        available_center_mass = policy_stats['p2_center_mass_when_available']
+        if available_center_mass:
+            payload['p2_policy_center_mass_when_available'] = float(
+                np.mean(available_center_mass)
+            )
         return payload
 
     @staticmethod

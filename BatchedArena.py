@@ -137,10 +137,19 @@ class BatchedMCTSArena:
         }
 
     def _getBatchedActions(self, active):
+        for game_state in active:
+            player = game_state['side_to_player'][game_state['curPlayer']]
+            game_state['tactical'] = game_state['mcts_by_player'][player].prepareTacticalRoot(
+                game_state['canonicalBoard']
+            )
+
         for _ in range(self.args.numMCTSSims):
             pending_by_player = {1: [], -1: []}
 
             for game_state in active:
+                tactical = game_state.get('tactical')
+                if tactical is not None and tactical['policy'] is not None:
+                    continue
                 player = game_state['side_to_player'][game_state['curPlayer']]
                 mcts = game_state['mcts_by_player'][player]
                 leaf = mcts.select_leaf(game_state['canonicalBoard'])
@@ -167,6 +176,15 @@ class BatchedMCTSArena:
         actions = []
         for game_state in active:
             board = game_state['canonicalBoard']
+            tactical = game_state.get('tactical')
+            if tactical is not None and tactical['policy'] is not None:
+                actions.append(self._selectLegalAction(
+                    board,
+                    tactical['policy'],
+                    sample=False,
+                    rng=game_state['rng'],
+                ))
+                continue
             is_placement = bool(
                 hasattr(self.game, 'isPlacementPhase')
                 and self.game.isPlacementPhase(board)

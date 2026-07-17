@@ -103,6 +103,11 @@ def parse_args():
     parser.add_argument('--maxlen-of-queue', type=int)
     parser.add_argument('--num-mcts-sims', type=int)
     parser.add_argument(
+        '--no-tactical-shortcuts',
+        action='store_true',
+        help='Disable exact immediate-win and one-ply forced-defense MCTS shortcuts.',
+    )
+    parser.add_argument(
         '--playout-cap-randomization',
         action='store_true',
         help=(
@@ -363,6 +368,7 @@ def build_coach_args(parsed_args):
         ),
         'dirichletAlpha': getattr(parsed_args, 'dirichlet_alpha', 0.30),
         'dirichletEpsilon': getattr(parsed_args, 'dirichlet_epsilon', 0.25),
+        'tacticalShortcuts': not getattr(parsed_args, 'no_tactical_shortcuts', False),
         'compactReplay': getattr(parsed_args, 'compact_replay', False) or training_mode == 'latest',
         'symmetryAugmentation': symmetry_augmentation,
         'replayReuse': (
@@ -676,12 +682,13 @@ def main():
         )
 
     log.info(
-        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s playout_cap=%s full_prob=%.2f fast_sims=%s placement_full=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s max_train_steps=%s replay_reuse=%s validation=%.3f batch=%s symmetry=%s policy_target_temp=%s optimizer=%s lr=%g weight_decay=%g lr_schedule=%s checkpoint=%s',
+        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s tactical=%s playout_cap=%s full_prob=%.2f fast_sims=%s placement_full=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s max_train_steps=%s replay_reuse=%s validation=%.3f batch=%s symmetry=%s policy_target_temp=%s optimizer=%s lr=%g weight_decay=%g lr_schedule=%s checkpoint=%s',
         parsed_args.architecture,
         parsed_args.preset,
         coach_args.numIters,
         coach_args.numEps,
         coach_args.numMCTSSims,
+        coach_args.tacticalShortcuts,
         coach_args.playoutCapRandomization,
         coach_args.playoutCapFullProbability,
         coach_args.playoutCapFastSims,

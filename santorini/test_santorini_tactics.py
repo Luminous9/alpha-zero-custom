@@ -56,6 +56,16 @@ class OnePlyGreedyNNet:
         return policy, value
 
 
+class CountingUniformNNet:
+    def __init__(self, game):
+        self.game = game
+        self.predict_calls = 0
+
+    def predict(self, board):
+        self.predict_calls += 1
+        return np.ones(self.game.getActionSize(), dtype=np.float32), 0.0
+
+
 class TestSantoriniTactics(unittest.TestCase):
     def setUp(self):
         self.game = SantoriniGame(5)
@@ -143,6 +153,86 @@ class TestSantoriniTactics(unittest.TestCase):
         chosen_action = int(np.argmax(policy))
 
         self.assertIn(chosen_action, range(action((2, 2), 4, 0), action((2, 2), 4, 7) + 1))
+
+    def test_tactical_shortcut_returns_immediate_win_without_network_search(self):
+        board = self.empty_board()
+        board[1, 2, 2] = 2
+        board[1, 2, 3] = 3
+        nnet = CountingUniformNNet(self.game)
+        mcts = MCTS(self.game, nnet, dotdict({'numMCTSSims': 16, 'cpuct': 1.0}))
+
+        policy = np.asarray(mcts.getActionProb(board, temp=1))
+        support = np.flatnonzero(policy)
+
+        self.assertEqual(nnet.predict_calls, 0)
+        self.assertEqual(len(support), 8)
+        self.assertTrue(all(action_id in range(
+            action((2, 2), 4, 0),
+            action((2, 2), 4, 7) + 1,
+        ) for action_id in support))
+        np.testing.assert_allclose(policy[support], np.full(8, 1.0 / 8.0))
+
+    def test_tactical_shortcut_finds_single_forced_block(self):
+        board = self.empty_board()
+        board[0, 1, 2] = -1
+        board[1, 1, 2] = 2
+        board[1, 1, 3] = 3
+        nnet = CountingUniformNNet(self.game)
+        mcts = MCTS(self.game, nnet, dotdict({'numMCTSSims': 16, 'cpuct': 1.0}))
+
+        tactical = mcts.prepareTacticalRoot(board)
+        policy = np.asarray(mcts.getActionProb(board, temp=1))
+        chosen_action = int(np.argmax(policy))
+        _, _, build = decoded_action(self.game, board, chosen_action)
+
+        self.assertEqual(tactical['kind'], 'single_forced_block')
+        self.assertEqual(nnet.predict_calls, 0)
+        self.assertEqual(build, (1, 3))
+
+    def test_tactical_shortcut_prunes_root_when_multiple_blocks_exist(self):
+        board = self.empty_board()
+        board[0, 0, 0] = 0
+        board[0, 0, 1] = 2
+        board[0, 1, 2] = -1
+        board[1, 1, 2] = 2
+        board[1, 1, 3] = 3
+        nnet = CountingUniformNNet(self.game)
+        mcts = MCTS(self.game, nnet, dotdict({'numMCTSSims': 16, 'cpuct': 1.0}))
+
+        tactical = mcts.prepareTacticalRoot(board)
+        policy = np.asarray(mcts.getActionProb(board, temp=1))
+        support = np.flatnonzero(policy)
+
+        self.assertEqual(tactical['kind'], 'forced_block_pruned')
+        self.assertGreater(nnet.predict_calls, 0)
+        self.assertGreaterEqual(len(support), 1)
+        self.assertTrue(set(support).issubset(set(map(int, tactical['actions']))))
+        for action_id in support:
+            _, _, build = decoded_action(self.game, board, int(action_id))
+            self.assertEqual(build, (1, 3))
+
+    def test_tactical_shortcut_proves_loss_when_every_move_allows_a_win(self):
+        board = np.zeros((2, 5, 5), dtype=int)
+        board[0, 4, 0] = 1
+        board[0, 4, 1] = 2
+        board[0, 0, 0] = -1
+        board[0, 0, 4] = -2
+        board[1, 0, 0] = 2
+        board[1, 0, 4] = 2
+        board[1, 0, 1] = 3
+        board[1, 0, 3] = 3
+        nnet = CountingUniformNNet(self.game)
+        mcts = MCTS(self.game, nnet, dotdict({'numMCTSSims': 16, 'cpuct': 1.0}))
+
+        tactical = mcts.prepareTacticalRoot(board)
+        policy = np.asarray(mcts.getActionProb(board, temp=1))
+
+        self.assertEqual(tactical['kind'], 'proven_loss_in_two')
+        self.assertEqual(nnet.predict_calls, 0)
+        self.assertAlmostEqual(float(policy.sum()), 1.0)
+        self.assertEqual(set(np.flatnonzero(policy)), set(np.flatnonzero(
+            self.game.getValidMoves(board, 1)
+        )))
 
 
 if __name__ == '__main__':

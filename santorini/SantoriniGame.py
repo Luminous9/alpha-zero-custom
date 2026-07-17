@@ -316,6 +316,21 @@ class SantoriniGame(Game):
             valids[self.getPlacementAction((int(x), int(y)))] = 1
         return valids
 
+    def getImmediateLevelThreeMoves(self, board, player=1, valids=None):
+        """Return legal actions that win immediately by moving onto level three."""
+        if self.isPlacementPhase(board):
+            return np.zeros(self.getActionSize(), dtype=np.int8)
+        if valids is None:
+            valids = self._get_valid_moves_fast(board, player)
+        winning = np.zeros(self.getActionSize(), dtype=np.int8)
+        actions = np.flatnonzero(valids)
+        if not len(actions):
+            return winning
+        move_x = self._action_origin_x[actions] + self._action_move_dx[actions]
+        move_y = self._action_origin_y[actions] + self._action_move_dy[actions]
+        winning[actions] = board[1][move_x, move_y] == 3
+        return winning
+
     @staticmethod
     def _normalize_worker_labels(board, player):
         locations = sorted(map(tuple, np.argwhere(board[0] * player > 0)))

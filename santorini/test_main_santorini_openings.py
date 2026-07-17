@@ -46,6 +46,18 @@ def make_coach_args():
 
 
 class TestMainSantoriniOpenings(unittest.TestCase):
+    def test_tactical_shortcuts_default_on_and_can_be_disabled(self):
+        with patch('sys.argv', ['main_santorini.py', '--architecture', 'v3']):
+            enabled = build_coach_args(parse_args())
+        with patch(
+            'sys.argv',
+            ['main_santorini.py', '--architecture', 'v3', '--no-tactical-shortcuts'],
+        ):
+            disabled = build_coach_args(parse_args())
+
+        self.assertTrue(enabled.tacticalShortcuts)
+        self.assertFalse(disabled.tacticalShortcuts)
+
     def test_playout_cap_randomization_configuration(self):
         with patch(
             'sys.argv',

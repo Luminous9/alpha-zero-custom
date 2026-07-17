@@ -28,6 +28,117 @@ class MCTS():
         self.Es = {}  # stores game.getGameEnded ended for board s
         self.Vs = {}  # temporarily caches dense valid masks until a leaf is expanded
         self.noised_roots = set()
+        self.root_action_overrides = {}
+        self.tactical_roots = {}
+
+    def _arg(self, key, default=None):
+        if hasattr(self.args, 'get'):
+            return self.args.get(key, default)
+        return getattr(self.args, key, default)
+
+    @staticmethod
+    def _uniform_policy(action_size, actions):
+        policy = np.zeros(action_size, dtype=np.float32)
+        if len(actions):
+            policy[np.asarray(actions, dtype=np.int64)] = 1.0 / len(actions)
+        return policy
+
+    def prepareTacticalRoot(self, canonicalBoard):
+        """
+        Detect exact level-three wins and one-ply level-three defenses.
+
+        Exact tactical policies bypass search. If several safe defenses exist,
+        the root is restricted to them and normal search chooses among them.
+        """
+        if not bool(self._arg('tacticalShortcuts', True)):
+            return None
+        if not hasattr(self.game, 'getImmediateLevelThreeMoves'):
+            return None
+        if hasattr(self.game, 'isPlacementPhase') and self.game.isPlacementPhase(canonicalBoard):
+            return None
+
+        state_key = self.game.stringRepresentation(canonicalBoard)
+        if state_key in self.tactical_roots:
+            return self.tactical_roots[state_key]
+
+        ended, valids = self._get_game_ended_and_valids(canonicalBoard)
+        if ended != 0:
+            self.Es[state_key] = ended
+            self.tactical_roots[state_key] = None
+            return None
+        if valids is None:
+            valids = self.game.getValidMoves(canonicalBoard, 1)
+        self.Es[state_key] = 0
+        self.Vs[state_key] = valids
+        legal_actions = np.flatnonzero(valids).astype(np.int32)
+        winning_actions = np.flatnonzero(
+            self.game.getImmediateLevelThreeMoves(canonicalBoard, 1, valids=valids)
+        ).astype(np.int32)
+        if len(winning_actions):
+            result = {
+                'kind': 'immediate_win',
+                'policy': self._uniform_policy(self.game.getActionSize(), winning_actions),
+                'actions': winning_actions,
+            }
+            self.tactical_roots[state_key] = result
+            return result
+
+        opponent_board = self.game.getCanonicalForm(canonicalBoard, -1)
+        opponent_valids = self.game.getValidMoves(opponent_board, 1)
+        opponent_wins = self.game.getImmediateLevelThreeMoves(
+            opponent_board,
+            1,
+            valids=opponent_valids,
+        )
+        if not np.any(opponent_wins):
+            self.tactical_roots[state_key] = None
+            return None
+
+        safe_actions = []
+        counter_wins = []
+        for action in legal_actions:
+            next_board, next_player = self.game.getNextState(canonicalBoard, 1, int(action))
+            next_canonical = self.game.getCanonicalForm(next_board, next_player)
+            ended = self.game.getGameEnded(next_canonical, 1)
+            if ended == -1:
+                counter_wins.append(int(action))
+                continue
+            next_valids = self.game.getValidMoves(next_canonical, 1)
+            if not np.any(self.game.getImmediateLevelThreeMoves(
+                next_canonical,
+                1,
+                valids=next_valids,
+            )):
+                safe_actions.append(int(action))
+
+        if counter_wins:
+            result = {
+                'kind': 'immediate_win',
+                'policy': self._uniform_policy(self.game.getActionSize(), counter_wins),
+                'actions': np.asarray(counter_wins, dtype=np.int32),
+            }
+        elif not safe_actions:
+            result = {
+                'kind': 'proven_loss_in_two',
+                'policy': self._uniform_policy(self.game.getActionSize(), legal_actions),
+                'actions': legal_actions,
+            }
+        elif len(safe_actions) == 1:
+            result = {
+                'kind': 'single_forced_block',
+                'policy': self._uniform_policy(self.game.getActionSize(), safe_actions),
+                'actions': np.asarray(safe_actions, dtype=np.int32),
+            }
+        else:
+            safe_actions = np.asarray(safe_actions, dtype=np.int32)
+            self.root_action_overrides[state_key] = safe_actions
+            result = {
+                'kind': 'forced_block_pruned',
+                'policy': None,
+                'actions': safe_actions,
+            }
+        self.tactical_roots[state_key] = result
+        return result
 
     def getActionProb(
         self,
@@ -50,6 +161,9 @@ class MCTS():
         )
         if simulations < 1:
             raise ValueError('MCTS requires at least one simulation.')
+        tactical = self.prepareTacticalRoot(canonicalBoard)
+        if tactical is not None and tactical['policy'] is not None:
+            return list(tactical['policy'])
         for i in range(simulations):
             self.search(canonicalBoard)
             if i == 0 and add_root_noise:
@@ -203,6 +317,9 @@ class MCTS():
         if valids is None:
             valids = self.game.getValidMoves(canonicalBoard, 1)
         actions = np.flatnonzero(valids).astype(np.int32)
+        root_actions = self.root_action_overrides.get(s)
+        if root_actions is not None:
+            actions = np.intersect1d(actions, root_actions, assume_unique=True).astype(np.int32)
         legal_policy = np.asarray(policy, dtype=np.float32)[actions].copy()
         sum_Ps_s = np.sum(legal_policy)
         if sum_Ps_s > 0:
