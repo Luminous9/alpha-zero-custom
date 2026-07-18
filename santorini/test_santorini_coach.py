@@ -94,6 +94,44 @@ class FixedOpeningSampler:
 
 
 class TestSantoriniCoachExamples(unittest.TestCase):
+    def test_search_symmetry_stats_are_drained_into_scalar_telemetry(self):
+        coach = object.__new__(Coach)
+        coach.args = dotdict({'searchSymmetryEvaluation': True})
+        coach._search_symmetry_stats = coach._newSearchSymmetryStats()
+        mcts = Mock()
+        mcts.drainSymmetryEvaluationStats.return_value = {
+            'root_evaluations': 3,
+            'root_orientations': 12,
+            'interior_evaluations': 40,
+        }
+
+        coach._recordSearchSymmetryStats(mcts)
+        metrics = coach._searchSymmetryTelemetry()
+
+        self.assertEqual(metrics['search_symmetry_root_evaluations'], 3)
+        self.assertEqual(metrics['search_symmetry_root_orientations'], 12)
+        self.assertEqual(metrics['search_symmetry_average_root_orientations'], 4.0)
+        self.assertEqual(metrics['search_symmetry_interior_evaluations'], 40)
+
+    def test_placement_match_diagnostics_are_reduced_to_scalar_telemetry(self):
+        metrics = Coach._placementDiagnosticMetrics('placement_milestone', {
+            'games_recorded': 40,
+            'distinct_exact_openings': 12,
+            'distinct_symmetry_unique_openings': 7,
+            'duplicate_game_count': 28,
+            'most_frequent_opening_count': 9,
+            'repeated_exact_labeled_opening_groups': 6,
+            'repeated_groups_with_identical_standard_trajectory': 5,
+            'repeated_groups_with_divergent_standard_trajectories': 1,
+        })
+
+        self.assertEqual(metrics['placement_milestone_distinct_exact_openings'], 12)
+        self.assertEqual(metrics['placement_milestone_distinct_symmetry_unique_openings'], 7)
+        self.assertEqual(metrics['placement_milestone_duplicate_games'], 28)
+        self.assertAlmostEqual(metrics['placement_milestone_duplicate_rate'], 0.7)
+        self.assertEqual(metrics['placement_milestone_most_frequent_opening_count'], 9)
+        self.assertAlmostEqual(metrics['placement_milestone_trajectory_consistency_rate'], 5 / 6)
+
     def test_player_one_placement_geometry_tracks_center_separation_and_outcomes(self):
         game = SantoriniGame(5, sequential_placement=True)
         coach = object.__new__(Coach)
@@ -358,6 +396,10 @@ class TestSantoriniCoachExamples(unittest.TestCase):
             'gumbelPlacementScale': 1.5,
             'evaluationGumbelScale': 0.0,
             'evaluationGumbelPlacementScale': 1.0,
+            'rootSymmetrySamples': 2,
+            'placementRootSymmetrySamples': 8,
+            'evaluationRootSymmetrySamples': 4,
+            'evaluationPlacementRootSymmetrySamples': 8,
             'addDirichletNoise': True,
         })
 
@@ -366,6 +408,8 @@ class TestSantoriniCoachExamples(unittest.TestCase):
         self.assertEqual(match_args.numMCTSSims, 128)
         self.assertEqual(match_args.gumbelScale, 0.0)
         self.assertEqual(match_args.gumbelPlacementScale, 1.0)
+        self.assertEqual(match_args.rootSymmetrySamples, 4)
+        self.assertEqual(match_args.placementRootSymmetrySamples, 8)
         self.assertFalse(match_args.addDirichletNoise)
         self.assertEqual(coach.args.gumbelScale, 1.0)
         self.assertEqual(coach.args.gumbelPlacementScale, 1.5)

@@ -106,6 +106,24 @@ class TestMainSantoriniOpenings(unittest.TestCase):
         self.assertIsNone(coach_args.replayReuse)
         self.assertEqual(coach_args.validationFraction, 0.0)
 
+    def test_v3_enables_search_symmetry_with_phase_specific_root_defaults(self):
+        with patch('sys.argv', ['main_santorini.py', '--architecture', 'v3']):
+            coach_args = build_coach_args(parse_args())
+
+        self.assertTrue(coach_args.searchSymmetryEvaluation)
+        self.assertEqual(coach_args.rootSymmetrySamples, 2)
+        self.assertEqual(coach_args.placementRootSymmetrySamples, 8)
+        self.assertEqual(coach_args.evaluationRootSymmetrySamples, 8)
+        self.assertEqual(coach_args.evaluationPlacementRootSymmetrySamples, 8)
+
+    def test_v2_disables_search_symmetry_by_default(self):
+        with patch('sys.argv', ['main_santorini.py', '--architecture', 'v2']):
+            coach_args = build_coach_args(parse_args())
+
+        self.assertFalse(coach_args.searchSymmetryEvaluation)
+        self.assertEqual(coach_args.rootSymmetrySamples, 1)
+        self.assertEqual(coach_args.placementRootSymmetrySamples, 1)
+
     def test_learning_rate_schedule_parser(self):
         self.assertEqual(parse_lr_schedule('200:0.0001,400:0.00003'), [(200, 1e-4), (400, 3e-5)])
         self.assertEqual(parse_lr_schedule('none'), [])

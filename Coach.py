@@ -268,6 +268,40 @@ class Coach():
         }
 
     @staticmethod
+    def _newSearchSymmetryStats():
+        return {
+            'root_evaluations': 0,
+            'root_orientations': 0,
+            'interior_evaluations': 0,
+        }
+
+    def _recordSearchSymmetryStats(self, mcts):
+        if not hasattr(mcts, 'drainSymmetryEvaluationStats'):
+            return
+        if not hasattr(self, '_search_symmetry_stats'):
+            self._search_symmetry_stats = self._newSearchSymmetryStats()
+        for key, value in mcts.drainSymmetryEvaluationStats().items():
+            self._search_symmetry_stats[key] += int(value)
+
+    def _searchSymmetryTelemetry(self):
+        if not bool(self._arg('searchSymmetryEvaluation', False)):
+            return {}
+        stats = self._search_symmetry_stats
+        root_evaluations = int(stats['root_evaluations'])
+        root_orientations = int(stats['root_orientations'])
+        return {
+            'search_symmetry_root_evaluations': root_evaluations,
+            'search_symmetry_root_orientations': root_orientations,
+            'search_symmetry_average_root_orientations': (
+                float(root_orientations / root_evaluations)
+                if root_evaluations else None
+            ),
+            'search_symmetry_interior_evaluations': int(
+                stats['interior_evaluations']
+            ),
+        }
+
+    @staticmethod
     def _prepareTacticalRoot(mcts, canonical_board):
         if not hasattr(mcts, 'prepareTacticalRoot'):
             return None
@@ -392,6 +426,7 @@ class Coach():
                 full_search,
                 0 if exact_tactical_policy else simulations,
             )
+            self._recordSearchSymmetryStats(self.mcts)
 
             action = np.random.choice(len(action_policy), p=action_policy)
             if hasattr(self.game, 'isPlacementAction') and self.game.isPlacementAction(action):
@@ -473,6 +508,7 @@ class Coach():
                     training_policies,
                     action_policies,
                 ):
+                    self._recordSearchSymmetryStats(episode['mcts'])
                     if episode['fullSearch']:
                         self._appendTrainingPosition(
                             episode['trainExamples'],
@@ -549,15 +585,29 @@ class Coach():
             if not pending:
                 continue
 
-            boards = [leaf['board'] for _, leaf in pending]
+            boards = []
+            evaluation_ranges = []
+            for mcts, leaf in pending:
+                leaf_boards = (
+                    mcts.getLeafEvaluationBoards(leaf)
+                    if hasattr(mcts, 'getLeafEvaluationBoards')
+                    else [leaf['board']]
+                )
+                start = len(boards)
+                boards.extend(leaf_boards)
+                evaluation_ranges.append((start, len(boards)))
             if hasattr(self.nnet, 'predict_batch'):
                 policies, values = self.nnet.predict_batch(boards)
             else:
                 predictions = [self.nnet.predict(board) for board in boards]
                 policies, values = zip(*predictions)
 
-            for (mcts, leaf), policy, value in zip(pending, policies, values):
-                mcts.complete_search(leaf, policy, float(value))
+            for (mcts, leaf), (start, end) in zip(pending, evaluation_ranges):
+                mcts.complete_search(
+                    leaf,
+                    np.asarray(policies)[start:end],
+                    np.asarray(values)[start:end],
+                )
 
             if simulation_index == 0:
                 for episode in episodes:
@@ -613,6 +663,7 @@ class Coach():
             self._policy_target_stats = self._newPolicyTargetStats()
             self._playout_cap_stats = self._newPlayoutCapStats()
             self._tactical_stats = self._newTacticalStats()
+            self._search_symmetry_stats = self._newSearchSymmetryStats()
             iterationTrainExamples = None
             # examples of the iteration
             if not self.skipFirstSelfPlay or local_iteration > 1:
@@ -684,6 +735,19 @@ class Coach():
                     'policy_target_temperature': self._arg('policyTargetTemperature', None),
                     'max_train_steps': getattr(getattr(self.nnet, 'net_args', None), 'max_train_steps', None),
                     'symmetry_augmentation': self._arg('symmetryAugmentation', 'expanded'),
+                    'search_symmetry_evaluation': self._arg(
+                        'searchSymmetryEvaluation', False
+                    ),
+                    'root_symmetry_samples': self._arg('rootSymmetrySamples', 1),
+                    'placement_root_symmetry_samples': self._arg(
+                        'placementRootSymmetrySamples', 1
+                    ),
+                    'evaluation_root_symmetry_samples': self._arg(
+                        'evaluationRootSymmetrySamples', 1
+                    ),
+                    'evaluation_placement_root_symmetry_samples': self._arg(
+                        'evaluationPlacementRootSymmetrySamples', 1
+                    ),
                     'replay_reuse': self._arg('replayReuse', None),
                     'validation_fraction': self._arg('validationFraction', 0.0),
                     'optimizer': getattr(getattr(self.nnet, 'net_args', None), 'optimizer', None),
@@ -1026,6 +1090,19 @@ class Coach():
             ),
             'playout_cap_full_placement': bool(self._arg('playoutCapFullPlacement', True)),
             'tactical_shortcuts': bool(self._arg('tacticalShortcuts', True)),
+            'search_symmetry_evaluation': bool(
+                self._arg('searchSymmetryEvaluation', False)
+            ),
+            'root_symmetry_samples': int(self._arg('rootSymmetrySamples', 1)),
+            'placement_root_symmetry_samples': int(
+                self._arg('placementRootSymmetrySamples', 1)
+            ),
+            'evaluation_root_symmetry_samples': int(
+                self._arg('evaluationRootSymmetrySamples', 1)
+            ),
+            'evaluation_placement_root_symmetry_samples': int(
+                self._arg('evaluationPlacementRootSymmetrySamples', 1)
+            ),
             'duration_seconds': float(duration_seconds),
             'replay_examples': int(replay_examples),
             'games': int(len(lengths)),
@@ -1043,6 +1120,7 @@ class Coach():
         payload.update(self._policyTargetTelemetry())
         payload.update(self._playoutCapTelemetry())
         payload.update(self._tacticalTelemetry())
+        payload.update(self._searchSymmetryTelemetry())
         payload.update(self._policyTelemetry())
         if self._reference_suite is not None:
             payload.update(self._reference_suite.evaluate(self.game, self.nnet))
@@ -1405,6 +1483,14 @@ class Coach():
             'evaluationGumbelPlacementScale',
             self._arg('gumbelPlacementScale', self._arg('gumbelScale', 1.0)),
         ))
+        args.rootSymmetrySamples = int(self._arg(
+            'evaluationRootSymmetrySamples',
+            self._arg('rootSymmetrySamples', 1),
+        ))
+        args.placementRootSymmetrySamples = int(self._arg(
+            'evaluationPlacementRootSymmetrySamples',
+            self._arg('placementRootSymmetrySamples', args.rootSymmetrySamples),
+        ))
         return args
 
     @staticmethod
@@ -1431,25 +1517,38 @@ class Coach():
         placement_temperature=0.0,
         game_seeds=None,
         simulations=None,
+        include_placement_diagnostics=False,
+        opponent_search_symmetry_evaluation=None,
     ):
+        current_args = self._matchArgs(simulations)
+        opponent_args = dotdict(dict(current_args))
+        if opponent_search_symmetry_evaluation is not None:
+            opponent_args.searchSymmetryEvaluation = bool(
+                opponent_search_symmetry_evaluation
+            )
         arena = BatchedMCTSArena(
             self.game,
             opponent,
             self.nnet,
-            self._matchArgs(simulations),
+            current_args,
             batch_size=max(1, int(self._arg('telemetryMatchBatchSize', self._self_play_batch_size()))),
             quiet=self._quiet(),
             opening_boards=opening_boards,
             placement_temperature=placement_temperature,
             game_seeds=game_seeds,
+            player_args={1: opponent_args, -1: current_args},
+            record_placement_diagnostics=include_placement_diagnostics,
         )
         opponent_wins, current_wins, draws = arena.playGames(game_count)
-        return (
+        result = (
             int(opponent_wins),
             int(current_wins),
             int(draws),
             *self._matchStatistics(opponent_wins, current_wins, draws),
         )
+        if include_placement_diagnostics:
+            return result, arena.placementDiagnostics()
+        return result
 
     @staticmethod
     def _matchMetrics(prefix, opponent_wins, current_wins, draws, win_rate, low, high):
@@ -1460,6 +1559,40 @@ class Coach():
             '{}_current_win_rate'.format(prefix): win_rate,
             '{}_current_win_rate_95ci_low'.format(prefix): low,
             '{}_current_win_rate_95ci_high'.format(prefix): high,
+        }
+
+    @staticmethod
+    def _placementDiagnosticMetrics(prefix, diagnostics):
+        if not diagnostics:
+            return {}
+        games = int(diagnostics['games_recorded'])
+        duplicate_games = int(diagnostics['duplicate_game_count'])
+        repeated_groups = int(diagnostics['repeated_exact_labeled_opening_groups'])
+        identical_groups = int(
+            diagnostics['repeated_groups_with_identical_standard_trajectory']
+        )
+        return {
+            '{}_distinct_exact_openings'.format(prefix): int(
+                diagnostics['distinct_exact_openings']
+            ),
+            '{}_distinct_symmetry_unique_openings'.format(prefix): int(
+                diagnostics['distinct_symmetry_unique_openings']
+            ),
+            '{}_duplicate_games'.format(prefix): duplicate_games,
+            '{}_duplicate_rate'.format(prefix): (
+                float(duplicate_games / games) if games else None
+            ),
+            '{}_most_frequent_opening_count'.format(prefix): int(
+                diagnostics['most_frequent_opening_count']
+            ),
+            '{}_repeated_trajectory_groups'.format(prefix): repeated_groups,
+            '{}_identical_trajectory_groups'.format(prefix): identical_groups,
+            '{}_divergent_trajectory_groups'.format(prefix): int(
+                diagnostics['repeated_groups_with_divergent_standard_trajectories']
+            ),
+            '{}_trajectory_consistency_rate'.format(prefix): (
+                float(identical_groups / repeated_groups) if repeated_groups else None
+            ),
         }
 
     def _logMatchResult(self, label, iteration, opponent_label, result):
@@ -1538,11 +1671,12 @@ class Coach():
                 seed_count,
                 placement_temperature,
             )
-            placement_result = self._runPairedMatch(
+            placement_result, placement_diagnostics = self._runPairedMatch(
                 previous,
                 placement_game_count,
                 placement_temperature=placement_temperature,
                 game_seeds=self._telemetry_placement_seeds[:seed_count],
+                include_placement_diagnostics=True,
             )
             self._logMatchResult(
                 'Placement-inclusive milestone',
@@ -1551,8 +1685,30 @@ class Coach():
                 placement_result,
             )
             metrics.update(self._matchMetrics('placement_milestone', *placement_result))
+            metrics.update(self._placementDiagnosticMetrics(
+                'placement_milestone',
+                placement_diagnostics,
+            ))
             metrics['placement_milestone_seed_count'] = seed_count
             metrics['placement_milestone_temperature'] = placement_temperature
+            if placement_diagnostics:
+                log.info(
+                    'Placement-inclusive diversity: %s exact / %s symmetry-unique openings; '
+                    '%s/%s duplicate games (%.1f%%); most frequent opening %s games; '
+                    'repeated trajectory groups %s identical / %s divergent.',
+                    placement_diagnostics['distinct_exact_openings'],
+                    placement_diagnostics['distinct_symmetry_unique_openings'],
+                    placement_diagnostics['duplicate_game_count'],
+                    placement_diagnostics['games_recorded'],
+                    100.0 * metrics['placement_milestone_duplicate_rate'],
+                    placement_diagnostics['most_frequent_opening_count'],
+                    placement_diagnostics[
+                        'repeated_groups_with_identical_standard_trajectory'
+                    ],
+                    placement_diagnostics[
+                        'repeated_groups_with_divergent_standard_trajectories'
+                    ],
+                )
         return metrics
 
     def _runAnchorMatch(self, iteration):
@@ -1576,6 +1732,7 @@ class Coach():
             game_count,
             opening_boards=self._telemetry_opening_boards[:opening_count],
             simulations=simulations,
+            opponent_search_symmetry_evaluation=(architecture == 'v3'),
         )
         self._logMatchResult('{} anchor'.format(architecture.upper()), iteration, architecture, result)
         metrics = self._matchMetrics('anchor', *result)

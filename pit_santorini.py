@@ -40,6 +40,9 @@ def search_args(
     gumbel_max_considered_actions=16,
     gumbel_scale=1.0,
     gumbel_placement_scale=None,
+    search_symmetry_evaluation=False,
+    root_symmetry_samples=8,
+    placement_root_symmetry_samples=8,
 ):
     if gumbel_placement_scale is None:
         gumbel_placement_scale = gumbel_scale
@@ -51,6 +54,9 @@ def search_args(
         'gumbelScale': float(gumbel_scale),
         'gumbelPlacementScale': float(gumbel_placement_scale),
         'tacticalShortcuts': True,
+        'searchSymmetryEvaluation': bool(search_symmetry_evaluation),
+        'rootSymmetrySamples': int(root_symmetry_samples),
+        'placementRootSymmetrySamples': int(placement_root_symmetry_samples),
     })
 
 
@@ -67,6 +73,9 @@ class NetworkMCTSPlayer:
         gumbel_max_considered_actions=16,
         gumbel_scale=1.0,
         gumbel_placement_scale=None,
+        search_symmetry_evaluation=False,
+        root_symmetry_samples=8,
+        placement_root_symmetry_samples=8,
     ):
         self.game = game
         self.nnet = nnet
@@ -76,6 +85,9 @@ class NetworkMCTSPlayer:
             gumbel_max_considered_actions=gumbel_max_considered_actions,
             gumbel_scale=gumbel_scale,
             gumbel_placement_scale=gumbel_placement_scale,
+            search_symmetry_evaluation=search_symmetry_evaluation,
+            root_symmetry_samples=root_symmetry_samples,
+            placement_root_symmetry_samples=placement_root_symmetry_samples,
         )
         self.action_temp = action_temp
         self.mcts = None
@@ -105,6 +117,9 @@ class NeuralMCTSPlayer(NetworkMCTSPlayer):
         gumbel_max_considered_actions=16,
         gumbel_scale=1.0,
         gumbel_placement_scale=None,
+        search_symmetry_evaluation=False,
+        root_symmetry_samples=8,
+        placement_root_symmetry_samples=8,
     ):
         nnet = build_nnet(game, architecture)
         nnet.load_checkpoint(checkpoint_folder, checkpoint_file)
@@ -117,6 +132,9 @@ class NeuralMCTSPlayer(NetworkMCTSPlayer):
             gumbel_max_considered_actions=gumbel_max_considered_actions,
             gumbel_scale=gumbel_scale,
             gumbel_placement_scale=gumbel_placement_scale,
+            search_symmetry_evaluation=search_symmetry_evaluation,
+            root_symmetry_samples=root_symmetry_samples,
+            placement_root_symmetry_samples=placement_root_symmetry_samples,
         )
 
 
@@ -145,6 +163,20 @@ def batched_arena_requested(args):
 
 
 def validate_batched_arena_args(parser, args):
+    values = args if isinstance(args, dict) else vars(args)
+    placement_only = bool(values.get('placement_only_comparison', False))
+    if placement_only:
+        if int(values.get('arena_batch_size', 1)) <= 1:
+            parser.error('--placement-only-comparison requires --arena-batch-size > 1.')
+        if not values.get('opponent_checkpoint_folder'):
+            parser.error('--placement-only-comparison requires --opponent-checkpoint-folder.')
+        if not values.get('standard_controller_folder'):
+            parser.error('--placement-only-comparison requires --standard-controller-folder.')
+        if values.get('opening_source', 'book') != 'game':
+            parser.error('--placement-only-comparison requires --opening-source game.')
+        if values.get('architecture') != 'v3' or values.get('opponent_architecture') != 'v3':
+            parser.error('--placement-only-comparison requires two V3 placement contestants.')
+
     if not batched_arena_requested(args):
         return
     if not args.opponent_checkpoint_folder:
@@ -429,6 +461,23 @@ def main():
         type=float,
         help='Gumbel scale for placement roots; defaults to --gumbel-scale.',
     )
+    parser.add_argument(
+        '--no-search-symmetry-evaluation',
+        action='store_true',
+        help='Disable D4-randomized leaf evaluation for V3 contestants.',
+    )
+    parser.add_argument(
+        '--root-symmetry-samples',
+        type=int,
+        default=8,
+        help='Distinct D4 orientations averaged at standard V3 evaluation roots.',
+    )
+    parser.add_argument(
+        '--placement-root-symmetry-samples',
+        type=int,
+        default=8,
+        help='Distinct D4 orientations averaged at placement V3 evaluation roots.',
+    )
     parser.add_argument('--checkpoint-folder', default='./temp/santorini_quick/')
     parser.add_argument('--checkpoint-file', default='best.pth.tar')
     parser.add_argument('--architecture', choices=['v1', 'v2', 'v3'], default='v2')
@@ -443,6 +492,45 @@ def main():
         '--opponent-gumbel-placement-scale',
         type=float,
         help='Opponent Gumbel scale for placement roots; defaults to --opponent-gumbel-scale.',
+    )
+    parser.add_argument(
+        '--placement-only-comparison',
+        action='store_true',
+        help=(
+            'Let the two contestants choose placements, then use one fixed neural-MCTS '
+            'controller for both sides during all standard play.'
+        ),
+    )
+    parser.add_argument(
+        '--standard-controller-folder',
+        help='Checkpoint folder for the shared post-placement controller.',
+    )
+    parser.add_argument(
+        '--standard-controller-file',
+        default='latest.pth.tar',
+        help='Checkpoint filename for the shared post-placement controller.',
+    )
+    parser.add_argument(
+        '--standard-controller-architecture',
+        choices=['v1', 'v2', 'v3'],
+        default='v3',
+    )
+    parser.add_argument(
+        '--standard-controller-sims',
+        type=int,
+        help='Post-placement simulations per move; defaults to --sims.',
+    )
+    parser.add_argument(
+        '--standard-controller-search-mode',
+        choices=['puct', 'gumbel'],
+        default='gumbel',
+    )
+    parser.add_argument('--standard-controller-gumbel-max-considered-actions', type=int, default=16)
+    parser.add_argument(
+        '--standard-controller-gumbel-scale',
+        type=float,
+        default=0.0,
+        help='Gumbel scale for shared standard play; 0 gives deterministic search.',
     )
     parser.add_argument(
         '--arena-batch-size',
@@ -491,8 +579,18 @@ def main():
         parser.error('--arena-batch-size must be at least 1.')
     if args.gumbel_max_considered_actions < 1 or args.opponent_gumbel_max_considered_actions < 1:
         parser.error('Gumbel max considered actions must be at least 1.')
+    if args.standard_controller_gumbel_max_considered_actions < 1:
+        parser.error('Standard-controller Gumbel max considered actions must be at least 1.')
     if args.gumbel_scale < 0 or args.opponent_gumbel_scale < 0:
         parser.error('Gumbel scale cannot be negative.')
+    if args.standard_controller_gumbel_scale < 0:
+        parser.error('Standard-controller Gumbel scale cannot be negative.')
+    if args.standard_controller_sims is not None and args.standard_controller_sims < 1:
+        parser.error('--standard-controller-sims must be at least 1.')
+    if not 1 <= args.root_symmetry_samples <= 8:
+        parser.error('--root-symmetry-samples must be between 1 and 8.')
+    if not 1 <= args.placement_root_symmetry_samples <= 8:
+        parser.error('--placement-root-symmetry-samples must be between 1 and 8.')
     if args.gumbel_placement_scale is None:
         args.gumbel_placement_scale = args.gumbel_scale
     if args.opponent_gumbel_placement_scale is None:
@@ -549,6 +647,11 @@ def main():
             gumbel_max_considered_actions=args.gumbel_max_considered_actions,
             gumbel_scale=args.gumbel_scale,
             gumbel_placement_scale=args.gumbel_placement_scale,
+            search_symmetry_evaluation=(
+                args.architecture == 'v3' and not args.no_search_symmetry_evaluation
+            ),
+            root_symmetry_samples=args.root_symmetry_samples,
+            placement_root_symmetry_samples=args.placement_root_symmetry_samples,
         )
         opponent_player_obj = NeuralMCTSPlayer(
             game,
@@ -561,6 +664,12 @@ def main():
             gumbel_max_considered_actions=args.opponent_gumbel_max_considered_actions,
             gumbel_scale=args.opponent_gumbel_scale,
             gumbel_placement_scale=args.opponent_gumbel_placement_scale,
+            search_symmetry_evaluation=(
+                args.opponent_architecture == 'v3'
+                and not args.no_search_symmetry_evaluation
+            ),
+            root_symmetry_samples=args.root_symmetry_samples,
+            placement_root_symmetry_samples=args.placement_root_symmetry_samples,
         )
         player1 = nnet_player_obj
         player2 = opponent_player_obj
@@ -585,6 +694,11 @@ def main():
             gumbel_max_considered_actions=args.gumbel_max_considered_actions,
             gumbel_scale=args.gumbel_scale,
             gumbel_placement_scale=args.gumbel_placement_scale,
+            search_symmetry_evaluation=(
+                args.architecture == 'v3' and not args.no_search_symmetry_evaluation
+            ),
+            root_symmetry_samples=args.root_symmetry_samples,
+            placement_root_symmetry_samples=args.placement_root_symmetry_samples,
         )
         player2 = build_baseline(game, args.baseline)
         contestant2_name = args.baseline
@@ -604,8 +718,17 @@ def main():
             args.opponent_gumbel_scale,
             args.opponent_gumbel_placement_scale,
         ))
+    if uses_v3 and not args.no_search_symmetry_evaluation:
+        print(
+            'V3 search symmetry: random interior orientation; standard/placement '
+            'root averages {}/{}.'.format(
+                args.root_symmetry_samples,
+                args.placement_root_symmetry_samples,
+            )
+        )
 
     seat_stats = None
+    placement_diagnostics = None
     use_batched_arena = batched_arena_requested(args)
     if use_batched_arena:
         print("Using batched arena with batch size {}.".format(args.arena_batch_size))
@@ -615,6 +738,11 @@ def main():
             args.gumbel_max_considered_actions,
             args.gumbel_scale,
             args.gumbel_placement_scale,
+            search_symmetry_evaluation=(
+                args.architecture == 'v3' and not args.no_search_symmetry_evaluation
+            ),
+            root_symmetry_samples=args.root_symmetry_samples,
+            placement_root_symmetry_samples=args.placement_root_symmetry_samples,
         )
         player2_args = search_args(
             args.opponent_sims or args.sims,
@@ -622,7 +750,54 @@ def main():
             args.opponent_gumbel_max_considered_actions,
             args.opponent_gumbel_scale,
             args.opponent_gumbel_placement_scale,
+            search_symmetry_evaluation=(
+                args.opponent_architecture == 'v3'
+                and not args.no_search_symmetry_evaluation
+            ),
+            root_symmetry_samples=args.root_symmetry_samples,
+            placement_root_symmetry_samples=args.placement_root_symmetry_samples,
         )
+        standard_controller_nnet = None
+        standard_controller_args = None
+        if args.placement_only_comparison:
+            standard_controller_path = os.path.join(
+                args.standard_controller_folder,
+                args.standard_controller_file,
+            )
+            if not os.path.exists(standard_controller_path):
+                raise FileNotFoundError(
+                    'No standard controller model in path {}'.format(standard_controller_path)
+                )
+            standard_controller_nnet = build_nnet(
+                game,
+                args.standard_controller_architecture,
+            )
+            standard_controller_nnet.load_checkpoint(
+                args.standard_controller_folder,
+                args.standard_controller_file,
+            )
+            standard_controller_args = search_args(
+                args.standard_controller_sims or args.sims,
+                args.standard_controller_search_mode,
+                args.standard_controller_gumbel_max_considered_actions,
+                args.standard_controller_gumbel_scale,
+                args.standard_controller_gumbel_scale,
+                search_symmetry_evaluation=(
+                    args.standard_controller_architecture == 'v3'
+                    and not args.no_search_symmetry_evaluation
+                ),
+                root_symmetry_samples=args.root_symmetry_samples,
+                placement_root_symmetry_samples=args.placement_root_symmetry_samples,
+            )
+            print(
+                'Placement-only comparison: both sides switch after placement to {} '
+                'using {} search ({} sims; Gumbel scale {}).'.format(
+                    standard_controller_path,
+                    args.standard_controller_search_mode,
+                    args.standard_controller_sims or args.sims,
+                    args.standard_controller_gumbel_scale,
+                )
+            )
         arena = BatchedMCTSArena(
             game,
             player1.nnet,
@@ -637,8 +812,12 @@ def main():
                 size=args.games // 2,
             )),
             player_args={1: player1_args, -1: player2_args},
+            standard_controller_nnet=standard_controller_nnet,
+            standard_controller_args=standard_controller_args,
+            record_placement_diagnostics=bool(uses_v3 and opening_boards is None),
         )
         nnet_wins, opponent_wins, draws = arena.playGames(args.games)
+        placement_diagnostics = arena.placementDiagnostics()
     elif opening_position is not None:
         nnet_wins, opponent_wins, draws, seat_stats = play_opening_games_by_seat(
             player1,
@@ -665,6 +844,30 @@ def main():
     include_draws = bool(getattr(game, 'supports_draws', True))
     if include_draws:
         print("Draws: {}".format(draws))
+    if placement_diagnostics is not None:
+        print(
+            'Learned placements: {} exact, {} symmetry-unique across {} games '
+            '({} duplicate games).'.format(
+                placement_diagnostics['distinct_exact_openings'],
+                placement_diagnostics['distinct_symmetry_unique_openings'],
+                placement_diagnostics['games_recorded'],
+                placement_diagnostics['duplicate_game_count'],
+            )
+        )
+        repeated_groups = placement_diagnostics['repeated_exact_labeled_opening_groups']
+        if repeated_groups:
+            print(
+                'Repeated labeled openings: {} group(s); {} identical and {} divergent '
+                'standard-play trajectory group(s).'.format(
+                    repeated_groups,
+                    placement_diagnostics[
+                        'repeated_groups_with_identical_standard_trajectory'
+                    ],
+                    placement_diagnostics[
+                        'repeated_groups_with_divergent_standard_trajectories'
+                    ],
+                )
+            )
     if seat_stats is not None:
         print("Seat breakdown:")
         print("  {} as first player: {}".format(
@@ -693,6 +896,11 @@ def main():
             'gumbel_max_considered_actions': args.gumbel_max_considered_actions,
             'gumbel_scale': args.gumbel_scale,
             'gumbel_placement_scale': args.gumbel_placement_scale,
+            'search_symmetry_evaluation': bool(
+                uses_v3 and not args.no_search_symmetry_evaluation
+            ),
+            'root_symmetry_samples': args.root_symmetry_samples,
+            'placement_root_symmetry_samples': args.placement_root_symmetry_samples,
             'action_temp': args.action_temp,
             'checkpoint_folder': args.checkpoint_folder,
             'checkpoint_file': args.checkpoint_file,
@@ -705,6 +913,16 @@ def main():
             'opponent_gumbel_max_considered_actions': args.opponent_gumbel_max_considered_actions,
             'opponent_gumbel_scale': args.opponent_gumbel_scale,
             'opponent_gumbel_placement_scale': args.opponent_gumbel_placement_scale,
+            'placement_only_comparison': args.placement_only_comparison,
+            'standard_controller_folder': args.standard_controller_folder,
+            'standard_controller_file': args.standard_controller_file,
+            'standard_controller_architecture': args.standard_controller_architecture,
+            'standard_controller_sims': args.standard_controller_sims or args.sims,
+            'standard_controller_search_mode': args.standard_controller_search_mode,
+            'standard_controller_gumbel_max_considered_actions': (
+                args.standard_controller_gumbel_max_considered_actions
+            ),
+            'standard_controller_gumbel_scale': args.standard_controller_gumbel_scale,
             'arena_batch_size': args.arena_batch_size,
             'fresh': args.fresh,
             'contestant1_name': contestant1_name,
@@ -735,6 +953,8 @@ def main():
             })
             if seat_stats is not None:
                 result['seat_stats'] = seat_stats
+        if placement_diagnostics is not None:
+            result['learned_placement_diagnostics'] = placement_diagnostics
         json_dir = os.path.dirname(args.json_out)
         if json_dir:
             os.makedirs(json_dir, exist_ok=True)

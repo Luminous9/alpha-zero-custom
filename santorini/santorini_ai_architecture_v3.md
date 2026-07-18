@@ -84,6 +84,10 @@ Board transformations also transform the spatial action origin. This applies to 
 
 V3 stores one canonical board/policy example per played position. Each time an example is sampled for training, one of the eight rotation/reflection symmetries is selected uniformly and applied to both the encoded board and the spatial policy. This preserves geometric augmentation without materializing eight replay entries per position. Older replay files that already contain expanded symmetries remain valid: their examples receive another uniformly sampled symmetry during training and age out normally as new single-position windows enter the retained history.
 
+Symmetry is also applied during MCTS inference. Every newly expanded interior leaf is evaluated in one uniformly random D4 orientation, after which its policy is mapped back to the tree's coordinates. This matches the search-time randomization used by AlphaGo Zero and adds no extra interior-leaf network evaluations. At each new search root, V3 averages distinct mapped-back policy predictions and value predictions across configurable orientations. Self-play defaults to two orientations for standard roots and all eight for the four placement roots; milestone, anchor, and local V3 evaluation default to all eight for both phases. Root averaging is repeated when a previously expanded child becomes the root, while existing visit and Q statistics are preserved.
+
+These settings reduce dependence on an arbitrary board orientation without changing the network architecture or replay format. `--no-search-symmetry-evaluation` provides an ablation, and the four root-count flags allow the compute/variance tradeoff to be changed independently for self-play and evaluation. Training telemetry records the configured counts, actual root evaluations and orientations, the average orientations per root, and the number of randomized interior evaluations.
+
 ## Training From Scratch
 
 The production V3 run starts from random weights. V2 weights, V2 replay data, and the earlier V3 bootstrap are not training inputs.
@@ -123,6 +127,8 @@ V3 uses AdamW with an initial learning rate of `3e-4` and weight decay of `1e-4`
 An older V3 Adam checkpoint can be resumed into AdamW: its compatible moment estimates are loaded, and the configured learning rate and weight decay are applied on the next training iteration. V2 retains Adam at `1e-3`, no weight decay, and no default schedule.
 
 ### Exploration
+
+Search-time symmetry handling is independent of exploration noise. Root Dirichlet noise or Gumbel sampling is applied only after the orientation-averaged prior has been mapped back to canonical board coordinates. Thus geometric averaging removes orientation artifacts from the network estimate while the configured search method still supplies intentional self-play variation.
 
 V3 separates the policy saved for training from the policy used to choose the self-play action:
 

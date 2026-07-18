@@ -349,6 +349,31 @@ class TestPitSantoriniOpening(unittest.TestCase):
         )
         validate_batched_arena_args(parser, args)
 
+    def test_placement_only_comparison_requires_empty_board_and_controller(self):
+        base = {
+            'placement_only_comparison': True,
+            'arena_batch_size': 4,
+            'opponent_checkpoint_folder': './temp/opponent',
+            'standard_controller_folder': './temp/controller',
+            'opening_source': 'game',
+            'architecture': 'v3',
+            'opponent_architecture': 'v3',
+            'action_temp': 0.0,
+        }
+        validate_batched_arena_args(ErrorParser(), self.make_opening_args(**base))
+
+        with self.assertRaisesRegex(ValueError, "opening-source game"):
+            validate_batched_arena_args(
+                ErrorParser(),
+                self.make_opening_args(**dict(base, opening_source='unique')),
+            )
+
+        with self.assertRaisesRegex(ValueError, "standard-controller-folder"):
+            validate_batched_arena_args(
+                ErrorParser(),
+                self.make_opening_args(**dict(base, standard_controller_folder=None)),
+            )
+
     def test_search_args_keep_contestant_modes_independent(self):
         puct = search_args(96, 'puct')
         gumbel = search_args(32, 'gumbel', 8, 0.0, 1.5)

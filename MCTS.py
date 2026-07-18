@@ -32,6 +32,14 @@ class MCTS():
         self.tactical_roots = {}
         self.raw_values = {}
         self.gumbel_roots = {}
+        self.symmetry_evaluated_roots = set()
+        self.pending_symmetry_roots = {}
+        self.symmetry_rng = None
+        self.symmetry_evaluation_stats = {
+            'root_evaluations': 0,
+            'root_orientations': 0,
+            'interior_evaluations': 0,
+        }
 
     def _arg(self, key, default=None):
         if hasattr(self.args, 'get'):
@@ -40,6 +48,69 @@ class MCTS():
 
     def usesGumbelSearch(self):
         return str(self._arg('searchMode', 'puct')).lower() == 'gumbel'
+
+    def usesSymmetryEvaluation(self):
+        """Whether neural leaf evaluations should be randomized over D4."""
+        return bool(self._arg('searchSymmetryEvaluation', False)) and hasattr(
+            self.game,
+            'getPolicySymmetryPermutation',
+        )
+
+    def _symmetry_generator(self):
+        return self.symmetry_rng if self.symmetry_rng is not None else np.random
+
+    def _root_symmetry_count(self, canonicalBoard):
+        count = int(self._arg('rootSymmetrySamples', 1))
+        if (
+            hasattr(self.game, 'isPlacementPhase')
+            and self.game.isPlacementPhase(canonicalBoard)
+        ):
+            count = int(self._arg('placementRootSymmetrySamples', count))
+        return max(1, min(8, count))
+
+    def _sample_symmetry_ids(self, count):
+        count = max(1, min(8, int(count)))
+        if count == 8:
+            return tuple(range(8))
+        generator = self._symmetry_generator()
+        return tuple(int(value) for value in generator.choice(8, size=count, replace=False))
+
+    @staticmethod
+    def _transform_board_symmetry(board, symmetry_id):
+        rotations = int(symmetry_id) // 2
+        flip = bool(int(symmetry_id) % 2)
+        transformed = np.rot90(np.asarray(board), rotations, axes=(-2, -1))
+        if flip:
+            transformed = np.flip(transformed, axis=-1)
+        return np.ascontiguousarray(transformed)
+
+    def _restore_policy_symmetry(self, policy, symmetry_id):
+        rotations = int(symmetry_id) // 2
+        flip = bool(int(symmetry_id) % 2)
+        old_indices, new_indices = self.game.getPolicySymmetryPermutation(
+            rotations,
+            flip,
+        )
+        restored = np.empty(self.game.getActionSize(), dtype=np.asarray(policy).dtype)
+        restored[old_indices] = np.asarray(policy)[new_indices]
+        return restored
+
+    def getLeafEvaluationBoards(self, leaf):
+        """Return the oriented network inputs needed to evaluate one selected leaf."""
+        symmetry_ids = leaf.get('eval_symmetry_ids')
+        if symmetry_ids is None:
+            return [leaf['board']]
+        return [
+            self._transform_board_symmetry(leaf['board'], symmetry_id)
+            for symmetry_id in symmetry_ids
+        ]
+
+    def drainSymmetryEvaluationStats(self):
+        """Return and reset search-symmetry counters for training telemetry."""
+        stats = dict(self.symmetry_evaluation_stats)
+        for key in self.symmetry_evaluation_stats:
+            self.symmetry_evaluation_stats[key] = 0
+        return stats
 
     @staticmethod
     def _gumbel_considered_visits(max_num_considered_actions, num_simulations):
@@ -66,9 +137,20 @@ class MCTS():
 
     def prepareSearchRoot(self, canonicalBoard, num_simulations, rng=None):
         """Register a root and its simulation budget for the selected search mode."""
+        state_key = self.game.stringRepresentation(canonicalBoard)
+        if rng is not None:
+            self.symmetry_rng = rng
+        if (
+            self.usesSymmetryEvaluation()
+            and state_key not in self.symmetry_evaluated_roots
+            and state_key not in self.pending_symmetry_roots
+        ):
+            self.pending_symmetry_roots[state_key] = self._sample_symmetry_ids(
+                self._root_symmetry_count(canonicalBoard)
+            )
+
         if not self.usesGumbelSearch():
             return
-        state_key = self.game.stringRepresentation(canonicalBoard)
         if state_key in self.gumbel_roots:
             return
         already_expanded = state_key in self.Ps
@@ -87,7 +169,11 @@ class MCTS():
             # expanded and can spend its entire budget on root edges.
             'edge_budget': max(
                 0,
-                int(num_simulations) - (0 if already_expanded else 1),
+                int(num_simulations) - (
+                    1
+                    if state_key in self.pending_symmetry_roots
+                    else (0 if already_expanded else 1)
+                ),
             ),
             'gumbel': None,
             'considered_visits': None,
@@ -325,7 +411,14 @@ class MCTS():
 
         leaf = self.select_leaf(canonicalBoard)
         if leaf['needs_eval']:
-            policy, value = self.nnet.predict(leaf['board'])
+            boards = self.getLeafEvaluationBoards(leaf)
+            if len(boards) == 1:
+                policy, value = self.nnet.predict(boards[0])
+            elif hasattr(self.nnet, 'predict_batch'):
+                policy, value = self.nnet.predict_batch(boards)
+            else:
+                predictions = [self.nnet.predict(board) for board in boards]
+                policy, value = zip(*predictions)
             return self.complete_search(leaf, policy, value)
         return self.complete_search(leaf)
 
@@ -338,6 +431,20 @@ class MCTS():
         """
         path = []
         board = canonicalBoard
+        root_key = self.game.stringRepresentation(canonicalBoard)
+
+        if root_key in self.pending_symmetry_roots:
+            symmetry_ids = self.pending_symmetry_roots.pop(root_key)
+            self.symmetry_evaluation_stats['root_evaluations'] += 1
+            self.symmetry_evaluation_stats['root_orientations'] += len(symmetry_ids)
+            return {
+                'needs_eval': True,
+                'path': path,
+                'board': board,
+                'state_key': root_key,
+                'eval_symmetry_ids': symmetry_ids,
+                'root_symmetry_refresh': True,
+            }
 
         while True:
             s = self.game.stringRepresentation(board)
@@ -354,12 +461,17 @@ class MCTS():
                 }
 
             if s not in self.Ps:
-                return {
+                leaf = {
                     'needs_eval': True,
                     'path': path,
                     'board': board,
                     'state_key': s,
                 }
+                if self.usesSymmetryEvaluation():
+                    symmetry_id = self._sample_symmetry_ids(1)
+                    leaf['eval_symmetry_ids'] = symmetry_id
+                    self.symmetry_evaluation_stats['interior_evaluations'] += 1
+                return leaf
 
             a, action_index = self._best_action(s)
             next_s, next_player = self.game.getNextState(board, 1, a)
@@ -372,9 +484,15 @@ class MCTS():
         path. For terminal leaves, policy/value are omitted.
         """
         if leaf['needs_eval']:
-            self._expand_leaf(leaf['state_key'], leaf['board'], policy)
+            policy, value = self._combine_symmetry_evaluations(leaf, policy, value)
+            if leaf.get('root_symmetry_refresh') and leaf['state_key'] in self.Ps:
+                self._refresh_leaf_policy(leaf['state_key'], leaf['board'], policy)
+            else:
+                self._expand_leaf(leaf['state_key'], leaf['board'], policy)
             propagated_value = float(value)
             self.raw_values[leaf['state_key']] = propagated_value
+            if leaf.get('root_symmetry_refresh'):
+                self.symmetry_evaluated_roots.add(leaf['state_key'])
         else:
             propagated_value = leaf['value']
 
@@ -385,6 +503,55 @@ class MCTS():
             propagated_value = parent_value
 
         return propagated_value
+
+    def _combine_symmetry_evaluations(self, leaf, policies, values):
+        symmetry_ids = leaf.get('eval_symmetry_ids')
+        if symmetry_ids is None:
+            policies = np.asarray(policies)
+            values = np.asarray(values).reshape(-1)
+            if policies.ndim > 1:
+                if len(policies) != 1:
+                    raise ValueError('A non-symmetry leaf requires exactly one policy.')
+                policies = policies[0]
+            if len(values) != 1:
+                raise ValueError('A non-symmetry leaf requires exactly one value.')
+            return policies, float(values[0])
+
+        policies = np.asarray(policies)
+        values = np.asarray(values, dtype=np.float64).reshape(-1)
+        if policies.ndim == 1:
+            policies = policies.reshape(1, -1)
+        if len(policies) != len(symmetry_ids) or len(values) != len(symmetry_ids):
+            raise ValueError(
+                'Expected {} symmetry evaluation(s), received {} policies and {} values.'.format(
+                    len(symmetry_ids),
+                    len(policies),
+                    len(values),
+                )
+            )
+        restored = [
+            self._restore_policy_symmetry(policy, symmetry_id)
+            for policy, symmetry_id in zip(policies, symmetry_ids)
+        ]
+        return np.mean(restored, axis=0), float(np.mean(values))
+
+    def _refresh_leaf_policy(self, s, canonicalBoard, policy):
+        """Replace an existing root prior/value estimate without resetting visits."""
+        valids = self.game.getValidMoves(canonicalBoard, 1)
+        actions = np.flatnonzero(valids).astype(np.int32)
+        root_actions = self.root_action_overrides.get(s)
+        if root_actions is not None:
+            actions = np.intersect1d(actions, root_actions, assume_unique=True).astype(np.int32)
+        if not np.array_equal(actions, self.As[s]):
+            raise ValueError('Root symmetry refresh changed the legal MCTS action set.')
+        legal_policy = np.asarray(policy, dtype=np.float32)[actions].copy()
+        policy_sum = float(np.sum(legal_policy))
+        if policy_sum > 0:
+            legal_policy /= policy_sum
+        else:
+            log.error('All valid moves were masked during root symmetry averaging.')
+            legal_policy.fill(1.0 / len(actions))
+        self.Ps[s] = legal_policy
 
     def _expand_leaf(self, s, canonicalBoard, policy):
         valids = self.Vs.get(s)

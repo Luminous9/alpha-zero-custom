@@ -223,6 +223,34 @@ def parse_args():
             'sample a random symmetry for every training draw. V3 defaults to on-the-fly.'
         ),
     )
+    parser.add_argument(
+        '--no-search-symmetry-evaluation',
+        action='store_true',
+        help=(
+            'Disable random D4 neural evaluation inside MCTS. V3 enables it by default; '
+            'this does not affect replay augmentation.'
+        ),
+    )
+    parser.add_argument(
+        '--root-symmetry-samples',
+        type=int,
+        help='Distinct D4 orientations averaged at standard self-play roots; V3 defaults to 2.',
+    )
+    parser.add_argument(
+        '--placement-root-symmetry-samples',
+        type=int,
+        help='Distinct D4 orientations averaged at placement self-play roots; V3 defaults to 8.',
+    )
+    parser.add_argument(
+        '--evaluation-root-symmetry-samples',
+        type=int,
+        help='Distinct D4 orientations averaged at standard evaluation roots; V3 defaults to 8.',
+    )
+    parser.add_argument(
+        '--evaluation-placement-root-symmetry-samples',
+        type=int,
+        help='Distinct D4 orientations averaged at placement evaluation roots; V3 defaults to 8.',
+    )
     parser.add_argument('--self-play-batch-size', type=int, default=1)
     parser.add_argument('--arena-batch-size', type=int)
     parser.add_argument(
@@ -327,6 +355,17 @@ def parse_args():
         parser.error('--learning-rate must be positive.')
     if args.weight_decay is not None and args.weight_decay < 0:
         parser.error('--weight-decay cannot be negative.')
+    for option, value in (
+        ('--root-symmetry-samples', args.root_symmetry_samples),
+        ('--placement-root-symmetry-samples', args.placement_root_symmetry_samples),
+        ('--evaluation-root-symmetry-samples', args.evaluation_root_symmetry_samples),
+        (
+            '--evaluation-placement-root-symmetry-samples',
+            args.evaluation_placement_root_symmetry_samples,
+        ),
+    ):
+        if value is not None and not 1 <= value <= 8:
+            parser.error('{} must be between 1 and 8.'.format(option))
     if not 0 < args.playout_cap_full_probability <= 1:
         parser.error('--playout-cap-full-probability must be greater than 0 and at most 1.')
     if args.playout_cap_randomization:
@@ -431,6 +470,30 @@ def build_coach_args(parsed_args):
         'tacticalShortcuts': not getattr(parsed_args, 'no_tactical_shortcuts', False),
         'compactReplay': getattr(parsed_args, 'compact_replay', False) or training_mode == 'latest',
         'symmetryAugmentation': symmetry_augmentation,
+        'searchSymmetryEvaluation': (
+            parsed_args.architecture == 'v3'
+            and not getattr(parsed_args, 'no_search_symmetry_evaluation', False)
+        ),
+        'rootSymmetrySamples': (
+            parsed_args.root_symmetry_samples
+            if parsed_args.root_symmetry_samples is not None
+            else (2 if parsed_args.architecture == 'v3' else 1)
+        ),
+        'placementRootSymmetrySamples': (
+            parsed_args.placement_root_symmetry_samples
+            if parsed_args.placement_root_symmetry_samples is not None
+            else (8 if parsed_args.architecture == 'v3' else 1)
+        ),
+        'evaluationRootSymmetrySamples': (
+            parsed_args.evaluation_root_symmetry_samples
+            if parsed_args.evaluation_root_symmetry_samples is not None
+            else (8 if parsed_args.architecture == 'v3' else 1)
+        ),
+        'evaluationPlacementRootSymmetrySamples': (
+            parsed_args.evaluation_placement_root_symmetry_samples
+            if parsed_args.evaluation_placement_root_symmetry_samples is not None
+            else (8 if parsed_args.architecture == 'v3' else 1)
+        ),
         'replayReuse': (
             parsed_args.replay_reuse
             if parsed_args.replay_reuse is not None
@@ -742,7 +805,7 @@ def main():
         )
 
     log.info(
-        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s search=%s gumbel_actions=%s gumbel_scale=%.2f gumbel_placement_scale=%.2f eval_gumbel_scale=%.2f eval_gumbel_placement_scale=%.2f tactical=%s playout_cap=%s full_prob=%.2f fast_sims=%s placement_full=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s max_train_steps=%s replay_reuse=%s validation=%.3f batch=%s symmetry=%s policy_target_temp=%s optimizer=%s lr=%g weight_decay=%g lr_schedule=%s checkpoint=%s',
+        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s search=%s gumbel_actions=%s gumbel_scale=%.2f gumbel_placement_scale=%.2f eval_gumbel_scale=%.2f eval_gumbel_placement_scale=%.2f tactical=%s playout_cap=%s full_prob=%.2f fast_sims=%s placement_full=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s max_train_steps=%s replay_reuse=%s validation=%.3f batch=%s symmetry=%s search_symmetry=%s root_symmetries=%s/%s eval_root_symmetries=%s/%s policy_target_temp=%s optimizer=%s lr=%g weight_decay=%g lr_schedule=%s checkpoint=%s',
         parsed_args.architecture,
         parsed_args.preset,
         coach_args.numIters,
@@ -768,6 +831,11 @@ def main():
         coach_args.validationFraction,
         nnet_args.batch_size,
         coach_args.symmetryAugmentation,
+        coach_args.searchSymmetryEvaluation,
+        coach_args.rootSymmetrySamples,
+        coach_args.placementRootSymmetrySamples,
+        coach_args.evaluationRootSymmetrySamples,
+        coach_args.evaluationPlacementRootSymmetrySamples,
         coach_args.policyTargetTemperature,
         nnet_args.optimizer,
         nnet_args.lr,
