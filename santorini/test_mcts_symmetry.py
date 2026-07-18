@@ -108,6 +108,45 @@ class TestMCTSSymmetryEvaluation(unittest.TestCase):
         self.assertEqual(mcts.Nsas[state_key][0], 3)
         self.assertEqual(mcts.Qs[state_key][0], 0.75)
 
+    def test_root_refresh_preserves_surviving_edges_when_tactics_prune_actions(self):
+        board = self.game.getInitBoard()
+        mcts = MCTS(self.game, UniformNetwork(self.game), self.args)
+        mcts.prepareSearchRoot(board, 4)
+        leaf = mcts.select_leaf(board)
+        policy = np.full(self.game.getActionSize(), 1.0 / self.game.getActionSize())
+        mcts.complete_search(
+            leaf,
+            self._transformed_policies(policy, leaf['eval_symmetry_ids']),
+            np.zeros(8),
+        )
+        state_key = self.game.stringRepresentation(board)
+        existing_actions = mcts.As[state_key].copy()
+        retained_actions = existing_actions[[1, 3]]
+        removed_action = int(existing_actions[0])
+        mcts.Nsas[state_key][1] = 4
+        mcts.Nsas[state_key][3] = 2
+        mcts.Qs[state_key][1] = 0.5
+        mcts.Qs[state_key][3] = -0.25
+        mcts.Nsa[(state_key, removed_action)] = 3
+        mcts.Qsa[(state_key, removed_action)] = 0.75
+
+        mcts.root_action_overrides[state_key] = retained_actions
+        mcts.symmetry_evaluated_roots.remove(state_key)
+        mcts.prepareSearchRoot(board, 4)
+        refresh = mcts.select_leaf(board)
+        mcts.complete_search(
+            refresh,
+            self._transformed_policies(policy, refresh['eval_symmetry_ids']),
+            np.zeros(8),
+        )
+
+        np.testing.assert_array_equal(mcts.As[state_key], retained_actions)
+        np.testing.assert_array_equal(mcts.Nsas[state_key], [4, 2])
+        np.testing.assert_allclose(mcts.Qs[state_key], [0.5, -0.25])
+        self.assertEqual(mcts.Ns[state_key], 6)
+        self.assertNotIn((state_key, removed_action), mcts.Nsa)
+        self.assertNotIn((state_key, removed_action), mcts.Qsa)
+
     def test_standard_root_sampling_is_seeded_and_interior_uses_one_orientation(self):
         standard_board = np.zeros((2, 5, 5), dtype=np.int8)
         standard_board[0, 0, 0] = 1

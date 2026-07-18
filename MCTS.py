@@ -542,8 +542,30 @@ class MCTS():
         root_actions = self.root_action_overrides.get(s)
         if root_actions is not None:
             actions = np.intersect1d(actions, root_actions, assume_unique=True).astype(np.int32)
-        if not np.array_equal(actions, self.As[s]):
-            raise ValueError('Root symmetry refresh changed the legal MCTS action set.')
+        existing_actions = self.As[s]
+        if not np.array_equal(actions, existing_actions):
+            retained_indices = np.searchsorted(existing_actions, actions)
+            if (
+                len(retained_indices) != len(actions)
+                or np.any(retained_indices >= len(existing_actions))
+                or not np.array_equal(existing_actions[retained_indices], actions)
+            ):
+                raise ValueError(
+                    'Root symmetry refresh introduced actions absent from the existing MCTS node.'
+                )
+
+            removed_actions = np.setdiff1d(
+                existing_actions,
+                actions,
+                assume_unique=True,
+            )
+            self.As[s] = actions
+            self.Qs[s] = self.Qs[s][retained_indices].copy()
+            self.Nsas[s] = self.Nsas[s][retained_indices].copy()
+            self.Ns[s] = int(np.sum(self.Nsas[s]))
+            for action in removed_actions:
+                self.Qsa.pop((s, int(action)), None)
+                self.Nsa.pop((s, int(action)), None)
         legal_policy = np.asarray(policy, dtype=np.float32)[actions].copy()
         policy_sum = float(np.sum(legal_policy))
         if policy_sum > 0:

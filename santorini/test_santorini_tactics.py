@@ -211,6 +211,39 @@ class TestSantoriniTactics(unittest.TestCase):
             _, _, build = decoded_action(self.game, board, int(action_id))
             self.assertEqual(build, (1, 3))
 
+    def test_symmetry_refresh_prunes_an_existing_interior_node_to_forced_blocks(self):
+        board = self.empty_board()
+        board[0, 0, 0] = 0
+        board[0, 0, 1] = 2
+        board[0, 1, 2] = -1
+        board[1, 1, 2] = 2
+        board[1, 1, 3] = 3
+        nnet = CountingUniformNNet(self.game)
+        mcts = MCTS(self.game, nnet, dotdict({
+            'numMCTSSims': 4,
+            'cpuct': 1.0,
+            'searchSymmetryEvaluation': True,
+            'rootSymmetrySamples': 2,
+        }))
+
+        # Reproduce a node first encountered below another root: it is expanded
+        # before root-only tactical pruning has been applied.
+        interior_leaf = mcts.select_leaf(board)
+        interior_policy, interior_value = nnet.predict(
+            mcts.getLeafEvaluationBoards(interior_leaf)[0]
+        )
+        mcts.complete_search(interior_leaf, interior_policy, interior_value)
+        state_key = self.game.stringRepresentation(board)
+        original_actions = mcts.As[state_key].copy()
+
+        tactical = mcts.prepareTacticalRoot(board)
+        policy = np.asarray(mcts.getActionProb(board, temp=1))
+
+        self.assertEqual(tactical['kind'], 'forced_block_pruned')
+        self.assertLess(len(mcts.As[state_key]), len(original_actions))
+        self.assertEqual(set(mcts.As[state_key]), set(map(int, tactical['actions'])))
+        self.assertAlmostEqual(float(policy.sum()), 1.0)
+
     def test_tactical_shortcut_proves_loss_when_every_move_allows_a_win(self):
         board = np.zeros((2, 5, 5), dtype=int)
         board[0, 4, 0] = 1
