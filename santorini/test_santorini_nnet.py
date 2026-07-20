@@ -301,6 +301,87 @@ class TestSantoriniNNet(unittest.TestCase):
             )
             np.testing.assert_allclose(transformed_policies[symmetry_id], expected_policy)
 
+    def test_symmetry_consistency_losses_map_policies_back_to_source_coordinates(self):
+        game = SantoriniGame(5, sequential_placement=True)
+        nnet = V3NNetWrapper(game)
+        generator = torch.Generator().manual_seed(31)
+        primary_logits = torch.randn(
+            8,
+            game.getActionSize(),
+            generator=generator,
+        )
+        primary_log_policies = torch.log_softmax(primary_logits, dim=1)
+        encoded = nnet.encode_board(game.getInitBoard())
+        encoded_boards = np.repeat(encoded[None, ...], 8, axis=0)
+        transformed_boards, transformed_log_policies = nnet._apply_symmetries(
+            encoded_boards,
+            primary_log_policies.detach().numpy(),
+            np.arange(8),
+        )
+        del transformed_boards
+        primary_values = torch.linspace(-0.5, 0.5, 8)
+
+        policy_js, value_mse = nnet._symmetry_consistency_losses(
+            primary_log_policies,
+            primary_values,
+            torch.from_numpy(transformed_log_policies),
+            primary_values.clone(),
+            np.arange(8),
+        )
+
+        np.testing.assert_allclose(policy_js.detach().numpy(), 0.0, atol=1e-7)
+        np.testing.assert_allclose(value_mse.detach().numpy(), 0.0, atol=1e-7)
+
+    def test_v3_training_reports_phase_aware_symmetry_consistency(self):
+        old_values = {
+            key: getattr(nnet_args, key)
+            for key in (
+                'epochs',
+                'batch_size',
+                'max_train_steps',
+                'replay_reuse',
+                'on_the_fly_symmetry',
+                'symmetry_consistency_fraction',
+                'symmetry_consistency_policy_weight',
+                'symmetry_consistency_value_weight',
+            )
+        }
+        nnet_args.epochs = 1
+        nnet_args.batch_size = 4
+        nnet_args.max_train_steps = 1
+        nnet_args.replay_reuse = None
+        nnet_args.on_the_fly_symmetry = True
+        nnet_args.symmetry_consistency_fraction = 0.5
+        nnet_args.symmetry_consistency_policy_weight = 0.05
+        nnet_args.symmetry_consistency_value_weight = 0.05
+        try:
+            game = SantoriniGame(5, sequential_placement=True)
+            nnet = V3NNetWrapper(game)
+            board = game.getInitBoard()
+            policy = game.getValidMoves(board, 1).astype(np.float32)
+            policy /= policy.sum()
+
+            metrics = nnet.train([
+                (board, policy, 1.0),
+                (board, policy, -1.0),
+            ])
+
+            self.assertEqual(metrics['training_steps'], 1)
+            self.assertEqual(metrics['symmetry_consistency_examples'], 2)
+            self.assertEqual(metrics['placement_symmetry_consistency_examples'], 2)
+            self.assertEqual(metrics['standard_symmetry_consistency_examples'], 0)
+            self.assertGreaterEqual(metrics['symmetry_consistency_policy_js'], 0.0)
+            self.assertGreaterEqual(metrics['symmetry_consistency_value_mse'], 0.0)
+            self.assertAlmostEqual(
+                metrics['iteration_total_loss'],
+                metrics['iteration_policy_loss']
+                + metrics['iteration_value_loss']
+                + metrics['symmetry_consistency_weighted_loss'],
+            )
+        finally:
+            for key, value in old_values.items():
+                setattr(nnet_args, key, value)
+
     def test_on_the_fly_step_budget_uses_virtual_symmetry_examples(self):
         old_epochs = nnet_args.epochs
         old_batch_size = nnet_args.batch_size

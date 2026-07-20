@@ -34,6 +34,9 @@ args = dotdict({
     'max_train_steps': None,
     'replay_reuse': None,
     'on_the_fly_symmetry': False,
+    'symmetry_consistency_fraction': 0.0,
+    'symmetry_consistency_policy_weight': 0.0,
+    'symmetry_consistency_value_weight': 0.0,
     'quiet': False,
 })
 
@@ -97,6 +100,13 @@ class NNetWrapper(NeuralNet):
         self.net_args.max_train_steps = args.max_train_steps
         self.net_args.replay_reuse = args.replay_reuse
         self.net_args.on_the_fly_symmetry = args.on_the_fly_symmetry
+        self.net_args.symmetry_consistency_fraction = args.symmetry_consistency_fraction
+        self.net_args.symmetry_consistency_policy_weight = (
+            args.symmetry_consistency_policy_weight
+        )
+        self.net_args.symmetry_consistency_value_weight = (
+            args.symmetry_consistency_value_weight
+        )
         self.net_args.quiet = args.quiet
         return self.net_args
 
@@ -131,6 +141,13 @@ class NNetWrapper(NeuralNet):
             parameter_group['lr'] = learning_rate
             parameter_group['weight_decay'] = runtime_args.weight_decay
         encoded_boards, target_pis, target_vs = self._encode_training_examples(examples)
+        placement_examples = np.asarray([
+            bool(
+                hasattr(self.game, 'isPlacementPhase')
+                and self.game.isPlacementPhase(example[0])
+            )
+            for example in examples
+        ], dtype=bool)
 
         symmetry_multiplier = 8 if runtime_args.on_the_fly_symmetry else 1
         virtual_example_count = len(examples) * symmetry_multiplier
@@ -169,6 +186,15 @@ class NNetWrapper(NeuralNet):
         completed_steps = 0
         iteration_pi_losses = AverageMeter()
         iteration_v_losses = AverageMeter()
+        iteration_consistency_pi_losses = AverageMeter()
+        iteration_consistency_v_losses = AverageMeter()
+        phase_consistency = {
+            phase: {
+                'policy': AverageMeter(),
+                'value': AverageMeter(),
+            }
+            for phase in ('placement', 'standard')
+        }
         for epoch in range(runtime_args.epochs):
             steps_this_epoch = min(epoch_batch_count, training_steps - completed_steps)
             if steps_this_epoch <= 0:
@@ -176,6 +202,8 @@ class NNetWrapper(NeuralNet):
             self.nnet.train()
             pi_losses = AverageMeter()
             v_losses = AverageMeter()
+            consistency_pi_losses = AverageMeter()
+            consistency_v_losses = AverageMeter()
 
             if runtime_args.quiet:
                 log.info(
@@ -202,19 +230,120 @@ class NNetWrapper(NeuralNet):
                         batch_pis,
                         symmetry_ids,
                     )
+                consistency_count = self._symmetry_consistency_count(
+                    runtime_args.batch_size,
+                    runtime_args.symmetry_consistency_fraction,
+                    runtime_args.symmetry_consistency_policy_weight,
+                    runtime_args.symmetry_consistency_value_weight,
+                )
+                consistency_indices = None
+                consistency_symmetry_ids = None
+                secondary_boards = None
+                if consistency_count:
+                    consistency_indices = np.random.choice(
+                        runtime_args.batch_size,
+                        size=consistency_count,
+                        replace=False,
+                    )
+                    # Apply a non-identity transform relative to the primary
+                    # orientation so every paired example provides a signal.
+                    consistency_symmetry_ids = np.random.randint(
+                        1,
+                        8,
+                        size=consistency_count,
+                    )
+                    secondary_boards, _ = self._apply_symmetries(
+                        batch_boards[consistency_indices],
+                        batch_pis[consistency_indices],
+                        consistency_symmetry_ids,
+                    )
                 boards = torch.from_numpy(batch_boards)
                 batch_target_pis = torch.from_numpy(batch_pis)
                 batch_target_vs = torch.from_numpy(target_vs[sample_ids])
+                consistency_boards = (
+                    torch.from_numpy(secondary_boards)
+                    if secondary_boards is not None else None
+                )
 
                 if self.net_args.cuda:
                     boards = boards.contiguous().cuda()
                     batch_target_pis = batch_target_pis.contiguous().cuda()
                     batch_target_vs = batch_target_vs.contiguous().cuda()
+                    if consistency_boards is not None:
+                        consistency_boards = consistency_boards.contiguous().cuda()
 
-                out_pi, out_v = self.nnet(boards)
+                if consistency_boards is not None:
+                    combined_boards = torch.cat((boards, consistency_boards), dim=0)
+                    combined_pi, combined_v = self.nnet(combined_boards)
+                    out_pi = combined_pi[:boards.size(0)]
+                    out_v = combined_v[:boards.size(0)]
+                    secondary_pi = combined_pi[boards.size(0):]
+                    secondary_v = combined_v[boards.size(0):]
+                else:
+                    out_pi, out_v = self.nnet(boards)
                 l_pi = self.loss_pi(batch_target_pis, out_pi)
                 l_v = self.loss_v(batch_target_vs, out_v)
-                total_loss = l_pi + l_v
+                consistency_pi = torch.zeros((), device=out_pi.device)
+                consistency_v = torch.zeros((), device=out_pi.device)
+                if consistency_boards is not None:
+                    consistency_tensor_indices = torch.as_tensor(
+                        consistency_indices,
+                        dtype=torch.long,
+                        device=out_pi.device,
+                    )
+                    per_example_pi, per_example_v = self._symmetry_consistency_losses(
+                        out_pi[consistency_tensor_indices],
+                        out_v[consistency_tensor_indices],
+                        secondary_pi,
+                        secondary_v,
+                        consistency_symmetry_ids,
+                    )
+                    consistency_pi = per_example_pi.mean()
+                    consistency_v = per_example_v.mean()
+                    consistency_pi_losses.update(
+                        consistency_pi.item(),
+                        consistency_count,
+                    )
+                    consistency_v_losses.update(
+                        consistency_v.item(),
+                        consistency_count,
+                    )
+                    iteration_consistency_pi_losses.update(
+                        consistency_pi.item(),
+                        consistency_count,
+                    )
+                    iteration_consistency_v_losses.update(
+                        consistency_v.item(),
+                        consistency_count,
+                    )
+                    selected_placement = placement_examples[
+                        sample_ids[consistency_indices]
+                    ]
+                    for phase, mask in (
+                        ('placement', selected_placement),
+                        ('standard', ~selected_placement),
+                    ):
+                        phase_count = int(np.count_nonzero(mask))
+                        if not phase_count:
+                            continue
+                        torch_mask = torch.as_tensor(
+                            mask,
+                            dtype=torch.bool,
+                            device=per_example_pi.device,
+                        )
+                        phase_consistency[phase]['policy'].update(
+                            per_example_pi[torch_mask].mean().item(),
+                            phase_count,
+                        )
+                        phase_consistency[phase]['value'].update(
+                            per_example_v[torch_mask].mean().item(),
+                            phase_count,
+                        )
+                weighted_consistency = (
+                    runtime_args.symmetry_consistency_policy_weight * consistency_pi
+                    + runtime_args.symmetry_consistency_value_weight * consistency_v
+                )
+                total_loss = l_pi + l_v + weighted_consistency
 
                 pi_losses.update(l_pi.item(), boards.size(0))
                 v_losses.update(l_v.item(), boards.size(0))
@@ -240,14 +369,63 @@ class NNetWrapper(NeuralNet):
             metrics = {
                 'policy_loss': float(pi_losses.avg),
                 'value_loss': float(v_losses.avg),
-                'total_loss': float(pi_losses.avg + v_losses.avg),
+                'total_loss': float(
+                    pi_losses.avg
+                    + v_losses.avg
+                    + runtime_args.symmetry_consistency_policy_weight
+                    * consistency_pi_losses.avg
+                    + runtime_args.symmetry_consistency_value_weight
+                    * consistency_v_losses.avg
+                ),
                 'final_segment_policy_loss': float(pi_losses.avg),
                 'final_segment_value_loss': float(v_losses.avg),
-                'final_segment_total_loss': float(pi_losses.avg + v_losses.avg),
+                'final_segment_symmetry_consistency_policy_js': float(
+                    consistency_pi_losses.avg
+                ),
+                'final_segment_symmetry_consistency_value_mse': float(
+                    consistency_v_losses.avg
+                ),
+                'final_segment_total_loss': float(
+                    pi_losses.avg
+                    + v_losses.avg
+                    + runtime_args.symmetry_consistency_policy_weight
+                    * consistency_pi_losses.avg
+                    + runtime_args.symmetry_consistency_value_weight
+                    * consistency_v_losses.avg
+                ),
                 'iteration_policy_loss': float(iteration_pi_losses.avg),
                 'iteration_value_loss': float(iteration_v_losses.avg),
                 'iteration_total_loss': float(
-                    iteration_pi_losses.avg + iteration_v_losses.avg
+                    iteration_pi_losses.avg
+                    + iteration_v_losses.avg
+                    + runtime_args.symmetry_consistency_policy_weight
+                    * iteration_consistency_pi_losses.avg
+                    + runtime_args.symmetry_consistency_value_weight
+                    * iteration_consistency_v_losses.avg
+                ),
+                'symmetry_consistency_fraction': float(
+                    runtime_args.symmetry_consistency_fraction
+                ),
+                'symmetry_consistency_policy_weight': float(
+                    runtime_args.symmetry_consistency_policy_weight
+                ),
+                'symmetry_consistency_value_weight': float(
+                    runtime_args.symmetry_consistency_value_weight
+                ),
+                'symmetry_consistency_examples': int(
+                    iteration_consistency_pi_losses.count
+                ),
+                'symmetry_consistency_policy_js': float(
+                    iteration_consistency_pi_losses.avg
+                ),
+                'symmetry_consistency_value_mse': float(
+                    iteration_consistency_v_losses.avg
+                ),
+                'symmetry_consistency_weighted_loss': float(
+                    runtime_args.symmetry_consistency_policy_weight
+                    * iteration_consistency_pi_losses.avg
+                    + runtime_args.symmetry_consistency_value_weight
+                    * iteration_consistency_v_losses.avg
                 ),
                 'epoch': epoch + 1,
                 'training_segments_completed': epoch + 1,
@@ -282,13 +460,30 @@ class NNetWrapper(NeuralNet):
                 'weight_decay': float(runtime_args.weight_decay),
                 'optimizer': str(runtime_args.optimizer),
             }
+            for phase in ('placement', 'standard'):
+                phase_policy = phase_consistency[phase]['policy']
+                phase_value = phase_consistency[phase]['value']
+                metrics.update({
+                    '{}_symmetry_consistency_examples'.format(phase): int(
+                        phase_policy.count
+                    ),
+                    '{}_symmetry_consistency_policy_js'.format(phase): (
+                        float(phase_policy.avg) if phase_policy.count else None
+                    ),
+                    '{}_symmetry_consistency_value_mse'.format(phase): (
+                        float(phase_value.avg) if phase_value.count else None
+                    ),
+                })
         if runtime_args.quiet:
             log.info(
-                'Finished optimizer iteration: steps=%s pi_loss=%.4f v_loss=%.4f total_loss=%.4f',
+                'Finished optimizer iteration: steps=%s pi_loss=%.4f v_loss=%.4f '
+                'symmetry_js=%.4f symmetry_v=%.4f total_loss=%.4f',
                 completed_steps,
                 iteration_pi_losses.avg,
                 iteration_v_losses.avg,
-                iteration_pi_losses.avg + iteration_v_losses.avg,
+                iteration_consistency_pi_losses.avg,
+                iteration_consistency_v_losses.avg,
+                metrics.get('iteration_total_loss', 0.0),
             )
         validation_metrics = self._validation_metrics(
             validation_examples if validation_examples is not None else []
@@ -397,6 +592,89 @@ class NNetWrapper(NeuralNet):
             metrics['validation_policy_loss'] + metrics['validation_value_loss']
         )
         return metrics
+
+    @staticmethod
+    def _symmetry_consistency_count(
+        batch_size,
+        fraction,
+        policy_weight,
+        value_weight,
+    ):
+        if float(fraction) <= 0 or (
+            float(policy_weight) <= 0 and float(value_weight) <= 0
+        ):
+            return 0
+        return min(
+            int(batch_size),
+            max(1, int(round(int(batch_size) * float(fraction)))),
+        )
+
+    def _restore_policy_symmetries(self, transformed_log_policies, symmetry_ids):
+        """Map a D4-transformed log-policy batch back to its source coordinates."""
+        symmetry_ids = np.asarray(symmetry_ids, dtype=np.int8)
+        if len(transformed_log_policies) != len(symmetry_ids):
+            raise ValueError('Policies and symmetry ids must have matching lengths.')
+        restored = torch.empty_like(transformed_log_policies)
+        for symmetry_id in range(8):
+            batch_indices = np.flatnonzero(symmetry_ids == symmetry_id)
+            if len(batch_indices) == 0:
+                continue
+            rotations = symmetry_id // 2
+            flip = bool(symmetry_id % 2)
+            old_indices, new_indices = self.game.getPolicySymmetryPermutation(
+                rotations,
+                flip,
+            )
+            batch_indices = torch.as_tensor(
+                batch_indices,
+                dtype=torch.long,
+                device=transformed_log_policies.device,
+            )
+            old_indices = torch.as_tensor(
+                old_indices,
+                dtype=torch.long,
+                device=transformed_log_policies.device,
+            )
+            new_indices = torch.as_tensor(
+                new_indices,
+                dtype=torch.long,
+                device=transformed_log_policies.device,
+            )
+            restored[
+                batch_indices[:, None],
+                old_indices[None, :],
+            ] = transformed_log_policies[
+                batch_indices[:, None],
+                new_indices[None, :],
+            ]
+        return restored
+
+    def _symmetry_consistency_losses(
+        self,
+        primary_log_policies,
+        primary_values,
+        transformed_log_policies,
+        transformed_values,
+        symmetry_ids,
+    ):
+        """Return per-position policy JS and value MSE after mapping D4 outputs back."""
+        restored_log_policies = self._restore_policy_symmetries(
+            transformed_log_policies,
+            symmetry_ids,
+        )
+        primary_probabilities = torch.exp(primary_log_policies)
+        restored_probabilities = torch.exp(restored_log_policies)
+        mixture = 0.5 * (primary_probabilities + restored_probabilities)
+        log_mixture = torch.log(torch.clamp(mixture, min=1e-30))
+        policy_js = 0.5 * torch.sum(
+            primary_probabilities * (primary_log_policies - log_mixture)
+            + restored_probabilities * (restored_log_policies - log_mixture),
+            dim=1,
+        )
+        value_mse = (
+            primary_values.reshape(-1) - transformed_values.reshape(-1)
+        ) ** 2
+        return policy_js, value_mse
 
     def _apply_symmetries(self, encoded_boards, target_pis, symmetry_ids):
         """Apply selected D4 symmetries to an encoded board/policy batch."""

@@ -124,6 +124,59 @@ class TestMainSantoriniOpenings(unittest.TestCase):
         self.assertEqual(coach_args.rootSymmetrySamples, 1)
         self.assertEqual(coach_args.placementRootSymmetrySamples, 1)
 
+    def test_symmetry_telemetry_defaults_to_fixed_v3_suite_only(self):
+        with patch('sys.argv', ['main_santorini.py', '--architecture', 'v3']):
+            v3_args = build_coach_args(parse_args())
+        with patch('sys.argv', ['main_santorini.py', '--architecture', 'v2']):
+            v2_args = build_coach_args(parse_args())
+
+        self.assertEqual(v3_args.symmetryTelemetrySampleSize, 64)
+        self.assertEqual(v2_args.symmetryTelemetrySampleSize, 0)
+
+    def test_exact_inference_reuse_defaults_to_v3_only(self):
+        with patch('sys.argv', ['main_santorini.py', '--architecture', 'v3']):
+            v3_args = build_coach_args(parse_args())
+        with patch('sys.argv', ['main_santorini.py', '--architecture', 'v2']):
+            v2_args = build_coach_args(parse_args())
+        with patch(
+            'sys.argv',
+            ['main_santorini.py', '--architecture', 'v3', '--no-inference-deduplication'],
+        ):
+            disabled_args = build_coach_args(parse_args())
+
+        self.assertTrue(v3_args.inferenceDeduplication)
+        self.assertEqual(v3_args.inferenceCacheSize, 4096)
+        self.assertFalse(v2_args.inferenceDeduplication)
+        self.assertEqual(v2_args.inferenceCacheSize, 0)
+        self.assertFalse(disabled_args.inferenceDeduplication)
+
+    def test_symmetry_consistency_configuration_is_parsed(self):
+        with patch(
+            'sys.argv',
+            [
+                'main_santorini.py',
+                '--architecture', 'v3',
+                '--symmetry-consistency-fraction', '0.4',
+                '--symmetry-consistency-policy-weight', '0.08',
+                '--symmetry-consistency-value-weight', '0.03',
+            ],
+        ):
+            parsed = parse_args()
+
+        self.assertEqual(parsed.symmetry_consistency_fraction, 0.4)
+        self.assertEqual(parsed.symmetry_consistency_policy_weight, 0.08)
+        self.assertEqual(parsed.symmetry_consistency_value_weight, 0.03)
+
+    def test_symmetry_consistency_fraction_must_be_a_probability(self):
+        with patch(
+            'sys.argv',
+            [
+                'main_santorini.py',
+                '--symmetry-consistency-fraction', '1.1',
+            ],
+        ), self.assertRaises(SystemExit):
+            parse_args()
+
     def test_learning_rate_schedule_parser(self):
         self.assertEqual(parse_lr_schedule('200:0.0001,400:0.00003'), [(200, 1e-4), (400, 3e-5)])
         self.assertEqual(parse_lr_schedule('none'), [])

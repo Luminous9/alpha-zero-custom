@@ -8,6 +8,10 @@ import os
 import numpy as np
 
 from santorini.SantoriniGame import SantoriniGame
+from santorini.SantoriniSymmetryDiagnostics import (
+    position_metrics,
+    transformations,
+)
 from santorini.pytorch.NNet import build_nnet
 
 
@@ -28,11 +32,6 @@ def parse_opening(signature):
     return sides['p1'], sides['p2']
 
 
-def transform_board(board, rotations, flip):
-    transformed = np.rot90(board, rotations, axes=(-2, -1))
-    return np.flip(transformed, axis=-1).copy() if flip else transformed.copy()
-
-
 def transform_policy(game, policy, rotations, flip):
     old_indices, new_indices = game.getPolicySymmetryPermutation(rotations, flip)
     transformed = np.zeros_like(policy)
@@ -50,30 +49,29 @@ def normalized_legal_policy(game, board, policy):
 
 
 def state_symmetry_metrics(game, nnet, board):
-    base_policy, _ = nnet.predict(board)
+    variants = transformations(board)
+    policies, values = nnet.predict_batch([variant[2] for variant in variants])
+    base_policy = policies[0]
     base_legal, legal_mass = normalized_legal_policy(game, board, base_policy)
     transforms = []
-    for rotations in range(4):
-        for flip in (False, True):
-            if rotations == 0 and not flip:
-                continue
-            transformed_board = transform_board(board, rotations, flip)
-            transformed_policy, _ = nnet.predict(transformed_board)
-            transformed_legal, transformed_mass = normalized_legal_policy(
-                game,
-                transformed_board,
-                transformed_policy,
-            )
-            expected = transform_policy(game, base_legal, rotations, flip)
-            difference = np.abs(transformed_legal - expected)
-            transforms.append({
-                'rotations': rotations,
-                'flip': flip,
-                'total_variation': float(0.5 * difference.sum()),
-                'max_action_probability_error': float(difference.max()),
-                'legal_policy_mass': transformed_mass,
-            })
-    return {
+    for index, (rotations, flip, transformed_board) in enumerate(variants[1:], start=1):
+        transformed_legal, transformed_mass = normalized_legal_policy(
+            game,
+            transformed_board,
+            policies[index],
+        )
+        expected = transform_policy(game, base_legal, rotations, flip)
+        difference = np.abs(transformed_legal - expected)
+        transforms.append({
+            'rotations': rotations,
+            'flip': flip,
+            'total_variation': float(0.5 * difference.sum()),
+            'max_action_probability_error': float(difference.max()),
+            'legal_policy_mass': transformed_mass,
+            'value': float(values[index]),
+            'value_absolute_error_from_base': float(abs(values[index] - values[0])),
+        })
+    result = {
         'legal_policy_mass': legal_mass,
         'mean_total_variation': float(np.mean([item['total_variation'] for item in transforms])),
         'max_total_variation': float(np.max([item['total_variation'] for item in transforms])),
@@ -83,6 +81,8 @@ def state_symmetry_metrics(game, nnet, board):
         'transforms': transforms,
         '_base_legal_policy': base_legal,
     }
+    result.update(position_metrics(game, variants, policies, values))
+    return result
 
 
 def placement_grid(game, policy):
@@ -134,12 +134,17 @@ def print_report(result):
     print('\n{} ({})'.format(result['name'], result['checkpoint']))
     for state in result['states']:
         print(
-            '  {}: mean TV {:.4f}, max TV {:.4f}, max action error {:.4f}, legal mass {:.4f}'.format(
+            '  {}: mean TV {:.4f}, max TV {:.4f}, max action error {:.4f}, legal mass {:.4f}; '
+            'value mean/std/range {:.4f}/{:.4f}/{:.4f}, sign disagreement {}'.format(
                 state['name'],
                 state['mean_total_variation'],
                 state['max_total_variation'],
                 state['max_action_probability_error'],
                 state['legal_policy_mass'],
+                state['value_orbit_mean'],
+                state['value_orbit_std'],
+                state['value_orbit_range'],
+                state['value_sign_disagreement'],
             )
         )
         if state['placed_workers'] == 0:

@@ -84,9 +84,13 @@ Board transformations also transform the spatial action origin. This applies to 
 
 V3 stores one canonical board/policy example per played position. Each time an example is sampled for training, one of the eight rotation/reflection symmetries is selected uniformly and applied to both the encoded board and the spatial policy. This preserves geometric augmentation without materializing eight replay entries per position. Older replay files that already contain expanded symmetries remain valid: their examples receive another uniformly sampled symmetry during training and age out normally as new single-position windows enter the retained history.
 
+V3 also applies an explicit symmetry-consistency regularizer. By default, 25% of each optimizer batch is evaluated in a second, different D4 orientation during the same forward pass. The second policy is mapped back to the first orientation and trained to agree through a symmetric Jensen-Shannon loss; the two value predictions receive a mean-squared agreement loss. Both terms have weight `0.05`, in addition to the unchanged supervised policy cross-entropy and outcome-value losses. This adds approximately 25% to the network examples evaluated per optimizer step but does not increase the step budget, replay size, or checkpoint size. It is compatible with existing V3 checkpoints and replay files.
+
 Symmetry is also applied during MCTS inference. Every newly expanded interior leaf is evaluated in one uniformly random D4 orientation, after which its policy is mapped back to the tree's coordinates. This matches the search-time randomization used by AlphaGo Zero and adds no extra interior-leaf network evaluations. At each new search root, V3 averages distinct mapped-back policy predictions and value predictions across configurable orientations. Self-play defaults to two orientations for standard roots and all eight for the four placement roots; milestone, anchor, and local V3 evaluation default to all eight for both phases. Root averaging is repeated when a previously expanded child becomes the root, while existing visit and Q statistics are preserved.
 
-These settings reduce dependence on an arbitrary board orientation without changing the network architecture or replay format. `--no-search-symmetry-evaluation` provides an ablation, and the four root-count flags allow the compute/variance tradeoff to be changed independently for self-play and evaluation. Training telemetry records the configured counts, actual root evaluations and orientations, the average orientations per root, and the number of randomized interior evaluations.
+To recover much of the added inference cost, V3 deduplicates byte-identical network inputs before every batched prediction and expands the results back into their original order. A bounded 4,096-entry cache also reuses exact-board predictions reached at different simulation steps during the same move, then is discarded before the next move. This is exact-input reuse, not symmetry canonicalization: rotated boards with different bytes are still evaluated independently, so their disagreement remains visible and all configured orientation averages are preserved. The empty board's eight nominal orientations collapse to one inference, as do duplicate leaves reached by parallel self-play games. `--no-inference-deduplication` provides an ablation and `--inference-cache-size` controls the per-move memory bound.
+
+These settings reduce dependence on an arbitrary board orientation without changing the network architecture or replay format. `--symmetry-consistency-fraction`, `--symmetry-consistency-policy-weight`, and `--symmetry-consistency-value-weight` configure or disable the training regularizer. `--no-search-symmetry-evaluation` provides a search-time ablation, and the four root-count flags allow the compute/variance tradeoff to be changed independently for self-play and evaluation. Training telemetry records global and placement/standard consistency losses and sample counts, configured search counts, root orientations and randomized interior evaluations, plus requested/executed/reused neural evaluations and the exact-input reuse rate.
 
 ## Training From Scratch
 
@@ -327,6 +331,32 @@ On a sample of replay boards, V3 records metrics separately for placement and st
 
 Entropy should be interpreted diagnostically rather than as a score that must always decrease. Some positions are genuinely ambiguous, and an abrupt change matters more than a universally monotonic trend.
 
+### Fixed D4 symmetry diagnostics
+
+V3 constructs a fixed 64-position suite from held-out replay data, deduplicated across all eight D4 orientations and stratified across placement, early (`0-5` builds), middle (`6-15` builds), and late (`16+` builds) positions. Duplicate observations of the same network-visible position contribute their mean outcome target. The suite is saved atomically as `symmetry_telemetry_suite.npz`, exported with the other Kaggle resume artifacts, and reused unchanged after a resume. `--symmetry-telemetry-sample-size` changes its size or disables it with `0`.
+
+After each optimizer iteration, the raw network evaluates all eight orientations of every suite position. Policy outputs are mapped back to one coordinate system before comparison. TensorBoard and `telemetry.jsonl` report policy orbit total variation and top-action changes, plus these value-head measurements globally and for each stage:
+
+- mean, 95th-percentile, and maximum value range across the eight orientations;
+- mean and 95th-percentile orbit standard deviation;
+- the fraction of positions whose orientations disagree on the predicted winner;
+- single-orientation MSE against the replay outcome target;
+- MSE of the eight-orientation mean against that target; and
+- symmetry-excess MSE, the difference between those last two quantities.
+
+The excess MSE isolates error caused by orientation dependence: mathematically it is the mean within-orbit value variance. A high ordinary value MSE with low excess MSE means the value estimate is consistently wrong, while high excess MSE means rotating the same position materially changes the estimate. Sign disagreement is intentionally a stricter warning signal but can be noisy when every prediction is close to zero, so it should be interpreted alongside orbit range.
+
+The standalone placement and standard-play diagnostic scripts expose the same value-orbit measurements for checkpoint comparisons. Placement output includes all eight values for each placement prefix; standard-play JSON retains the five widest-range boards per stage with all eight orientation values, making individual outliers reproducible. The standard script additionally retains its deterministic searched-action test:
+
+```bash
+.venv/bin/python diagnose_santorini_placement_symmetry.py \
+  --model run11=./temp/santorini_v3_run11_gumbel/latest.pth.tar
+
+.venv/bin/python diagnose_santorini_standard_symmetry.py \
+  --model run11=./temp/santorini_v3_run11_gumbel/latest.pth.tar \
+  --replay ./temp/santorini_v3_run11_gumbel/latest.examples.npz
+```
+
 ### Self-play target metrics
 
 For the replay labels produced during each iteration, V3 records the mean policy-target entropy, mean number of visited actions, and one-hot target rate separately for placement and standard positions. These measurements verify that the temperature-1 training targets remain informative after standard action selection switches to temperature zero.
@@ -444,6 +474,9 @@ The baseline long-run configuration is:
 | Maximum optimizer steps | 1,500 per iteration |
 | Training batch size | 512 |
 | Symmetry augmentation | Random on-the-fly rotation/reflection |
+| Symmetry consistency | 25% paired draws; policy/value weights 0.05/0.05 |
+| Fixed D4 telemetry suite | 64 held-out positions x 8 orientations |
+| Exact inference reuse | Enabled; 4,096 cached predictions per move |
 | Replay history | 20 iterations |
 | Milestone interval | 20 iterations |
 | Standard milestone games | 40 on 20 fixed completed openings |

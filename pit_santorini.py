@@ -43,6 +43,8 @@ def search_args(
     search_symmetry_evaluation=False,
     root_symmetry_samples=8,
     placement_root_symmetry_samples=8,
+    inference_deduplication=False,
+    inference_cache_size=4096,
 ):
     if gumbel_placement_scale is None:
         gumbel_placement_scale = gumbel_scale
@@ -57,6 +59,8 @@ def search_args(
         'searchSymmetryEvaluation': bool(search_symmetry_evaluation),
         'rootSymmetrySamples': int(root_symmetry_samples),
         'placementRootSymmetrySamples': int(placement_root_symmetry_samples),
+        'inferenceDeduplication': bool(inference_deduplication),
+        'inferenceCacheSize': int(inference_cache_size),
     })
 
 
@@ -76,6 +80,8 @@ class NetworkMCTSPlayer:
         search_symmetry_evaluation=False,
         root_symmetry_samples=8,
         placement_root_symmetry_samples=8,
+        inference_deduplication=False,
+        inference_cache_size=4096,
     ):
         self.game = game
         self.nnet = nnet
@@ -88,6 +94,8 @@ class NetworkMCTSPlayer:
             search_symmetry_evaluation=search_symmetry_evaluation,
             root_symmetry_samples=root_symmetry_samples,
             placement_root_symmetry_samples=placement_root_symmetry_samples,
+            inference_deduplication=inference_deduplication,
+            inference_cache_size=inference_cache_size,
         )
         self.action_temp = action_temp
         self.mcts = None
@@ -120,6 +128,8 @@ class NeuralMCTSPlayer(NetworkMCTSPlayer):
         search_symmetry_evaluation=False,
         root_symmetry_samples=8,
         placement_root_symmetry_samples=8,
+        inference_deduplication=False,
+        inference_cache_size=4096,
     ):
         nnet = build_nnet(game, architecture)
         nnet.load_checkpoint(checkpoint_folder, checkpoint_file)
@@ -135,6 +145,8 @@ class NeuralMCTSPlayer(NetworkMCTSPlayer):
             search_symmetry_evaluation=search_symmetry_evaluation,
             root_symmetry_samples=root_symmetry_samples,
             placement_root_symmetry_samples=placement_root_symmetry_samples,
+            inference_deduplication=inference_deduplication,
+            inference_cache_size=inference_cache_size,
         )
 
 
@@ -478,6 +490,8 @@ def main():
         default=8,
         help='Distinct D4 orientations averaged at placement V3 evaluation roots.',
     )
+    parser.add_argument('--no-inference-deduplication', action='store_true')
+    parser.add_argument('--inference-cache-size', type=int, default=4096)
     parser.add_argument('--checkpoint-folder', default='./temp/santorini_quick/')
     parser.add_argument('--checkpoint-file', default='best.pth.tar')
     parser.add_argument('--architecture', choices=['v1', 'v2', 'v3'], default='v2')
@@ -591,6 +605,8 @@ def main():
         parser.error('--root-symmetry-samples must be between 1 and 8.')
     if not 1 <= args.placement_root_symmetry_samples <= 8:
         parser.error('--placement-root-symmetry-samples must be between 1 and 8.')
+    if args.inference_cache_size < 0:
+        parser.error('--inference-cache-size cannot be negative.')
     if args.gumbel_placement_scale is None:
         args.gumbel_placement_scale = args.gumbel_scale
     if args.opponent_gumbel_placement_scale is None:
@@ -652,6 +668,10 @@ def main():
             ),
             root_symmetry_samples=args.root_symmetry_samples,
             placement_root_symmetry_samples=args.placement_root_symmetry_samples,
+            inference_deduplication=(
+                args.architecture == 'v3' and not args.no_inference_deduplication
+            ),
+            inference_cache_size=args.inference_cache_size,
         )
         opponent_player_obj = NeuralMCTSPlayer(
             game,
@@ -670,6 +690,11 @@ def main():
             ),
             root_symmetry_samples=args.root_symmetry_samples,
             placement_root_symmetry_samples=args.placement_root_symmetry_samples,
+            inference_deduplication=(
+                args.opponent_architecture == 'v3'
+                and not args.no_inference_deduplication
+            ),
+            inference_cache_size=args.inference_cache_size,
         )
         player1 = nnet_player_obj
         player2 = opponent_player_obj
@@ -699,6 +724,10 @@ def main():
             ),
             root_symmetry_samples=args.root_symmetry_samples,
             placement_root_symmetry_samples=args.placement_root_symmetry_samples,
+            inference_deduplication=(
+                args.architecture == 'v3' and not args.no_inference_deduplication
+            ),
+            inference_cache_size=args.inference_cache_size,
         )
         player2 = build_baseline(game, args.baseline)
         contestant2_name = args.baseline
@@ -729,6 +758,7 @@ def main():
 
     seat_stats = None
     placement_diagnostics = None
+    inference_diagnostics = None
     use_batched_arena = batched_arena_requested(args)
     if use_batched_arena:
         print("Using batched arena with batch size {}.".format(args.arena_batch_size))
@@ -743,6 +773,10 @@ def main():
             ),
             root_symmetry_samples=args.root_symmetry_samples,
             placement_root_symmetry_samples=args.placement_root_symmetry_samples,
+            inference_deduplication=(
+                args.architecture == 'v3' and not args.no_inference_deduplication
+            ),
+            inference_cache_size=args.inference_cache_size,
         )
         player2_args = search_args(
             args.opponent_sims or args.sims,
@@ -756,6 +790,11 @@ def main():
             ),
             root_symmetry_samples=args.root_symmetry_samples,
             placement_root_symmetry_samples=args.placement_root_symmetry_samples,
+            inference_deduplication=(
+                args.opponent_architecture == 'v3'
+                and not args.no_inference_deduplication
+            ),
+            inference_cache_size=args.inference_cache_size,
         )
         standard_controller_nnet = None
         standard_controller_args = None
@@ -788,6 +827,11 @@ def main():
                 ),
                 root_symmetry_samples=args.root_symmetry_samples,
                 placement_root_symmetry_samples=args.placement_root_symmetry_samples,
+                inference_deduplication=(
+                    args.standard_controller_architecture == 'v3'
+                    and not args.no_inference_deduplication
+                ),
+                inference_cache_size=args.inference_cache_size,
             )
             print(
                 'Placement-only comparison: both sides switch after placement to {} '
@@ -818,6 +862,15 @@ def main():
         )
         nnet_wins, opponent_wins, draws = arena.playGames(args.games)
         placement_diagnostics = arena.placementDiagnostics()
+        inference_diagnostics = arena.inferenceDiagnostics()
+        if inference_diagnostics['requested']:
+            print(
+                'Inference reuse: {} / {} requested evaluations ({:.1f}%).'.format(
+                    inference_diagnostics['reused'],
+                    inference_diagnostics['requested'],
+                    100.0 * inference_diagnostics['reuse_rate'],
+                )
+            )
     elif opening_position is not None:
         nnet_wins, opponent_wins, draws, seat_stats = play_opening_games_by_seat(
             player1,
@@ -924,6 +977,10 @@ def main():
             ),
             'standard_controller_gumbel_scale': args.standard_controller_gumbel_scale,
             'arena_batch_size': args.arena_batch_size,
+            'inference_deduplication': bool(
+                uses_v3 and not args.no_inference_deduplication
+            ),
+            'inference_cache_size': args.inference_cache_size,
             'fresh': args.fresh,
             'contestant1_name': contestant1_name,
             'contestant2_name': contestant2_name,
@@ -955,6 +1012,8 @@ def main():
                 result['seat_stats'] = seat_stats
         if placement_diagnostics is not None:
             result['learned_placement_diagnostics'] = placement_diagnostics
+        if inference_diagnostics is not None:
+            result['inference_diagnostics'] = inference_diagnostics
         json_dir = os.path.dirname(args.json_out)
         if json_dir:
             os.makedirs(json_dir, exist_ok=True)

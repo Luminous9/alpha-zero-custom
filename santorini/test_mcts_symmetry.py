@@ -79,6 +79,30 @@ class TestMCTSSymmetryEvaluation(unittest.TestCase):
         self.assertEqual(stats['root_orientations'], 8)
         self.assertEqual(stats['interior_evaluations'], 0)
 
+    def test_identical_placement_orientations_are_inferred_once(self):
+        board = self.game.getInitBoard()
+        network = UniformNetwork(self.game)
+        network.batch_sizes = []
+        original_predict_batch = network.predict_batch
+
+        def recording_predict_batch(boards):
+            network.batch_sizes.append(len(boards))
+            return original_predict_batch(boards)
+
+        network.predict_batch = recording_predict_batch
+        args = dotdict(dict(self.args))
+        args['inferenceDeduplication'] = True
+        mcts = MCTS(self.game, network, args)
+        mcts.prepareSearchRoot(board, 4)
+
+        mcts.search(board)
+
+        self.assertEqual(network.batch_sizes, [1])
+        stats = mcts.drainSymmetryEvaluationStats()
+        self.assertEqual(stats['inference_requested'], 8)
+        self.assertEqual(stats['inference_executed'], 1)
+        self.assertEqual(stats['inference_reused'], 7)
+
     def test_root_refresh_preserves_existing_search_statistics(self):
         board = self.game.getInitBoard()
         mcts = MCTS(self.game, UniformNetwork(self.game), self.args)

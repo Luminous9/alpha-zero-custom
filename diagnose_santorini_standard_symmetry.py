@@ -10,6 +10,7 @@ import numpy as np
 from MCTS import MCTS
 from pit_santorini import search_args
 from santorini.SantoriniGame import SantoriniGame
+from santorini.SantoriniSymmetryDiagnostics import position_metrics
 from santorini.pytorch.NNet import build_nnet
 
 
@@ -112,7 +113,11 @@ def raw_position_metrics(game, nnet, board):
             'top_action_consistent': observed_action == expected_action,
             'value_absolute_error': float(abs(float(values[index]) - float(values[0]))),
         })
-    return comparisons
+    return {
+        'board': np.asarray(board).tolist(),
+        'comparisons': comparisons,
+        'orbit': position_metrics(game, variants, policies, values),
+    }
 
 
 def searched_actions(game, nnet, boards, simulations):
@@ -163,7 +168,14 @@ def search_position_metrics(game, nnet, board, simulations):
 
 
 def aggregate_raw(position_results):
-    comparisons = [item for position in position_results for item in position]
+    comparisons = [
+        item
+        for position in position_results
+        for item in position['comparisons']
+    ]
+    orbits = [position['orbit'] for position in position_results]
+    value_stds = np.asarray([item['value_orbit_std'] for item in orbits])
+    value_ranges = np.asarray([item['value_orbit_range'] for item in orbits])
     return {
         'positions': len(position_results),
         'transform_comparisons': len(comparisons),
@@ -177,7 +189,7 @@ def aggregate_raw(position_results):
             item['top_action_consistent'] for item in comparisons
         ])),
         'positions_with_any_raw_top_action_change': int(sum(
-            not all(item['top_action_consistent'] for item in position)
+            not all(item['top_action_consistent'] for item in position['comparisons'])
             for position in position_results
         )),
         'mean_value_absolute_error': float(np.mean([
@@ -185,6 +197,20 @@ def aggregate_raw(position_results):
         ])),
         'max_value_absolute_error': float(np.max([
             item['value_absolute_error'] for item in comparisons
+        ])),
+        'mean_value_orbit_std': float(value_stds.mean()),
+        'p95_value_orbit_std': float(np.percentile(value_stds, 95)),
+        'mean_value_orbit_range': float(value_ranges.mean()),
+        'p95_value_orbit_range': float(np.percentile(value_ranges, 95)),
+        'max_value_orbit_range': float(value_ranges.max()),
+        'value_sign_disagreement_rate': float(np.mean([
+            item['value_sign_disagreement'] for item in orbits
+        ])),
+        'mean_orbit_policy_total_variation': float(np.mean([
+            item['policy_mean_orbit_total_variation'] for item in orbits
+        ])),
+        'orbit_top_action_consistency_rate': float(np.mean([
+            item['policy_top_action_consistency'] for item in orbits
         ])),
     }
 
@@ -202,6 +228,25 @@ def diagnose_model(game, model_spec, sampled, raw_count, search_count, simulatio
             for board in boards[:search_count]
         ]
         metrics = aggregate_raw(raw_results)
+        worst_value_orbits = sorted(
+            raw_results,
+            key=lambda item: item['orbit']['value_orbit_range'],
+            reverse=True,
+        )[:min(5, len(raw_results))]
+        metrics['worst_value_orbits'] = [
+            {
+                'board': item['board'],
+                'value_orbit_mean': item['orbit']['value_orbit_mean'],
+                'value_orbit_std': item['orbit']['value_orbit_std'],
+                'value_orbit_range': item['orbit']['value_orbit_range'],
+                'value_sign_disagreement': item['orbit']['value_sign_disagreement'],
+                'orientation_values': item['orbit']['orientation_values'],
+            }
+            for item in worst_value_orbits
+        ]
+        metrics['positions_with_value_sign_disagreement'] = int(sum(
+            item['orbit']['value_sign_disagreement'] for item in raw_results
+        ))
         search_comparisons = [value for position in search_results for value in position]
         metrics.update({
             'search_positions': len(search_results),
@@ -214,7 +259,8 @@ def diagnose_model(game, model_spec, sampled, raw_count, search_count, simulatio
         stages[stage] = metrics
         print(
             '{} {}: raw top {:.1f}% consistent (changed on {}/{} positions), '
-            'policy TV mean/max {:.3f}/{:.3f}, value error mean/max {:.3f}/{:.3f}; '
+            'policy TV mean/max {:.3f}/{:.3f}, value base error mean/max {:.3f}/{:.3f}, '
+            'value orbit std/range/p95-range {:.3f}/{:.3f}/{:.3f}, sign disagreement {:.1f}%; '
             'search top {:.1f}% consistent (changed on {}/{})'.format(
                 name,
                 stage,
@@ -225,6 +271,10 @@ def diagnose_model(game, model_spec, sampled, raw_count, search_count, simulatio
                 metrics['max_policy_total_variation'],
                 metrics['mean_value_absolute_error'],
                 metrics['max_value_absolute_error'],
+                metrics['mean_value_orbit_std'],
+                metrics['mean_value_orbit_range'],
+                metrics['p95_value_orbit_range'],
+                100.0 * metrics['value_sign_disagreement_rate'],
                 100.0 * metrics['search_top_action_consistency_rate'],
                 metrics['positions_with_any_search_top_action_change'],
                 metrics['search_positions'],

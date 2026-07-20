@@ -282,6 +282,35 @@ class TestBatchedMCTSArena(unittest.TestCase):
         self.assertIn(16, player1_nnet.batch_sizes)
         self.assertIn(16, player2_nnet.batch_sizes)
 
+    def test_batched_arena_deduplicates_identical_symmetry_inputs(self):
+        game = SymmetricOneMoveGame()
+        player1_nnet = FourActionBatchCountingNNet()
+        player2_nnet = FourActionBatchCountingNNet()
+        arena = BatchedMCTSArena(
+            game,
+            player1_nnet,
+            player2_nnet,
+            dotdict({
+                'numMCTSSims': 1,
+                'cpuct': 1.0,
+                'searchSymmetryEvaluation': True,
+                'rootSymmetrySamples': 8,
+                'placementRootSymmetrySamples': 8,
+                'inferenceDeduplication': True,
+                'inferenceCacheSize': 32,
+            }),
+            batch_size=2,
+            quiet=True,
+        )
+
+        self.assertEqual(arena.playGames(4), (2, 2, 0))
+        self.assertEqual(player1_nnet.batch_sizes, [1])
+        self.assertEqual(player2_nnet.batch_sizes, [1])
+        diagnostics = arena.inferenceDiagnostics()
+        self.assertEqual(diagnostics['requested'], 32)
+        self.assertEqual(diagnostics['executed'], 2)
+        self.assertEqual(diagnostics['reused'], 30)
+
     def test_seeded_placement_sampling_is_reproducible_and_varied(self):
         seeds = list(range(20))
 

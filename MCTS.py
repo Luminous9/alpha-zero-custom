@@ -3,6 +3,8 @@ import math
 
 import numpy as np
 
+from santorini.SantoriniInference import predict_batch_deduplicated
+
 EPS = 1e-8
 
 log = logging.getLogger(__name__)
@@ -39,6 +41,10 @@ class MCTS():
             'root_evaluations': 0,
             'root_orientations': 0,
             'interior_evaluations': 0,
+            'inference_batches': 0,
+            'inference_requested': 0,
+            'inference_executed': 0,
+            'inference_reused': 0,
         }
 
     def _arg(self, key, default=None):
@@ -111,6 +117,11 @@ class MCTS():
         for key in self.symmetry_evaluation_stats:
             self.symmetry_evaluation_stats[key] = 0
         return stats
+
+    def _record_inference_stats(self, stats):
+        self.symmetry_evaluation_stats['inference_batches'] += 1
+        for key in ('requested', 'executed', 'reused'):
+            self.symmetry_evaluation_stats['inference_{}'.format(key)] += int(stats[key])
 
     @staticmethod
     def _gumbel_considered_visits(max_num_considered_actions, num_simulations):
@@ -412,7 +423,10 @@ class MCTS():
         leaf = self.select_leaf(canonicalBoard)
         if leaf['needs_eval']:
             boards = self.getLeafEvaluationBoards(leaf)
-            if len(boards) == 1:
+            if bool(self._arg('inferenceDeduplication', False)):
+                policy, value, stats = predict_batch_deduplicated(self.nnet, boards)
+                self._record_inference_stats(stats)
+            elif len(boards) == 1:
                 policy, value = self.nnet.predict(boards[0])
             elif hasattr(self.nnet, 'predict_batch'):
                 policy, value = self.nnet.predict_batch(boards)

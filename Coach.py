@@ -17,6 +17,7 @@ from tqdm import tqdm
 from Arena import Arena
 from BatchedArena import BatchedMCTSArena
 from MCTS import MCTS
+from santorini.SantoriniInference import predict_batch_deduplicated
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -32,6 +33,18 @@ try:
     from santorini.SantoriniTelemetry import ReferenceSuite
 except ImportError:
     ReferenceSuite = None
+
+try:
+    from santorini.SantoriniSymmetryDiagnostics import (
+        aggregate_positions,
+        build_diagnostic_suite,
+        evaluate_suite,
+        flatten_aggregate,
+        suite_fingerprint,
+    )
+except ImportError:
+    aggregate_positions = build_diagnostic_suite = evaluate_suite = None
+    flatten_aggregate = suite_fingerprint = None
 
 try:
     from santorini.SantoriniOpeningBook import SantoriniRandomOpeningSampler
@@ -87,6 +100,7 @@ class Coach():
         self._policy_target_stats = self._newPolicyTargetStats()
         self._playout_cap_stats = self._newPlayoutCapStats()
         self._tactical_stats = self._newTacticalStats()
+        self._symmetry_telemetry_suite = None
         self._reference_suite = None
         reference_suite_path = self._arg('referenceSuite', None)
         if reference_suite_path:
@@ -273,7 +287,18 @@ class Coach():
             'root_evaluations': 0,
             'root_orientations': 0,
             'interior_evaluations': 0,
+            'inference_batches': 0,
+            'inference_requested': 0,
+            'inference_executed': 0,
+            'inference_reused': 0,
         }
+
+    def _recordInferenceStats(self, stats):
+        if not hasattr(self, '_search_symmetry_stats'):
+            self._search_symmetry_stats = self._newSearchSymmetryStats()
+        self._search_symmetry_stats['inference_batches'] += 1
+        for key in ('requested', 'executed', 'reused'):
+            self._search_symmetry_stats['inference_{}'.format(key)] += int(stats[key])
 
     def _recordSearchSymmetryStats(self, mcts):
         if not hasattr(mcts, 'drainSymmetryEvaluationStats'):
@@ -284,12 +309,22 @@ class Coach():
             self._search_symmetry_stats[key] += int(value)
 
     def _searchSymmetryTelemetry(self):
-        if not bool(self._arg('searchSymmetryEvaluation', False)):
-            return {}
         stats = self._search_symmetry_stats
+        metrics = {
+            'inference_batches': int(stats['inference_batches']),
+            'inference_requested_evaluations': int(stats['inference_requested']),
+            'inference_executed_evaluations': int(stats['inference_executed']),
+            'inference_reused_evaluations': int(stats['inference_reused']),
+            'inference_reuse_rate': (
+                float(stats['inference_reused'] / stats['inference_requested'])
+                if stats['inference_requested'] else None
+            ),
+        }
+        if not bool(self._arg('searchSymmetryEvaluation', False)):
+            return metrics if bool(self._arg('inferenceDeduplication', False)) else {}
         root_evaluations = int(stats['root_evaluations'])
         root_orientations = int(stats['root_orientations'])
-        return {
+        metrics.update({
             'search_symmetry_root_evaluations': root_evaluations,
             'search_symmetry_root_orientations': root_orientations,
             'search_symmetry_average_root_orientations': (
@@ -299,7 +334,8 @@ class Coach():
             'search_symmetry_interior_evaluations': int(
                 stats['interior_evaluations']
             ),
-        }
+        })
+        return metrics
 
     @staticmethod
     def _prepareTacticalRoot(mcts, canonical_board):
@@ -567,6 +603,7 @@ class Coach():
         max_simulations = max(
             int(episode.get('searchSims', self.args.numMCTSSims)) for episode in episodes
         )
+        inference_cache = {}
         for simulation_index in range(max_simulations):
             pending = []
 
@@ -596,7 +633,15 @@ class Coach():
                 start = len(boards)
                 boards.extend(leaf_boards)
                 evaluation_ranges.append((start, len(boards)))
-            if hasattr(self.nnet, 'predict_batch'):
+            if bool(self._arg('inferenceDeduplication', False)):
+                policies, values, inference_stats = predict_batch_deduplicated(
+                    self.nnet,
+                    boards,
+                    cache=inference_cache,
+                    max_cache_entries=int(self._arg('inferenceCacheSize', 4096)),
+                )
+                self._recordInferenceStats(inference_stats)
+            elif hasattr(self.nnet, 'predict_batch'):
                 policies, values = self.nnet.predict_batch(boards)
             else:
                 predictions = [self.nnet.predict(board) for board in boards]
@@ -696,6 +741,7 @@ class Coach():
                 trainExamples.extend(e)
             replay_example_count = len(trainExamples)
             trainExamples, validationExamples = self._splitTrainingValidation(trainExamples)
+            self._prepareSymmetryTelemetrySuite(validationExamples)
             freshExamples = (
                 list(iterationTrainExamples)
                 if iterationTrainExamples is not None
@@ -735,6 +781,28 @@ class Coach():
                     'policy_target_temperature': self._arg('policyTargetTemperature', None),
                     'max_train_steps': getattr(getattr(self.nnet, 'net_args', None), 'max_train_steps', None),
                     'symmetry_augmentation': self._arg('symmetryAugmentation', 'expanded'),
+                    'symmetry_consistency_fraction': getattr(
+                        getattr(self.nnet, 'net_args', None),
+                        'symmetry_consistency_fraction',
+                        0.0,
+                    ),
+                    'symmetry_consistency_policy_weight': getattr(
+                        getattr(self.nnet, 'net_args', None),
+                        'symmetry_consistency_policy_weight',
+                        0.0,
+                    ),
+                    'symmetry_consistency_value_weight': getattr(
+                        getattr(self.nnet, 'net_args', None),
+                        'symmetry_consistency_value_weight',
+                        0.0,
+                    ),
+                    'symmetry_telemetry_sample_size': int(
+                        self._arg('symmetryTelemetrySampleSize', 0)
+                    ),
+                    'inference_deduplication': bool(
+                        self._arg('inferenceDeduplication', False)
+                    ),
+                    'inference_cache_size': int(self._arg('inferenceCacheSize', 0)),
                     'search_symmetry_evaluation': self._arg(
                         'searchSymmetryEvaluation', False
                     ),
@@ -1093,6 +1161,10 @@ class Coach():
             'search_symmetry_evaluation': bool(
                 self._arg('searchSymmetryEvaluation', False)
             ),
+            'inference_deduplication': bool(
+                self._arg('inferenceDeduplication', False)
+            ),
+            'inference_cache_size': int(self._arg('inferenceCacheSize', 0)),
             'root_symmetry_samples': int(self._arg('rootSymmetrySamples', 1)),
             'placement_root_symmetry_samples': int(
                 self._arg('placementRootSymmetrySamples', 1)
@@ -1121,6 +1193,8 @@ class Coach():
         payload.update(self._playoutCapTelemetry())
         payload.update(self._tacticalTelemetry())
         payload.update(self._searchSymmetryTelemetry())
+        symmetry_metrics = self._symmetryTelemetry()
+        payload.update(symmetry_metrics)
         payload.update(self._policyTelemetry())
         if self._reference_suite is not None:
             payload.update(self._reference_suite.evaluate(self.game, self.nnet))
@@ -1136,6 +1210,117 @@ class Coach():
                 if key != 'iteration' and isinstance(value, (int, float)) and value is not None:
                     self._writer.add_scalar(key, value, iteration)
             self._writer.flush()
+
+        if symmetry_metrics and self._quiet():
+            log.info(
+                'Held-out D4 value symmetry: placement range=%s sign_disagreement=%s; '
+                'standard range=%s sign_disagreement=%s',
+                self._formatTelemetryMetric(
+                    symmetry_metrics.get('symmetry_placement_value_mean_orbit_range')
+                ),
+                self._formatTelemetryMetric(
+                    symmetry_metrics.get('symmetry_placement_value_sign_disagreement_rate')
+                ),
+                self._formatTelemetryMetric(
+                    symmetry_metrics.get('symmetry_all_standard_value_mean_orbit_range')
+                ),
+                self._formatTelemetryMetric(
+                    symmetry_metrics.get('symmetry_all_standard_value_sign_disagreement_rate')
+                ),
+            )
+        requested_inferences = payload.get('inference_requested_evaluations', 0)
+        if requested_inferences and self._quiet():
+            log.info(
+                'Exact inference reuse: %s / %s evaluation(s) reused (%.1f%%); %s executed.',
+                payload['inference_reused_evaluations'],
+                requested_inferences,
+                100.0 * payload['inference_reuse_rate'],
+                payload['inference_executed_evaluations'],
+            )
+
+    @staticmethod
+    def _formatTelemetryMetric(value):
+        return 'n/a' if value is None else '{:.4f}'.format(float(value))
+
+    def _symmetryTelemetrySuitePath(self):
+        return os.path.join(self.args.checkpoint, 'symmetry_telemetry_suite.npz')
+
+    def _prepareSymmetryTelemetrySuite(self, validation_examples):
+        requested = int(self._arg('symmetryTelemetrySampleSize', 0))
+        if requested <= 0 or getattr(self, '_symmetry_telemetry_suite', None) is not None:
+            return
+        if build_diagnostic_suite is None:
+            raise RuntimeError('Symmetry telemetry support is unavailable.')
+
+        path = self._symmetryTelemetrySuitePath()
+        if os.path.isfile(path):
+            with np.load(path, allow_pickle=False) as payload:
+                stored_requested = int(payload.get('requested_sample_size', len(payload['boards'])))
+                if stored_requested == requested:
+                    self._symmetry_telemetry_suite = {
+                        'boards': payload['boards'].astype(int),
+                        'targets': payload['targets'].astype(np.float32),
+                        'buckets': payload['buckets'].astype(str),
+                    }
+                    return
+
+        boards, targets, buckets = build_diagnostic_suite(
+            self.game,
+            validation_examples,
+            requested,
+        )
+        if not boards:
+            return
+        suite = {
+            'boards': np.asarray(boards, dtype=np.int8),
+            'targets': np.asarray(targets, dtype=np.float32),
+            'buckets': np.asarray(buckets, dtype='<U10'),
+        }
+        os.makedirs(self.args.checkpoint, exist_ok=True)
+        temporary_path = path + '.tmp.npz'
+        np.savez_compressed(
+            temporary_path,
+            requested_sample_size=np.asarray(requested, dtype=np.int32),
+            **suite
+        )
+        os.replace(temporary_path, path)
+        self._symmetry_telemetry_suite = suite
+        log.info(
+            'Created fixed D4 telemetry suite with %s held-out position(s): %s',
+            len(boards),
+            path,
+        )
+
+    def _symmetryTelemetry(self):
+        suite = getattr(self, '_symmetry_telemetry_suite', None)
+        if not suite:
+            return {}
+        with preserve_rng_state():
+            result = evaluate_suite(
+                self.game,
+                self.nnet,
+                suite['boards'],
+                targets=suite['targets'],
+                buckets=suite['buckets'],
+            )
+        aggregate = dict(result['aggregate'])
+        standard_positions = [
+            position for position in result['positions']
+            if position['bucket'] != 'placement'
+        ]
+        aggregate['all_standard'] = aggregate_positions(standard_positions)
+        metrics = flatten_aggregate(aggregate)
+        metrics.update({
+            'symmetry_telemetry_requested_positions': int(
+                self._arg('symmetryTelemetrySampleSize', 0)
+            ),
+            'symmetry_telemetry_suite_fingerprint': suite_fingerprint(
+                suite['boards'],
+                suite['targets'],
+                suite['buckets'],
+            ),
+        })
+        return metrics
 
     def _recordPlacementChoice(self, ply, action):
         square = int(action) // self.game.local_action_size

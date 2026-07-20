@@ -56,6 +56,19 @@ class BatchCountingNNet:
         return policies, values
 
 
+class UniformSantoriniNNet:
+    def __init__(self, game):
+        self.game = game
+
+    def predict_batch(self, boards):
+        policies = np.full(
+            (len(boards), self.game.getActionSize()),
+            1.0 / self.game.getActionSize(),
+            dtype=np.float32,
+        )
+        return policies, np.zeros(len(boards), dtype=np.float32)
+
+
 class RecordingTinyGame(TinyGame):
     def __init__(self):
         self.actions = []
@@ -94,6 +107,41 @@ class FixedOpeningSampler:
 
 
 class TestSantoriniCoachExamples(unittest.TestCase):
+    def test_fixed_symmetry_telemetry_suite_is_saved_reloaded_and_evaluated(self):
+        game = SantoriniGame(5, sequential_placement=True)
+        policy = game.getValidMoves(game.getInitBoard(), 1).astype(np.float32)
+        policy /= policy.sum()
+        examples = [
+            (game.getInitBoard(), policy, 1.0),
+            (game.getInitBoard(), policy, -1.0),
+        ]
+        with tempfile.TemporaryDirectory() as checkpoint:
+            coach = object.__new__(Coach)
+            coach.game = game
+            coach.nnet = UniformSantoriniNNet(game)
+            coach.args = dotdict({
+                'checkpoint': checkpoint,
+                'symmetryTelemetrySampleSize': 4,
+                'quiet': False,
+            })
+            coach._symmetry_telemetry_suite = None
+            coach._prepareSymmetryTelemetrySuite(examples)
+
+            suite_path = os.path.join(checkpoint, 'symmetry_telemetry_suite.npz')
+            self.assertTrue(os.path.isfile(suite_path))
+            metrics = coach._symmetryTelemetry()
+            self.assertEqual(metrics['symmetry_placement_positions'], 1)
+            self.assertEqual(metrics['symmetry_placement_value_mean_orbit_range'], 0.0)
+            self.assertIn('symmetry_telemetry_suite_fingerprint', metrics)
+
+            reloaded = object.__new__(Coach)
+            reloaded.game = game
+            reloaded.nnet = UniformSantoriniNNet(game)
+            reloaded.args = coach.args
+            reloaded._symmetry_telemetry_suite = None
+            reloaded._prepareSymmetryTelemetrySuite([])
+            self.assertEqual(len(reloaded._symmetry_telemetry_suite['boards']), 1)
+
     def test_search_symmetry_stats_are_drained_into_scalar_telemetry(self):
         coach = object.__new__(Coach)
         coach.args = dotdict({'searchSymmetryEvaluation': True})

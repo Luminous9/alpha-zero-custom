@@ -30,6 +30,9 @@ V3_DEFAULT_VALIDATION_FRACTION = 0.05
 V3_DEFAULT_LEARNING_RATE = 3e-4
 V3_DEFAULT_WEIGHT_DECAY = 1e-4
 V3_DEFAULT_LR_SCHEDULE = [(200, 1e-4), (400, 3e-5)]
+V3_DEFAULT_SYMMETRY_CONSISTENCY_FRACTION = 0.25
+V3_DEFAULT_SYMMETRY_CONSISTENCY_POLICY_WEIGHT = 0.05
+V3_DEFAULT_SYMMETRY_CONSISTENCY_VALUE_WEIGHT = 0.05
 
 PRESETS = {
     'full': {
@@ -224,6 +227,24 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        '--symmetry-consistency-fraction',
+        type=float,
+        help=(
+            'Fraction of each optimizer batch paired with a second D4 orientation. '
+            'V3 defaults to 0.25; use 0 to disable.'
+        ),
+    )
+    parser.add_argument(
+        '--symmetry-consistency-policy-weight',
+        type=float,
+        help='Weight for mapped-back policy Jensen-Shannon consistency; V3 defaults to 0.05.',
+    )
+    parser.add_argument(
+        '--symmetry-consistency-value-weight',
+        type=float,
+        help='Weight for D4 value-consistency MSE; V3 defaults to 0.05.',
+    )
+    parser.add_argument(
         '--no-search-symmetry-evaluation',
         action='store_true',
         help=(
@@ -250,6 +271,16 @@ def parse_args():
         '--evaluation-placement-root-symmetry-samples',
         type=int,
         help='Distinct D4 orientations averaged at placement evaluation roots; V3 defaults to 8.',
+    )
+    parser.add_argument(
+        '--no-inference-deduplication',
+        action='store_true',
+        help='Disable exact-board neural inference reuse during V3 batched search.',
+    )
+    parser.add_argument(
+        '--inference-cache-size',
+        type=int,
+        help='Maximum exact-board predictions cached during one move; V3 defaults to 4096.',
     )
     parser.add_argument('--self-play-batch-size', type=int, default=1)
     parser.add_argument('--arena-batch-size', type=int)
@@ -300,6 +331,14 @@ def parse_args():
     parser.add_argument('--no-telemetry-matches', action='store_true')
     parser.add_argument('--telemetry-sample-size', type=int, default=256)
     parser.add_argument(
+        '--symmetry-telemetry-sample-size',
+        type=int,
+        help=(
+            'Fixed held-out positions evaluated in all eight D4 orientations each iteration. '
+            'V3 defaults to 64; use 0 to disable.'
+        ),
+    )
+    parser.add_argument(
         '--anchor-checkpoint',
         type=str,
         help='Exact checkpoint file, or a directory containing one, for fixed-opponent telemetry.',
@@ -324,6 +363,13 @@ def parse_args():
             parser.error('{} must be a non-negative even number.'.format(option))
     if args.telemetry_placement_temperature < 0:
         parser.error('--telemetry-placement-temperature cannot be negative.')
+    if (
+        args.symmetry_telemetry_sample_size is not None
+        and args.symmetry_telemetry_sample_size < 0
+    ):
+        parser.error('--symmetry-telemetry-sample-size cannot be negative.')
+    if args.inference_cache_size is not None and args.inference_cache_size < 0:
+        parser.error('--inference-cache-size cannot be negative.')
     if args.policy_target_temperature is not None and args.policy_target_temperature < 0:
         parser.error('--policy-target-temperature cannot be negative.')
     if args.anchor_interval < 1:
@@ -355,6 +401,23 @@ def parse_args():
         parser.error('--learning-rate must be positive.')
     if args.weight_decay is not None and args.weight_decay < 0:
         parser.error('--weight-decay cannot be negative.')
+    if (
+        args.symmetry_consistency_fraction is not None
+        and not 0 <= args.symmetry_consistency_fraction <= 1
+    ):
+        parser.error('--symmetry-consistency-fraction must be between 0 and 1.')
+    for option, value in (
+        (
+            '--symmetry-consistency-policy-weight',
+            args.symmetry_consistency_policy_weight,
+        ),
+        (
+            '--symmetry-consistency-value-weight',
+            args.symmetry_consistency_value_weight,
+        ),
+    ):
+        if value is not None and value < 0:
+            parser.error('{} cannot be negative.'.format(option))
     for option, value in (
         ('--root-symmetry-samples', args.root_symmetry_samples),
         ('--placement-root-symmetry-samples', args.placement_root_symmetry_samples),
@@ -474,6 +537,15 @@ def build_coach_args(parsed_args):
             parsed_args.architecture == 'v3'
             and not getattr(parsed_args, 'no_search_symmetry_evaluation', False)
         ),
+        'inferenceDeduplication': (
+            parsed_args.architecture == 'v3'
+            and not getattr(parsed_args, 'no_inference_deduplication', False)
+        ),
+        'inferenceCacheSize': (
+            parsed_args.inference_cache_size
+            if parsed_args.inference_cache_size is not None
+            else (4096 if parsed_args.architecture == 'v3' else 0)
+        ),
         'rootSymmetrySamples': (
             parsed_args.root_symmetry_samples
             if parsed_args.root_symmetry_samples is not None
@@ -538,6 +610,11 @@ def build_coach_args(parsed_args):
         'anchorArchitecture': getattr(parsed_args, 'anchor_architecture', 'v1'),
         'startIteration': 0,
         'telemetrySampleSize': getattr(parsed_args, 'telemetry_sample_size', 256),
+        'symmetryTelemetrySampleSize': (
+            parsed_args.symmetry_telemetry_sample_size
+            if parsed_args.symmetry_telemetry_sample_size is not None
+            else (64 if parsed_args.architecture == 'v3' else 0)
+        ),
     })
 
 
@@ -714,6 +791,30 @@ def main():
         if parsed_args.lr_schedule is not None
         else (list(V3_DEFAULT_LR_SCHEDULE) if parsed_args.architecture == 'v3' else [])
     )
+    nnet_args.symmetry_consistency_fraction = (
+        parsed_args.symmetry_consistency_fraction
+        if parsed_args.symmetry_consistency_fraction is not None
+        else (
+            V3_DEFAULT_SYMMETRY_CONSISTENCY_FRACTION
+            if parsed_args.architecture == 'v3' else 0.0
+        )
+    )
+    nnet_args.symmetry_consistency_policy_weight = (
+        parsed_args.symmetry_consistency_policy_weight
+        if parsed_args.symmetry_consistency_policy_weight is not None
+        else (
+            V3_DEFAULT_SYMMETRY_CONSISTENCY_POLICY_WEIGHT
+            if parsed_args.architecture == 'v3' else 0.0
+        )
+    )
+    nnet_args.symmetry_consistency_value_weight = (
+        parsed_args.symmetry_consistency_value_weight
+        if parsed_args.symmetry_consistency_value_weight is not None
+        else (
+            V3_DEFAULT_SYMMETRY_CONSISTENCY_VALUE_WEIGHT
+            if parsed_args.architecture == 'v3' else 0.0
+        )
+    )
     nnet_args.quiet = parsed_args.quiet
     coach_args = build_coach_args(parsed_args)
     nnet_args.on_the_fly_symmetry = coach_args.symmetryAugmentation == 'on-the-fly'
@@ -805,7 +906,7 @@ def main():
         )
 
     log.info(
-        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s search=%s gumbel_actions=%s gumbel_scale=%.2f gumbel_placement_scale=%.2f eval_gumbel_scale=%.2f eval_gumbel_placement_scale=%.2f tactical=%s playout_cap=%s full_prob=%.2f fast_sims=%s placement_full=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s max_train_steps=%s replay_reuse=%s validation=%.3f batch=%s symmetry=%s search_symmetry=%s root_symmetries=%s/%s eval_root_symmetries=%s/%s policy_target_temp=%s optimizer=%s lr=%g weight_decay=%g lr_schedule=%s checkpoint=%s',
+        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s search=%s gumbel_actions=%s gumbel_scale=%.2f gumbel_placement_scale=%.2f eval_gumbel_scale=%.2f eval_gumbel_placement_scale=%.2f tactical=%s playout_cap=%s full_prob=%.2f fast_sims=%s placement_full=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s max_train_steps=%s replay_reuse=%s validation=%.3f batch=%s symmetry=%s consistency=%.2f@%.3f/%.3f symmetry_telemetry=%s inference_dedup=%s/%s search_symmetry=%s root_symmetries=%s/%s eval_root_symmetries=%s/%s policy_target_temp=%s optimizer=%s lr=%g weight_decay=%g lr_schedule=%s checkpoint=%s',
         parsed_args.architecture,
         parsed_args.preset,
         coach_args.numIters,
@@ -831,6 +932,12 @@ def main():
         coach_args.validationFraction,
         nnet_args.batch_size,
         coach_args.symmetryAugmentation,
+        nnet_args.symmetry_consistency_fraction,
+        nnet_args.symmetry_consistency_policy_weight,
+        nnet_args.symmetry_consistency_value_weight,
+        coach_args.symmetryTelemetrySampleSize,
+        coach_args.inferenceDeduplication,
+        coach_args.inferenceCacheSize,
         coach_args.searchSymmetryEvaluation,
         coach_args.rootSymmetrySamples,
         coach_args.placementRootSymmetrySamples,

@@ -3,6 +3,7 @@ from collections import Counter, defaultdict
 from tqdm import tqdm
 
 from MCTS import MCTS
+from santorini.SantoriniInference import predict_batch_deduplicated
 
 
 class BatchedMCTSArena:
@@ -49,9 +50,17 @@ class BatchedMCTSArena:
         self.standard_controller_args = standard_controller_args
         self.record_placement_diagnostics = bool(record_placement_diagnostics)
         self.placement_records = []
+        self.inference_stats = {
+            'batches': 0,
+            'requested': 0,
+            'executed': 0,
+            'reused': 0,
+        }
 
     def playGames(self, num):
         self.placement_records = []
+        for key in self.inference_stats:
+            self.inference_stats[key] = 0
         num = int(num / 2)
         oneWon = 0
         twoWon = 0
@@ -390,6 +399,7 @@ class BatchedMCTSArena:
             int(self._controller(game_state)[3].numMCTSSims)
             for game_state in active
         )
+        inference_caches = defaultdict(dict)
         for simulation_index in range(max_simulations):
             pending_by_controller = {}
 
@@ -404,13 +414,13 @@ class BatchedMCTSArena:
                 if leaf['needs_eval']:
                     pending = pending_by_controller.setdefault(
                         controller,
-                        {'nnet': nnet, 'leaves': []},
+                        {'nnet': nnet, 'args': controller_args, 'leaves': []},
                     )
                     pending['leaves'].append((mcts, leaf))
                 else:
                     mcts.complete_search(leaf)
 
-            for pending in pending_by_controller.values():
+            for controller, pending in pending_by_controller.items():
                 leaves = pending['leaves']
                 if not leaves:
                     continue
@@ -427,7 +437,28 @@ class BatchedMCTSArena:
                     boards.extend(leaf_boards)
                     evaluation_ranges.append((start, len(boards)))
                 nnet = pending['nnet']
-                if hasattr(nnet, 'predict_batch'):
+                controller_args = pending['args']
+                inference_deduplication = bool(
+                    controller_args.get('inferenceDeduplication', False)
+                    if hasattr(controller_args, 'get')
+                    else getattr(controller_args, 'inferenceDeduplication', False)
+                )
+                inference_cache_size = int(
+                    controller_args.get('inferenceCacheSize', 4096)
+                    if hasattr(controller_args, 'get')
+                    else getattr(controller_args, 'inferenceCacheSize', 4096)
+                )
+                if inference_deduplication:
+                    policies, values, stats = predict_batch_deduplicated(
+                        nnet,
+                        boards,
+                        cache=inference_caches[controller],
+                        max_cache_entries=inference_cache_size,
+                    )
+                    self.inference_stats['batches'] += 1
+                    for key in ('requested', 'executed', 'reused'):
+                        self.inference_stats[key] += int(stats[key])
+                elif hasattr(nnet, 'predict_batch'):
                     policies, values = nnet.predict_batch(boards)
                 else:
                     predictions = [nnet.predict(board) for board in boards]
@@ -464,6 +495,14 @@ class BatchedMCTSArena:
                 rng=game_state['rng'],
             ))
         return actions
+
+    def inferenceDiagnostics(self):
+        stats = dict(self.inference_stats)
+        stats['reuse_rate'] = (
+            float(stats['reused'] / stats['requested'])
+            if stats['requested'] else None
+        )
+        return stats
 
     def _selectLegalAction(self, canonicalBoard, probs, sample=False, rng=None):
         probs = np.array(probs)
