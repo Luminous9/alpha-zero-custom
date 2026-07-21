@@ -78,6 +78,34 @@ class TestMainSantoriniOpenings(unittest.TestCase):
         self.assertEqual(coach_args.playoutCapFastSims, 32)
         self.assertTrue(coach_args.playoutCapFullPlacement)
 
+    def test_placement_scale_exploration_configuration(self):
+        with patch(
+            'sys.argv',
+            [
+                'main_santorini.py',
+                '--architecture', 'v3',
+                '--search-mode', 'gumbel',
+                '--gumbel-placement-scale', '1.5',
+                '--placement-scale-exploration-probability', '0.10',
+                '--placement-exploration-gumbel-scale', '2.25',
+            ],
+        ):
+            coach_args = build_coach_args(parse_args())
+
+        self.assertEqual(coach_args.gumbelPlacementScale, 1.5)
+        self.assertEqual(coach_args.placementScaleExplorationProbability, 0.10)
+        self.assertEqual(coach_args.placementExplorationGumbelScale, 2.25)
+
+    def test_placement_scale_exploration_probability_is_bounded(self):
+        with patch(
+            'sys.argv',
+            [
+                'main_santorini.py',
+                '--placement-scale-exploration-probability', '1.1',
+            ],
+        ), self.assertRaises(SystemExit):
+            parse_args()
+
     def test_playout_cap_fast_search_must_be_smaller_than_full_search(self):
         with patch(
             'sys.argv',

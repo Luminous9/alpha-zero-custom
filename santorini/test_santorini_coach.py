@@ -462,6 +462,57 @@ class TestSantoriniCoachExamples(unittest.TestCase):
         self.assertEqual(coach.args.gumbelScale, 1.0)
         self.assertEqual(coach.args.gumbelPlacementScale, 1.5)
 
+    def test_self_play_samples_one_placement_scale_per_game_without_mutating_args(self):
+        coach = object.__new__(Coach)
+        coach.game = TinyGame()
+        coach.nnet = BatchCountingNNet(coach.game)
+        coach.args = dotdict({
+            'searchMode': 'gumbel',
+            'gumbelScale': 1.0,
+            'gumbelPlacementScale': 1.5,
+            'placementScaleExplorationProbability': 0.10,
+            'placementExplorationGumbelScale': 2.25,
+        })
+        coach._placement_scale_game_counts = {'base': 0, 'exploratory': 0}
+
+        with patch('Coach.np.random.random', side_effect=[0.05, 0.50]):
+            exploratory = coach._newSelfPlayMCTS()
+            base = coach._newSelfPlayMCTS()
+
+        self.assertEqual(exploratory.args.gumbelPlacementScale, 2.25)
+        self.assertEqual(base.args.gumbelPlacementScale, 1.5)
+        self.assertEqual(coach.args.gumbelPlacementScale, 1.5)
+        self.assertEqual(
+            coach._placement_scale_game_counts,
+            {'base': 1, 'exploratory': 1},
+        )
+
+    def test_completed_opening_telemetry_collapses_d4_symmetries(self):
+        coach = object.__new__(Coach)
+        coach.game = SantoriniGame(5, sequential_placement=True)
+        coach._writer = None
+        coach._placement_choices = [(1, 0)]
+        coach._completed_openings = []
+        coach._completed_opening_symmetries = []
+        board = coach.game.getInitBoard()
+        board[0, 0, 1] = 1
+        board[0, 1, 2] = 2
+        board[0, 3, 3] = -1
+        board[0, 4, 1] = -2
+        rotated = np.rot90(board, 1, axes=(-2, -1)).copy()
+
+        coach._recordCompletedOpening(board)
+        coach._recordCompletedOpening(rotated)
+        telemetry = coach._placementTelemetry()
+
+        self.assertEqual(telemetry['unique_completed_openings'], 2)
+        self.assertEqual(telemetry['symmetry_unique_completed_openings'], 1)
+        self.assertEqual(telemetry['most_frequent_completed_opening_rate'], 0.5)
+        self.assertEqual(
+            telemetry['most_frequent_completed_opening_symmetry_rate'],
+            1.0,
+        )
+
     def make_coach_shell(self, load_folder, load_file='best.pth.tar'):
         coach = object.__new__(Coach)
         coach.args = dotdict({

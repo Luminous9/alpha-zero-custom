@@ -5,7 +5,7 @@ import os
 import random
 import sys
 import time
-from collections import deque
+from collections import Counter, deque
 from contextlib import contextmanager
 from pickle import Pickler, Unpickler
 from random import shuffle
@@ -95,6 +95,8 @@ class Coach():
         self._completed_game_results = []
         self._placement_choices = []
         self._completed_openings = []
+        self._completed_opening_symmetries = []
+        self._placement_scale_game_counts = {'base': 0, 'exploratory': 0}
         self._placement_geometry_records = []
         self._placement_policy_geometry = self._newPlacementPolicyGeometry()
         self._policy_target_stats = self._newPolicyTargetStats()
@@ -122,6 +124,38 @@ class Coach():
 
     def _arena_batch_size(self):
         return max(1, int(getattr(self.args, 'arenaBatchSize', 1)))
+
+    def _newSelfPlayMCTS(self):
+        """Create one episode's search with an independently sampled placement scale."""
+        episode_args = dotdict(dict(self.args))
+        probability = float(self._arg('placementScaleExplorationProbability', 0.0))
+        exploratory = (
+            self._arg('searchMode', 'puct') == 'gumbel'
+            and probability > 0.0
+            and np.random.random() < probability
+        )
+        if exploratory:
+            episode_args.gumbelPlacementScale = float(self._arg(
+                'placementExplorationGumbelScale',
+                self._arg('gumbelPlacementScale', self._arg('gumbelScale', 1.0)),
+            ))
+            bucket = 'exploratory'
+        else:
+            bucket = 'base'
+        if hasattr(self, '_placement_scale_game_counts'):
+            self._placement_scale_game_counts[bucket] += 1
+        return MCTS(self.game, self.nnet, episode_args)
+
+    def _recordCompletedOpening(self, board):
+        pieces = np.sign(np.asarray(board)[0]).astype(np.int8)
+        exact = np.ascontiguousarray(pieces).tobytes()
+        symmetries = []
+        for rotations in range(4):
+            rotated = np.rot90(pieces, rotations)
+            symmetries.append(np.ascontiguousarray(rotated).tobytes())
+            symmetries.append(np.ascontiguousarray(np.fliplr(rotated)).tobytes())
+        self._completed_openings.append(exact)
+        self._completed_opening_symmetries.append(min(symmetries))
 
     def _uses_on_the_fly_symmetry(self):
         return self._arg('symmetryAugmentation', 'expanded') == 'on-the-fly'
@@ -470,7 +504,7 @@ class Coach():
                 placementActions.append(action)
             board, self.curPlayer = self.game.getNextState(board, self.curPlayer, action)
             if episodeStep == 4 and getattr(self.game, 'sequential_placement', False):
-                self._completed_openings.append(board[0].tobytes())
+                self._recordCompletedOpening(board)
 
             r = self.game.getGameEnded(board, self.curPlayer)
 
@@ -503,7 +537,7 @@ class Coach():
                         'episodeStep': 0,
                         'trainExamples': [],
                         'placementActions': [],
-                        'mcts': MCTS(self.game, self.nnet, self.args),
+                        'mcts': self._newSelfPlayMCTS(),
                     })
                     launched += 1
 
@@ -573,7 +607,7 @@ class Coach():
                         action,
                     )
                     if episode['episodeStep'] == 4 and getattr(self.game, 'sequential_placement', False):
-                        self._completed_openings.append(episode['board'][0].tobytes())
+                        self._recordCompletedOpening(episode['board'])
 
                     r = self.game.getGameEnded(episode['board'], episode['curPlayer'])
                     if r != 0:
@@ -703,6 +737,8 @@ class Coach():
             self._completed_game_results = []
             self._placement_choices = []
             self._completed_openings = []
+            self._completed_opening_symmetries = []
+            self._placement_scale_game_counts = {'base': 0, 'exploratory': 0}
             self._placement_geometry_records = []
             self._placement_policy_geometry = self._newPlacementPolicyGeometry()
             self._policy_target_stats = self._newPolicyTargetStats()
@@ -718,7 +754,7 @@ class Coach():
                     iterationTrainExamples += self.executeEpisodesBatched(self.args.numEps)
                 else:
                     for _ in tqdm(range(self.args.numEps), desc="Self Play", disable=self._quiet()):
-                        self.mcts = MCTS(self.game, self.nnet, self.args)  # reset search tree
+                        self.mcts = self._newSelfPlayMCTS()  # reset search tree
                         iterationTrainExamples += self.executeEpisode()
 
                 # save the iteration examples to the history 
@@ -770,6 +806,13 @@ class Coach():
                     'gumbel_scale': self._arg('gumbelScale', 1.0),
                     'gumbel_placement_scale': self._arg(
                         'gumbelPlacementScale', self._arg('gumbelScale', 1.0)
+                    ),
+                    'placement_scale_exploration_probability': self._arg(
+                        'placementScaleExplorationProbability', 0.0
+                    ),
+                    'placement_exploration_gumbel_scale': self._arg(
+                        'placementExplorationGumbelScale',
+                        self._arg('gumbelPlacementScale', self._arg('gumbelScale', 1.0)),
                     ),
                     'evaluation_gumbel_scale': self._arg(
                         'evaluationGumbelScale', self._arg('gumbelScale', 1.0)
@@ -1137,6 +1180,13 @@ class Coach():
             'gumbel_placement_scale': float(
                 self._arg('gumbelPlacementScale', self._arg('gumbelScale', 1.0))
             ),
+            'placement_scale_exploration_probability': float(
+                self._arg('placementScaleExplorationProbability', 0.0)
+            ),
+            'placement_exploration_gumbel_scale': float(self._arg(
+                'placementExplorationGumbelScale',
+                self._arg('gumbelPlacementScale', self._arg('gumbelScale', 1.0)),
+            )),
             'evaluation_gumbel_scale': float(
                 self._arg('evaluationGumbelScale', self._arg('gumbelScale', 1.0))
             ),
@@ -1187,6 +1237,7 @@ class Coach():
             'first_player_win_rate': float(np.mean(results == 1)) if len(results) else None,
         }
         payload.update(training_metrics or {})
+        payload.update(self._placementScaleTelemetry())
         payload.update(self._placementTelemetry())
         payload.update(self._placementGeometryTelemetry())
         payload.update(self._policyTargetTelemetry())
@@ -1210,6 +1261,21 @@ class Coach():
                 if key != 'iteration' and isinstance(value, (int, float)) and value is not None:
                     self._writer.add_scalar(key, value, iteration)
             self._writer.flush()
+
+        placement_games = (
+            payload.get('placement_base_scale_games', 0)
+            + payload.get('placement_exploratory_scale_games', 0)
+        )
+        if placement_games and self._quiet():
+            log.info(
+                'Self-play placement mix: base=%s exploratory=%s (%.1f%%); '
+                'completed openings exact=%s symmetry-unique=%s.',
+                payload['placement_base_scale_games'],
+                payload['placement_exploratory_scale_games'],
+                100.0 * payload['placement_exploratory_scale_game_rate'],
+                payload.get('unique_completed_openings', 'n/a'),
+                payload.get('symmetry_unique_completed_openings', 'n/a'),
+            )
 
         if symmetry_metrics and self._quiet():
             log.info(
@@ -1573,7 +1639,19 @@ class Coach():
         for ply, square in self._placement_choices:
             if 1 <= ply <= 4:
                 heatmaps[ply - 1, square] += 1
-        payload = {'unique_completed_openings': int(len(set(self._completed_openings)))}
+        exact_counts = Counter(self._completed_openings)
+        symmetry_counts = Counter(self._completed_opening_symmetries)
+        completed = len(self._completed_openings)
+        payload = {
+            'unique_completed_openings': int(len(exact_counts)),
+            'symmetry_unique_completed_openings': int(len(symmetry_counts)),
+            'most_frequent_completed_opening_rate': (
+                float(max(exact_counts.values()) / completed) if completed else None
+            ),
+            'most_frequent_completed_opening_symmetry_rate': (
+                float(max(symmetry_counts.values()) / completed) if completed else None
+            ),
+        }
         epsilon = 1e-12
         for ply, counts in enumerate(heatmaps, start=1):
             total = counts.sum()
@@ -1588,6 +1666,21 @@ class Coach():
                     image /= max(1.0, float(image.max()))
                     self._writer.add_image('placement/ply_{}_heatmap'.format(ply), image, dataformats='CHW')
         return payload
+
+    def _placementScaleTelemetry(self):
+        counts = getattr(
+            self,
+            '_placement_scale_game_counts',
+            {'base': 0, 'exploratory': 0},
+        )
+        total = int(counts['base'] + counts['exploratory'])
+        return {
+            'placement_base_scale_games': int(counts['base']),
+            'placement_exploratory_scale_games': int(counts['exploratory']),
+            'placement_exploratory_scale_game_rate': (
+                float(counts['exploratory'] / total) if total else None
+            ),
+        }
 
     def _policyTelemetry(self):
         boards = getattr(self, '_telemetry_boards', None)

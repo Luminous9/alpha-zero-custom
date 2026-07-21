@@ -119,6 +119,20 @@ def parse_args():
         help='Gumbel scale for placement roots; defaults to --gumbel-scale.',
     )
     parser.add_argument(
+        '--placement-scale-exploration-probability',
+        type=float,
+        default=0.0,
+        help=(
+            'Per-self-play-game probability of replacing --gumbel-placement-scale '
+            'with --placement-exploration-gumbel-scale. Evaluation is unaffected.'
+        ),
+    )
+    parser.add_argument(
+        '--placement-exploration-gumbel-scale',
+        type=float,
+        help='Exploratory self-play placement scale; defaults to the base placement scale.',
+    )
+    parser.add_argument(
         '--evaluation-gumbel-scale',
         type=float,
         help='Standard-play Gumbel scale for milestone and anchor evaluation; defaults to self-play scale.',
@@ -384,6 +398,13 @@ def parse_args():
         parser.error('--gumbel-scale cannot be negative.')
     if args.gumbel_placement_scale is not None and args.gumbel_placement_scale < 0:
         parser.error('--gumbel-placement-scale cannot be negative.')
+    if not 0 <= args.placement_scale_exploration_probability <= 1:
+        parser.error('--placement-scale-exploration-probability must be between 0 and 1.')
+    if (
+        args.placement_exploration_gumbel_scale is not None
+        and args.placement_exploration_gumbel_scale < 0
+    ):
+        parser.error('--placement-exploration-gumbel-scale cannot be negative.')
     if args.evaluation_gumbel_scale is not None and args.evaluation_gumbel_scale < 0:
         parser.error('--evaluation-gumbel-scale cannot be negative.')
     if (
@@ -479,6 +500,18 @@ def build_coach_args(parsed_args):
             parsed_args.gumbel_placement_scale
             if getattr(parsed_args, 'gumbel_placement_scale', None) is not None
             else getattr(parsed_args, 'gumbel_scale', 1.0)
+        ),
+        'placementScaleExplorationProbability': getattr(
+            parsed_args, 'placement_scale_exploration_probability', 0.0
+        ),
+        'placementExplorationGumbelScale': (
+            parsed_args.placement_exploration_gumbel_scale
+            if getattr(parsed_args, 'placement_exploration_gumbel_scale', None) is not None
+            else (
+                parsed_args.gumbel_placement_scale
+                if getattr(parsed_args, 'gumbel_placement_scale', None) is not None
+                else getattr(parsed_args, 'gumbel_scale', 1.0)
+            )
         ),
         'evaluationGumbelScale': (
             parsed_args.evaluation_gumbel_scale
@@ -906,7 +939,7 @@ def main():
         )
 
     log.info(
-        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s search=%s gumbel_actions=%s gumbel_scale=%.2f gumbel_placement_scale=%.2f eval_gumbel_scale=%.2f eval_gumbel_placement_scale=%.2f tactical=%s playout_cap=%s full_prob=%.2f fast_sims=%s placement_full=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s max_train_steps=%s replay_reuse=%s validation=%.3f batch=%s symmetry=%s consistency=%.2f@%.3f/%.3f symmetry_telemetry=%s inference_dedup=%s/%s search_symmetry=%s root_symmetries=%s/%s eval_root_symmetries=%s/%s policy_target_temp=%s optimizer=%s lr=%g weight_decay=%g lr_schedule=%s checkpoint=%s',
+        'Config: architecture=%s preset=%s iters=%s eps=%s sims=%s search=%s gumbel_actions=%s gumbel_scale=%.2f gumbel_placement_scale=%.2f placement_explore=%.1f%%@%.2f eval_gumbel_scale=%.2f eval_gumbel_placement_scale=%.2f tactical=%s playout_cap=%s full_prob=%.2f fast_sims=%s placement_full=%s self_play_batch=%s arena=%s arena_batch=%s epochs=%s max_train_steps=%s replay_reuse=%s validation=%.3f batch=%s symmetry=%s consistency=%.2f@%.3f/%.3f symmetry_telemetry=%s inference_dedup=%s/%s search_symmetry=%s root_symmetries=%s/%s eval_root_symmetries=%s/%s policy_target_temp=%s optimizer=%s lr=%g weight_decay=%g lr_schedule=%s checkpoint=%s',
         parsed_args.architecture,
         parsed_args.preset,
         coach_args.numIters,
@@ -916,6 +949,8 @@ def main():
         coach_args.gumbelMaxConsideredActions,
         coach_args.gumbelScale,
         coach_args.gumbelPlacementScale,
+        100.0 * coach_args.placementScaleExplorationProbability,
+        coach_args.placementExplorationGumbelScale,
         coach_args.evaluationGumbelScale,
         coach_args.evaluationGumbelPlacementScale,
         coach_args.tacticalShortcuts,
