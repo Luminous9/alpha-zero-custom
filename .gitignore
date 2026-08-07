@@ -1,6 +1,7 @@
 *.pyc
 .DS_Store
 .venv/
+/tools/santorini_oracle/target/
 
 /temp/
 /.project

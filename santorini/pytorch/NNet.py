@@ -37,6 +37,7 @@ args = dotdict({
     'symmetry_consistency_fraction': 0.0,
     'symmetry_consistency_policy_weight': 0.0,
     'symmetry_consistency_value_weight': 0.0,
+    'freeze_batch_norm': False,
     'quiet': False,
 })
 
@@ -107,6 +108,7 @@ class NNetWrapper(NeuralNet):
         self.net_args.symmetry_consistency_value_weight = (
             args.symmetry_consistency_value_weight
         )
+        self.net_args.freeze_batch_norm = getattr(args, 'freeze_batch_norm', False)
         self.net_args.quiet = args.quiet
         return self.net_args
 
@@ -200,6 +202,10 @@ class NNetWrapper(NeuralNet):
             if steps_this_epoch <= 0:
                 break
             self.nnet.train()
+            if runtime_args.freeze_batch_norm:
+                for module in self.nnet.modules():
+                    if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
+                        module.eval()
             pi_losses = AverageMeter()
             v_losses = AverageMeter()
             consistency_pi_losses = AverageMeter()
