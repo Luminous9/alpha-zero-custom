@@ -104,6 +104,9 @@ iteration totals cannot recover this split retroactively.
 The target-GPU workflow is pinned and refuses to run the full profile without
 CUDA unless `--allow-cpu` is explicitly supplied:
 
+For Kaggle, use the complete cell-by-cell workflow in
+`santorini/run13_timing_kaggle.ipynb`. The equivalent commands are:
+
 ```bash
 .venv/bin/python benchmark_santorini_run13_timing.py \
   --output temp/run13_timing_ordinary --profile ordinary
