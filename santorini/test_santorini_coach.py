@@ -1,3 +1,4 @@
+import json
 import os
 import pickle
 import tempfile
@@ -8,7 +9,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import torch
 
-from Coach import Coach, preserve_rng_state
+from Coach import Coach, accumulate_wall_time, preserve_rng_state
 from santorini.SantoriniGame import SantoriniGame
 from utils import dotdict
 
@@ -107,6 +108,78 @@ class FixedOpeningSampler:
 
 
 class TestSantoriniCoachExamples(unittest.TestCase):
+    def test_wall_phase_timer_accumulates_repeated_segments(self):
+        timings = {}
+        with patch('Coach.time.perf_counter', side_effect=[1.0, 1.5, 2.0, 3.25]):
+            with accumulate_wall_time(timings, 'serialization'):
+                pass
+            with accumulate_wall_time(timings, 'serialization'):
+                pass
+        self.assertEqual(timings['serialization'], 1.75)
+
+    def test_telemetry_records_complete_wall_clock_phase_split(self):
+        with tempfile.TemporaryDirectory() as folder:
+            coach = object.__new__(Coach)
+            coach.game = TinyGame()
+            coach.nnet = BatchCountingNNet(coach.game)
+            coach.args = dotdict({
+                'numMCTSSims': 2,
+                'tempThreshold': 1,
+                'telemetryDir': folder,
+                'quiet': False,
+            })
+            coach._completed_game_lengths = []
+            coach._completed_game_results = []
+            coach._reference_suite = None
+            coach._writer = None
+            for name in (
+                '_placementScaleTelemetry',
+                '_placementTelemetry',
+                '_placementGeometryTelemetry',
+                '_policyTargetTelemetry',
+                '_playoutCapTelemetry',
+                '_tacticalTelemetry',
+                '_searchSymmetryTelemetry',
+                '_symmetryTelemetry',
+                '_policyTelemetry',
+            ):
+                setattr(coach, name, lambda: {})
+
+            phase_timings = {
+                'self_play': 1.0,
+                'training': 2.0,
+                'arena_telemetry': 3.0,
+                'serialization': 1.0,
+            }
+            with patch('Coach.time.perf_counter', side_effect=[10.0, 12.0, 20.0]):
+                coach._writeTelemetry(
+                    1,
+                    {},
+                    10.0,
+                    0,
+                    phase_timings=phase_timings,
+                    iteration_started=0.0,
+                )
+
+            with open(os.path.join(folder, 'telemetry.jsonl')) as source:
+                payload = json.loads(source.read())
+            self.assertEqual(payload['wall_self_play_seconds'], 1.0)
+            self.assertEqual(payload['wall_training_seconds'], 2.0)
+            self.assertEqual(payload['wall_arena_telemetry_seconds'], 5.0)
+            self.assertEqual(payload['wall_serialization_seconds'], 1.0)
+            self.assertEqual(payload['wall_other_seconds'], 11.0)
+            self.assertEqual(payload['wall_total_seconds'], 20.0)
+            self.assertAlmostEqual(
+                sum(
+                    payload['wall_{}_fraction'.format(phase)]
+                    for phase in (
+                        'self_play', 'training', 'arena_telemetry',
+                        'serialization', 'other',
+                    )
+                ),
+                1.0,
+            )
+
     def test_fixed_symmetry_telemetry_suite_is_saved_reloaded_and_evaluated(self):
         game = SantoriniGame(5, sequential_placement=True)
         policy = game.getValidMoves(game.getInitBoard(), 1).astype(np.float32)

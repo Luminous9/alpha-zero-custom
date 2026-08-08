@@ -57,6 +57,16 @@ log = logging.getLogger(__name__)
 
 
 @contextmanager
+def accumulate_wall_time(timings, phase):
+    """Accumulate high-resolution wall time without changing phase behavior."""
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        timings[phase] = timings.get(phase, 0.0) + (time.perf_counter() - started)
+
+
+@contextmanager
 def preserve_rng_state():
     """Keep evaluation-only work from changing the resumable training trajectory."""
     python_state = random.getstate()
@@ -732,7 +742,13 @@ class Coach():
         ):
             # bookkeeping
             log.info(f'Starting Iter #{i} ...')
-            iteration_started = time.time()
+            iteration_started = time.perf_counter()
+            phase_timings = {
+                'self_play': 0.0,
+                'training': 0.0,
+                'arena_telemetry': 0.0,
+                'serialization': 0.0,
+            }
             self._completed_game_lengths = []
             self._completed_game_results = []
             self._placement_choices = []
@@ -750,12 +766,13 @@ class Coach():
             if not self.skipFirstSelfPlay or local_iteration > 1:
                 iterationTrainExamples = deque([], maxlen=self.args.maxlenOfQueue)
 
-                if self._self_play_batch_size() > 1:
-                    iterationTrainExamples += self.executeEpisodesBatched(self.args.numEps)
-                else:
-                    for _ in tqdm(range(self.args.numEps), desc="Self Play", disable=self._quiet()):
-                        self.mcts = self._newSelfPlayMCTS()  # reset search tree
-                        iterationTrainExamples += self.executeEpisode()
+                with accumulate_wall_time(phase_timings, 'self_play'):
+                    if self._self_play_batch_size() > 1:
+                        iterationTrainExamples += self.executeEpisodesBatched(self.args.numEps)
+                    else:
+                        for _ in tqdm(range(self.args.numEps), desc="Self Play", disable=self._quiet()):
+                            self.mcts = self._newSelfPlayMCTS()  # reset search tree
+                            iterationTrainExamples += self.executeEpisode()
 
                 # save the iteration examples to the history 
                 self.trainExamplesHistory.append(iterationTrainExamples)
@@ -766,10 +783,11 @@ class Coach():
                 self.trainExamplesHistory.pop(0)
             # backup history to a file
             # NB! the examples were collected using the model from the previous iteration, so (i-1)  
-            self.saveTrainExamples(i - 1)
-            self.saveTrainExamplesFile(self._latestExamplesFilename())
-            if not self._saveBestTrainExamples():
-                self._deleteExamplesFile('best.pth.tar.examples')
+            with accumulate_wall_time(phase_timings, 'serialization'):
+                self.saveTrainExamples(i - 1)
+                self.saveTrainExamplesFile(self._latestExamplesFilename())
+                if not self._saveBestTrainExamples():
+                    self._deleteExamplesFile('best.pth.tar.examples')
 
             # shuffle examples before training
             trainExamples = []
@@ -789,12 +807,13 @@ class Coach():
             self._telemetry_boards = [trainExamples[index][0] for index in range(telemetry_sample_size)]
 
             if self.training_mode == 'latest':
-                metrics = self.nnet.train(
-                    trainExamples,
-                    new_example_count=len(freshTrainingExamples),
-                    validation_examples=validationExamples,
-                    iteration=i,
-                )
+                with accumulate_wall_time(phase_timings, 'training'):
+                    metrics = self.nnet.train(
+                        trainExamples,
+                        new_example_count=len(freshTrainingExamples),
+                        validation_examples=validationExamples,
+                        iteration=i,
+                    )
                 metadata = {
                     'iteration': i,
                     'training_mode': self.training_mode,
@@ -871,61 +890,75 @@ class Coach():
                     'playout_cap_full_placement': self._arg('playoutCapFullPlacement', True),
                     'tactical_shortcuts': self._arg('tacticalShortcuts', True),
                 }
-                self.nnet.save_checkpoint(
-                    folder=self.args.checkpoint,
-                    filename='latest-training.pth.tar',
-                    include_optimizer=True,
-                    metadata=metadata,
-                )
-                self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='latest.pth.tar')
-                milestone_interval = max(1, int(self._arg('milestoneInterval', 10)))
-                if i % milestone_interval == 0:
+                with accumulate_wall_time(phase_timings, 'serialization'):
                     self.nnet.save_checkpoint(
                         folder=self.args.checkpoint,
-                        filename=self.getCheckpointFile(i),
+                        filename='latest-training.pth.tar',
+                        include_optimizer=True,
+                        metadata=metadata,
                     )
-                    with preserve_rng_state():
-                        metrics.update(self._runMilestoneMatch(i, milestone_interval))
+                    self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='latest.pth.tar')
+                milestone_interval = max(1, int(self._arg('milestoneInterval', 10)))
+                if i % milestone_interval == 0:
+                    with accumulate_wall_time(phase_timings, 'serialization'):
+                        self.nnet.save_checkpoint(
+                            folder=self.args.checkpoint,
+                            filename=self.getCheckpointFile(i),
+                        )
+                    with accumulate_wall_time(phase_timings, 'arena_telemetry'):
+                        with preserve_rng_state():
+                            metrics.update(self._runMilestoneMatch(i, milestone_interval))
                 anchor_interval = max(1, int(self._arg('anchorInterval', milestone_interval)))
                 if self.anchor_nnet is not None and i % anchor_interval == 0:
-                    with preserve_rng_state():
-                        metrics.update(self._runAnchorMatch(i))
-                self._writeTelemetry(i, metrics, time.time() - iteration_started, replay_example_count)
+                    with accumulate_wall_time(phase_timings, 'arena_telemetry'):
+                        with preserve_rng_state():
+                            metrics.update(self._runAnchorMatch(i))
+                self._writeTelemetry(
+                    i,
+                    metrics,
+                    time.perf_counter() - iteration_started,
+                    replay_example_count,
+                    phase_timings=phase_timings,
+                    iteration_started=iteration_started,
+                )
                 if local_iteration == 1 and self._arg('deleteLoadedExamplesAfterFirstIteration', False):
                     self._deleteLoadedTrainExamplesFile()
                 continue
 
             # Arena mode keeps a copy of the old network for promotion testing.
-            self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
-            self.pnet.load_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
+            with accumulate_wall_time(phase_timings, 'serialization'):
+                self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
+                self.pnet.load_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
 
-            metrics = self.nnet.train(
-                trainExamples,
-                new_example_count=len(freshTrainingExamples),
-                validation_examples=validationExamples,
-                iteration=i,
-            )
+            with accumulate_wall_time(phase_timings, 'training'):
+                metrics = self.nnet.train(
+                    trainExamples,
+                    new_example_count=len(freshTrainingExamples),
+                    validation_examples=validationExamples,
+                    iteration=i,
+                )
 
             log.info('PITTING AGAINST PREVIOUS VERSION')
             arena_opening_suite = self._arena_opening_suite()
-            if self._arena_batch_size() > 1:
-                arena = BatchedMCTSArena(
-                    self.game,
-                    self.pnet,
-                    self.nnet,
-                    self.args,
-                    batch_size=self._arena_batch_size(),
-                    quiet=self._quiet(),
-                    opening_boards=arena_opening_suite,
-                )
-                pwins, nwins, draws = arena.playGames(self.args.arenaCompare)
-            else:
-                pmcts = MCTS(self.game, self.pnet, self.args)
-                nmcts = MCTS(self.game, self.nnet, self.args)
-                arena = Arena(lambda x: np.argmax(pmcts.getActionProb(x, temp=0)),
-                              lambda x: np.argmax(nmcts.getActionProb(x, temp=0)), self.game,
-                              opening_boards=arena_opening_suite)
-                pwins, nwins, draws = arena.playGames(self.args.arenaCompare)
+            with accumulate_wall_time(phase_timings, 'arena_telemetry'):
+                if self._arena_batch_size() > 1:
+                    arena = BatchedMCTSArena(
+                        self.game,
+                        self.pnet,
+                        self.nnet,
+                        self.args,
+                        batch_size=self._arena_batch_size(),
+                        quiet=self._quiet(),
+                        opening_boards=arena_opening_suite,
+                    )
+                    pwins, nwins, draws = arena.playGames(self.args.arenaCompare)
+                else:
+                    pmcts = MCTS(self.game, self.pnet, self.args)
+                    nmcts = MCTS(self.game, self.nnet, self.args)
+                    arena = Arena(lambda x: np.argmax(pmcts.getActionProb(x, temp=0)),
+                                  lambda x: np.argmax(nmcts.getActionProb(x, temp=0)), self.game,
+                                  opening_boards=arena_opening_suite)
+                    pwins, nwins, draws = arena.playGames(self.args.arenaCompare)
 
             if self._game_supports_draws():
                 log.info('NEW/PREV WINS : %d / %d ; DRAWS : %d' % (nwins, pwins, draws))
@@ -933,18 +966,27 @@ class Coach():
                 log.info('NEW/PREV WINS : %d / %d' % (nwins, pwins))
             if pwins + nwins == 0 or float(nwins) / (pwins + nwins) < self.args.updateThreshold:
                 log.info('REJECTING NEW MODEL')
-                self.nnet.load_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
+                with accumulate_wall_time(phase_timings, 'serialization'):
+                    self.nnet.load_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
             else:
                 log.info('ACCEPTING NEW MODEL')
-                self.nnet.save_checkpoint(folder=self.args.checkpoint, filename=self.getCheckpointFile(i))
-                self.saveTrainExamplesFile(self.getCheckpointFile(i) + ".examples")
-                self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='best.pth.tar')
-                if self._saveBestTrainExamples():
-                    self.saveTrainExamplesFile('best.pth.tar.examples')
-                else:
-                    self._deleteExamplesFile('best.pth.tar.examples')
+                with accumulate_wall_time(phase_timings, 'serialization'):
+                    self.nnet.save_checkpoint(folder=self.args.checkpoint, filename=self.getCheckpointFile(i))
+                    self.saveTrainExamplesFile(self.getCheckpointFile(i) + ".examples")
+                    self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='best.pth.tar')
+                    if self._saveBestTrainExamples():
+                        self.saveTrainExamplesFile('best.pth.tar.examples')
+                    else:
+                        self._deleteExamplesFile('best.pth.tar.examples')
 
-            self._writeTelemetry(i, metrics, time.time() - iteration_started, replay_example_count)
+            self._writeTelemetry(
+                i,
+                metrics,
+                time.perf_counter() - iteration_started,
+                replay_example_count,
+                phase_timings=phase_timings,
+                iteration_started=iteration_started,
+            )
 
             if local_iteration == 1 and self._arg('deleteLoadedExamplesAfterFirstIteration', False):
                 self._deleteLoadedTrainExamplesFile()
@@ -1162,7 +1204,16 @@ class Coach():
         # from examples that were generated by the loaded model.
         self.skipFirstSelfPlay = skipFirstSelfPlay
 
-    def _writeTelemetry(self, iteration, training_metrics, duration_seconds, replay_examples):
+    def _writeTelemetry(
+        self,
+        iteration,
+        training_metrics,
+        duration_seconds,
+        replay_examples,
+        phase_timings=None,
+        iteration_started=None,
+    ):
+        telemetry_started = time.perf_counter()
         lengths = np.asarray(self._completed_game_lengths, dtype=np.float64)
         standard_lengths = np.maximum(
             0,
@@ -1249,6 +1300,44 @@ class Coach():
         payload.update(self._policyTelemetry())
         if self._reference_suite is not None:
             payload.update(self._reference_suite.evaluate(self.game, self.nnet))
+
+        if phase_timings is not None:
+            phase_timings['arena_telemetry'] = phase_timings.get(
+                'arena_telemetry', 0.0
+            ) + (time.perf_counter() - telemetry_started)
+            total_seconds = (
+                time.perf_counter() - iteration_started
+                if iteration_started is not None
+                else float(duration_seconds)
+            )
+            categorized_seconds = sum(
+                float(phase_timings.get(phase, 0.0))
+                for phase in ('self_play', 'training', 'arena_telemetry', 'serialization')
+            )
+            other_seconds = max(0.0, total_seconds - categorized_seconds)
+            timing_payload = {
+                'wall_self_play_seconds': float(phase_timings.get('self_play', 0.0)),
+                'wall_training_seconds': float(phase_timings.get('training', 0.0)),
+                'wall_arena_telemetry_seconds': float(
+                    phase_timings.get('arena_telemetry', 0.0)
+                ),
+                'wall_serialization_seconds': float(
+                    phase_timings.get('serialization', 0.0)
+                ),
+                'wall_other_seconds': float(other_seconds),
+                'wall_total_seconds': float(total_seconds),
+                'wall_timing_schema_version': 1,
+            }
+            for phase in (
+                'self_play', 'training', 'arena_telemetry', 'serialization', 'other'
+            ):
+                timing_payload['wall_{}_fraction'.format(phase)] = (
+                    float(timing_payload['wall_{}_seconds'.format(phase)] / total_seconds)
+                    if total_seconds > 0
+                    else None
+                )
+            payload.update(timing_payload)
+            payload['duration_seconds'] = float(total_seconds)
 
         telemetry_dir = self._arg('telemetryDir', None)
         if telemetry_dir:

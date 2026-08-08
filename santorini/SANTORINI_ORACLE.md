@@ -82,6 +82,8 @@ D4-unique early, middle, and late replay positions:
   --replay ./temp/santorini_v3_run13_gumbel/latest.examples.npz \
   --positions 500 \
   --budgets 20000 50000 100000 250000 \
+  --min-sign-agreement 0.90 \
+  --max-median-score-delta 100 \
   --json-out ./temp/run13_oracle_budget_stability.json
 ```
 
@@ -90,6 +92,27 @@ resume after interruption. A changed replay, budget list, seed, or selection is
 rejected instead of being silently mixed with prior results. Use the shallowest
 budget that is sufficiently stable for the intended measurement; a larger
 budget is not automatically a better cost/quality tradeoff.
+
+Calibrate candidate label budgets against fresh, materially deeper
+oracle-vs-oracle continuation outcomes:
+
+```bash
+.venv/bin/python calibrate_santorini_oracle_scores.py \
+  --replay ./temp/santorini_v3_run13_gumbel/latest.examples.npz \
+  --positions 300 \
+  --label-budgets 20000 50000 \
+  --adjudicator-nodes 250000 \
+  --fit-fraction 0.70 \
+  --json-out ./temp/run13_oracle_score_calibration.json
+```
+
+The tool splits D4-unique positions into fit and held-out test sets within each
+game stage before fitting the score temperature. It reports calibrated and
+nominal-temperature Brier score, log loss, expected calibration error, and
+score-sign accuracy, with held-out stage and score-magnitude breakdowns. Label
+queries reset independently; adjudication resets again and does not reuse a
+label search as its first move. The JSONL records and SQLite label cache make
+the long study resumable.
 
 ## Diagnose ranked root moves
 

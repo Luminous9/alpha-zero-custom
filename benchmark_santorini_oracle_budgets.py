@@ -32,6 +32,18 @@ def parse_args():
     parser.add_argument("--oracle-binary")
     parser.add_argument("--json-out", default=DEFAULT_OUTPUT)
     parser.add_argument(
+        "--min-sign-agreement",
+        type=float,
+        default=0.90,
+        help="Minimum agreement with the deepest score sign for a labeling budget.",
+    )
+    parser.add_argument(
+        "--max-median-score-delta",
+        type=float,
+        default=100.0,
+        help="Maximum median absolute score delta versus deepest for a stable budget.",
+    )
+    parser.add_argument(
         "--records-out",
         help="Append-only resume file; defaults beside --json-out with .records.jsonl.",
     )
@@ -223,7 +235,12 @@ def _distribution(values):
     }
 
 
-def summarize_records(records, budgets):
+def summarize_records(
+    records,
+    budgets,
+    min_sign_agreement=0.90,
+    max_median_score_delta=100.0,
+):
     budget_keys = [str(int(budget)) for budget in budgets]
     deepest = budget_keys[-1]
 
@@ -240,8 +257,14 @@ def summarize_records(records, budgets):
             ]),
             "agreement_with_deepest": {},
             "score_sign_agreement_with_deepest": {},
+            "absolute_score_delta_with_deepest": {},
             "consecutive_move_agreement": {},
             "budgets": {},
+            "stability_thresholds": {
+                "min_sign_agreement": float(min_sign_agreement),
+                "max_median_absolute_score_delta": float(max_median_score_delta),
+            },
+            "cheapest_stable_budget": None,
         }
         for budget in budget_keys:
             result["agreement_with_deepest"][budget] = _mean([
@@ -254,6 +277,16 @@ def summarize_records(records, budgets):
                 == score_sign(record["analyses"][deepest]["score"])
                 for record in group
             ])
+            score_deltas = [
+                abs(
+                    int(record["analyses"][budget]["score"])
+                    - int(record["analyses"][deepest]["score"])
+                )
+                for record in group
+            ]
+            result["absolute_score_delta_with_deepest"][budget] = _distribution(
+                score_deltas
+            )
             elapsed = [record["analyses"][budget]["elapsed_seconds"] for record in group]
             actual_nodes = [record["analyses"][budget]["nodes_visited"] for record in group]
             total_seconds = float(sum(elapsed))
@@ -270,6 +303,12 @@ def summarize_records(records, budgets):
                 "forced_score_rate": _mean([
                     abs(record["analyses"][budget]["score"]) >= 9000 for record in group
                 ]),
+                "score": _distribution([
+                    record["analyses"][budget]["score"] for record in group
+                ]),
+                "absolute_score": _distribution([
+                    abs(record["analyses"][budget]["score"]) for record in group
+                ]),
             }
         for previous, current in zip(budget_keys, budget_keys[1:]):
             result["consecutive_move_agreement"]["{}->{}".format(previous, current)] = _mean([
@@ -277,6 +316,17 @@ def summarize_records(records, budgets):
                 == record["analyses"][current]["next_fen"]
                 for record in group
             ])
+        for budget in budget_keys:
+            agreement = result["score_sign_agreement_with_deepest"][budget]
+            median_delta = result["absolute_score_delta_with_deepest"][budget]["median"]
+            if (
+                agreement is not None
+                and median_delta is not None
+                and agreement >= float(min_sign_agreement)
+                and median_delta <= float(max_median_score_delta)
+            ):
+                result["cheapest_stable_budget"] = int(budget)
+                break
         return result
 
     summary = {"all": summarize_group(records), "by_stage": {}}
@@ -323,6 +373,10 @@ def main():
         raise ValueError("Every --budgets value must be positive.")
     if budgets != sorted(set(budgets)):
         raise ValueError("--budgets must be unique and listed in increasing order.")
+    if not 0 <= args.min_sign_agreement <= 1:
+        raise ValueError("--min-sign-agreement must be between zero and one.")
+    if args.max_median_score_delta < 0:
+        raise ValueError("--max-median-score-delta must be non-negative.")
     if not os.path.isfile(args.replay):
         raise FileNotFoundError("Replay file not found: {}".format(args.replay))
 
@@ -370,7 +424,12 @@ def main():
         "oracle": oracle_info,
         "independent_searches": True,
         "transposition_table_reset_before_each_query": True,
-        "summary": summarize_records(records, budgets),
+        "summary": summarize_records(
+            records,
+            budgets,
+            min_sign_agreement=args.min_sign_agreement,
+            max_median_score_delta=args.max_median_score_delta,
+        ),
     }
     output_dir = os.path.dirname(os.path.abspath(args.json_out))
     os.makedirs(output_dir, exist_ok=True)

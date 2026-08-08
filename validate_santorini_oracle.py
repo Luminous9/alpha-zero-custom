@@ -1,11 +1,14 @@
 import argparse
 import json
+import os
+import time
 
 import numpy as np
 
 from santorini.SantoriniGame import SantoriniGame
 from santorini.SantoriniOpeningBook import SantoriniRandomOpeningSampler
 from santorini.SantoriniOracle import SantoriniOracleProcess, compare_legal_successors
+from santorini.OracleResearch import canonical_d4_fen, file_sha256, stage_for_builds
 
 
 def parse_args():
@@ -30,14 +33,22 @@ def main():
     sampler = SantoriniRandomOpeningSampler(random_orientation=True, rng=rng)
     compared = 0
     completed_games = 0
+    positions_by_stage = {"early": 0, "middle": 0, "late": 0}
+    d4_positions = set()
+    started = time.perf_counter()
 
     with SantoriniOracleProcess(args.oracle_binary) as oracle:
+        oracle_info = dict(oracle.info)
+        engine_digest = file_sha256(oracle.binary_path)
         for game_index in range(args.games):
             board = sampler.sample_self_play_board()
             cur_player = 1
             ply = 0
             while game.getGameEnded(board, cur_player) == 0 and compared < args.max_positions:
                 canonical = game.getCanonicalForm(board, cur_player)
+                stage = stage_for_builds(int(np.sum(canonical[1])))
+                positions_by_stage[stage] += 1
+                d4_positions.add(canonical_d4_fen(canonical))
                 result = compare_legal_successors(game, canonical, oracle)
                 if not result["matches"]:
                     raise AssertionError(
@@ -63,13 +74,21 @@ def main():
     summary = {
         "games": completed_games,
         "positions": compared,
+        "d4_unique_positions": len(d4_positions),
+        "positions_by_stage": positions_by_stage,
         "seed": args.seed,
         "successor_sets_match": True,
+        "oracle": oracle_info,
+        "engine_digest": engine_digest,
+        "elapsed_seconds": float(time.perf_counter() - started),
     }
     print(json.dumps(summary, indent=2, sort_keys=True))
     if args.json_out:
-        with open(args.json_out, "w") as output_file:
+        os.makedirs(os.path.dirname(os.path.abspath(args.json_out)), exist_ok=True)
+        temporary_path = args.json_out + ".tmp"
+        with open(temporary_path, "w") as output_file:
             json.dump(summary, output_file, indent=2, sort_keys=True)
+        os.replace(temporary_path, args.json_out)
 
 
 if __name__ == "__main__":

@@ -87,6 +87,12 @@ class TestOracleBudgetExperiment(unittest.TestCase):
         self.assertEqual(summary["agreement_with_deepest"]["10"], 0.5)
         self.assertEqual(summary["agreement_with_deepest"]["20"], 1.0)
         self.assertEqual(summary["score_sign_agreement_with_deepest"]["10"], 0.5)
+        self.assertEqual(
+            summary["absolute_score_delta_with_deepest"]["10"]["median"],
+            2.5,
+        )
+        self.assertEqual(summary["budgets"]["20"]["absolute_score"]["median"], 1.5)
+        self.assertEqual(summary["cheapest_stable_budget"], 20)
         self.assertEqual(summary["consecutive_move_agreement"]["10->20"], 0.5)
         self.assertEqual(score_sign(-3), -1)
         self.assertEqual(score_sign(0), 0)
