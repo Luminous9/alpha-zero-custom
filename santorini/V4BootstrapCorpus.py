@@ -34,6 +34,42 @@ def largest_remainder_quotas(total, probabilities):
     return quotas
 
 
+def joint_marginal_quotas(total, stage_fractions, source_fractions, source_counts=None):
+    """Round a 3x3 independent mix while preserving both declared marginals."""
+    stage_fractions = np.asarray(stage_fractions, dtype=np.float64)
+    source_fractions = np.asarray(source_fractions, dtype=np.float64)
+    stage_targets = largest_remainder_quotas(total, stage_fractions)
+    source_targets = (
+        largest_remainder_quotas(total, source_fractions)
+        if source_counts is None
+        else np.asarray(source_counts, dtype=np.int64)
+    )
+    if source_targets.shape != (3,) or np.any(source_targets < 0):
+        raise ValueError("Source counts must contain three nonnegative values.")
+    if int(source_targets.sum()) != int(total):
+        raise ValueError("Source counts must sum to the sampling total.")
+    exact = source_targets[:, None] * stage_fractions[None, :]
+    quotas = np.floor(exact).astype(np.int64)
+    row_deficits = source_targets - quotas.sum(axis=1)
+    column_deficits = stage_targets - quotas.sum(axis=0)
+    fractions = exact - quotas
+    while int(row_deficits.sum()):
+        candidates = [
+            (fractions[source, stage], -source, -stage, source, stage)
+            for source in range(3) for stage in range(3)
+            if row_deficits[source] > 0 and column_deficits[stage] > 0
+        ]
+        if not candidates:
+            raise AssertionError("Could not reconcile V4 source/stage quotas.")
+        _, _, _, source, stage = max(candidates)
+        quotas[source, stage] += 1
+        row_deficits[source] -= 1
+        column_deficits[stage] -= 1
+    if np.any(column_deficits):
+        raise AssertionError("V4 stage quotas were not preserved.")
+    return quotas
+
+
 def build_sampling_plan(
     engine,
     run13,
@@ -42,13 +78,24 @@ def build_sampling_plan(
     stage_fractions,
     source_fractions,
     seed,
+    replace=True,
+    source_counts=None,
+    joint_counts=None,
 ):
     stage_fractions = np.asarray(stage_fractions, dtype=np.float64)
     source_fractions = np.asarray(source_fractions, dtype=np.float64)
     if stage_fractions.shape != (3,) or source_fractions.shape != (3,):
         raise ValueError("V4 sampling requires exactly three stage and source fractions.")
-    joint = np.outer(source_fractions, stage_fractions)
-    quotas = largest_remainder_quotas(int(draws), joint.ravel()).reshape(3, 3)
+    if joint_counts is None:
+        quotas = joint_marginal_quotas(
+            int(draws), stage_fractions, source_fractions, source_counts
+        )
+    else:
+        quotas = np.asarray(joint_counts, dtype=np.int64)
+        if quotas.shape != (3, 3) or np.any(quotas < 0):
+            raise ValueError("Joint counts must be a nonnegative 3x3 matrix.")
+        if int(quotas.sum()) != int(draws):
+            raise ValueError("Joint counts must sum to the sampling total.")
     rng = np.random.RandomState(int(seed))
     corpus_ids = []
     position_indices = []
@@ -60,11 +107,10 @@ def build_sampling_plan(
     engine_source_counts = engine["source_counts"].astype(np.float64)
     run13_stages = run13["stage_ids"].astype(np.int64)
     run13_splits = run13["split_ids"].astype(np.int64)
+    strata = []
     for source_id in range(3):
         for stage_id in range(3):
             quota = int(quotas[source_id, stage_id])
-            if not quota:
-                continue
             if source_id < 2:
                 eligible = np.flatnonzero(
                     (engine_stages == stage_id)
@@ -79,18 +125,66 @@ def build_sampling_plan(
                 )
                 weights = np.ones(len(eligible), dtype=np.float64)
                 corpus_id = 1
-            if not len(eligible):
-                raise ValueError(
-                    "Sampling stratum {}/{} is empty in split {}.".format(
-                        SOURCE_NAMES[source_id], STAGE_NAMES[stage_id], split_id
-                    )
+            strata.append({
+                "source_id": source_id,
+                "stage_id": stage_id,
+                "quota": quota,
+                "eligible": eligible,
+                "weights": weights.astype(np.float64),
+                "corpus_id": corpus_id,
+            })
+
+    # Preserve the historical deterministic order for replacement sampling.
+    # Unique plans process the most supply-constrained strata first so a rare
+    # source wins any positions aggregated under both engine source labels.
+    if not replace:
+        strata.sort(key=lambda item: (
+            len(item["eligible"]) / max(item["quota"], 1),
+            item["source_id"],
+            item["stage_id"],
+        ))
+    used = {0: set(), 1: set()}
+    available_by_stratum = np.zeros((3, 3), dtype=np.int64)
+    for item in strata:
+        source_id = item["source_id"]
+        stage_id = item["stage_id"]
+        quota = item["quota"]
+        eligible = item["eligible"]
+        weights = item["weights"]
+        corpus_id = item["corpus_id"]
+        available_by_stratum[source_id, stage_id] = len(eligible)
+        if not quota:
+            continue
+        if not len(eligible):
+            raise ValueError(
+                "Sampling stratum {}/{} is empty in split {}.".format(
+                    SOURCE_NAMES[source_id], STAGE_NAMES[stage_id], split_id
                 )
-            probabilities = weights / weights.sum()
-            chosen = rng.choice(eligible, size=quota, replace=True, p=probabilities)
-            corpus_ids.extend([corpus_id] * quota)
-            position_indices.extend(map(int, chosen))
-            source_ids.extend([source_id] * quota)
-            stage_ids.extend([stage_id] * quota)
+            )
+        if not replace and used[corpus_id]:
+            keep = np.asarray(
+                [int(index) not in used[corpus_id] for index in eligible],
+                dtype=bool,
+            )
+            eligible = eligible[keep]
+            weights = weights[keep]
+        if not replace and len(eligible) < quota:
+            raise ValueError(
+                "Unique sampling stratum {}/{} needs {} positions but only {} "
+                "remain in split {} ({} before cross-source de-duplication).".format(
+                    SOURCE_NAMES[source_id], STAGE_NAMES[stage_id], quota,
+                    len(eligible), split_id,
+                    available_by_stratum[source_id, stage_id],
+                )
+            )
+        probabilities = weights / weights.sum()
+        chosen = rng.choice(eligible, size=quota, replace=bool(replace), p=probabilities)
+        if not replace:
+            used[corpus_id].update(map(int, chosen))
+        corpus_ids.extend([corpus_id] * quota)
+        position_indices.extend(map(int, chosen))
+        source_ids.extend([source_id] * quota)
+        stage_ids.extend([stage_id] * quota)
 
     order = rng.permutation(len(corpus_ids))
     return {
@@ -100,6 +194,8 @@ def build_sampling_plan(
         "stage_ids": np.asarray(stage_ids, dtype=np.int8)[order],
         "split_ids": np.full(int(draws), int(split_id), dtype=np.int8),
         "joint_quotas": quotas,
+        "available_by_stratum": available_by_stratum,
+        "sampling_with_replacement": bool(replace),
     }
 
 

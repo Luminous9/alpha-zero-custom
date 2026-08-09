@@ -7,18 +7,29 @@ The P1a 100k corpus/conversion correctness gate passes. A deterministic
 sampler plus a fresh, separately labeled Run13 component now pass the mixed-pilot
 gate. P1a is complete through the hand-rolled path: the 13-plane encoder, exact
 D4 reference, optimized regular tower, invariant auxiliary head, checkpoint
-reload, and frozen ordinary-Conv2d TorchScript export pass. P1b reaches a stop:
-Candidate C (6x192) is the best equivariant option and global score+winner blend
-wins the target bake-off, but the matched ordinary control dominates supervised
-metrics and beats Candidate C 30-10 in the full-game selection arena. No V4
-architecture is selected, so the fresh-start condition is not met and P1c must
-not begin without a new design decision. Final test data and final arena seeds
-remain untouched. See `experiments/santorini_v4/P1B_SUPERVISED_SCREEN.md`.
+reload, and frozen ordinary-Conv2d TorchScript export pass. The first P1b pilot
+selects global score+winner provisionally and rejects the tested equivariant
+candidates against the ordinary 8x96 control at that scale. Its original terminal
+stop conclusion was too strong: only 5,848 unique training positions and one
+ordinary shape were tested. P1b is reopened for stage/source-correct learning
+curves at roughly 100k/300k/1M examples, larger ordinary candidates, and one
+capacity-aware equivariant control. The 100k data gate now passes with 100,000
+unique train and 3,000 unique selection positions, exact declared marginals, no
+repetition, and no cross-corpus D4 overlap; the matched GPU screen is next. P1c
+remains gated on that selection. Final test data and final arena seeds remain untouched. See
+`experiments/santorini_v4/P1B_SUPERVISED_SCREEN.md` and
+`experiments/santorini_v4/P1B_SCALED_SCREEN.md`.
 Prereq reading: `santorini/santorini_ai_architecture_v3.md` (V3 spec),
 `santorini/SANTORINI_ORACLE.md` (oracle bridge), and
 `experiments/santorini_oracle/RESULTS.md` (Run13 distillation outcomes).
 
-V4 is a fresh network and training run: a candidate-selected, D4-equivariant tower with enriched input encoding, supervised-bootstrapped from `santorini-ai` engine data, then trained with the AlphaZero loop using the oracle as a value labeler and distribution shaper from iteration 1. Run13 is retired to benchmark anchor and placement teacher; it is not the starting checkpoint.
+V4 is a fresh network and training run: a candidate-selected tower with enriched
+input encoding, supervised-bootstrapped from `santorini-ai` engine data, then
+trained with the AlphaZero loop using the oracle as a value labeler and
+distribution shaper from iteration 1. Exact D4 equivariance remains an
+architecture candidate rather than a requirement; an ordinary winner retains D4
+augmentation and the existing root-evaluation machinery. Run13 is retired to
+benchmark anchor and placement teacher; it is not the starting checkpoint.
 
 ## 1. Why a fresh network instead of continuing Run 13
 
@@ -28,7 +39,7 @@ A corrected Run13 continuation plan exists (distribution shaping via sparring an
 
 1. **The search-facing risky lever was deferred anyway.** Blending oracle values into the search-facing value head during AlphaZero training was already scoped to a _later_ run, informed by auxiliary-head calibration. Sparring and seeded starts are lower-risk, independently configurable distribution-shaping components that can be introduced in the fresh run from day 1. The auxiliary head still shares the trunk and is therefore not risk-free; it receives its own ablation and weight schedule.
 2. **Detection power.** Continuation experiments produce small effects that 40-160-game arenas cannot resolve (the most interesting Run13 result was p=0.09). Bootstrap pretraining is cheaper to inspect because corpus generation is CPU-only and supervised pretraining has no MCTS in the loop. Staged corpus pilots and paired arenas can reject a broken transfer pipeline before committing a full self-play run.
-3. **The architecture hypothesis.** V3 is ~1.35M parameters with a minimal 6-plane encoding, playing against an opponent (santorini-ai NNUE + alpha-beta) that Run13 beats ~10% of the time at only 20k nodes. It is not yet proven that parameter capacity, rather than data/search/optimization, is the active ceiling. V4 tests the stronger hypothesis that richer features plus the correct D4 inductive bias improve useful capacity per inference cost. The ordinary-CNN control and supervised sizing bake-off in §3.2 prevent this assumption from being taken on faith.
+3. **The architecture hypothesis.** V3 is ~1.35M parameters with a minimal 6-plane encoding, playing against an opponent (santorini-ai NNUE + alpha-beta) that Run13 beats ~10% of the time at only 20k nodes. It is not yet proven that parameter capacity, rather than data/search/optimization, is the active ceiling. V4 tests richer features and increased useful capacity per inference cost; exact D4 equivariance is one candidate inductive bias, not the definition of the upgrade. The ordinary-CNN controls and supervised sizing bake-off in §3.2 prevent either capacity or equivariance from being assumed effective.
 
 Condition retained from that analysis: a fresh start is only justified _because_ it is paired with the architecture upgrade. Restarting the same network would re-buy Run13 at full price.
 
@@ -40,7 +51,7 @@ Goals:
 
 - Clearly exceed Run13 in direct paired arenas at 96/128 sims, without the deep-budget (1024-sim) regression pattern.
 - Materially close the gap against the santorini-ai oracle at 20k nodes.
-- D4 symmetry by construction, up to documented floating-point tolerance - zero material variance across symmetric positions and removal of the runtime symmetry-correction machinery.
+- For an equivariant winner, D4 symmetry by construction up to documented floating-point tolerance and removal of runtime symmetry correction. For an ordinary winner, retain augmentation, symmetry diagnostics, and cost-measured root orientation averaging.
 - Oracle in the loop from iteration 1 in its two trustworthy roles: scalar value labeler (auxiliary head first) and distribution shaper (sparring, seeded starts). After the explicitly declared bootstrap exception in §5.2, policy targets remain 100% native search targets produced by V4's configured MCTS/Gumbel search.
 
 Non-goals:
@@ -49,7 +60,7 @@ Non-goals:
 - Placement supervision from the oracle - unsupported joint-vs-sequential placement boundary (`SANTORINI_ORACLE.md`, "Known boundary").
 - Replicating NNUE input feature crosses. Those exist because NNUE has one hidden layer and cannot compose conjunctions; a deep conv tower can.
 
-## 3. Network architecture
+## 3. Network architecture candidates
 
 ### 3.1 D4-equivariant tower (G-CNN, regular representation)
 
@@ -90,9 +101,29 @@ Candidates (identical corpus, schedule, and selection holdout):
 | C           | 6      | 192          | ~2.5x        | Wide-shallow: tests whether width can use otherwise idle GPU capacity once receptive field is global |
 | D           | 12     | 160          | ~4.2x        | Upper probe; retain only if the strength/cost curve has not flattened                       |
 
-Add an ordinary-CNN control: the V3 8x96 tower with the same selected input planes, bootstrap corpus, targets, and schedule. This isolates the contribution of equivariance from the contribution of supervision and enriched encoding. A small 6-plane versus 13-plane comparison on candidate A (or the ordinary control) separately tests the feature additions.
+Ordinary-CNN candidates use the same selected input planes, bootstrap corpus,
+targets, and schedule. The 8x96 V3 shape remains the baseline; 10x128 and 6x192
+test the previously unmeasured capacity axis. They retain D4 augmentation and
+the existing root-orientation option. A small 6-plane versus 13-plane comparison
+on the baseline separately tests the feature additions.
 
-Selection protocol: (1) supervised selection-holdout policy/value loss; (2) equal-simulation round-robin arenas between candidates and versus Run13; (3) measured exported-model self-play throughput at FP32/FP16 and target batch size; (4) an untouched final test split and arena opening/seed set used only after selection. Report both equal-simulation strength and strength per approximately equal wall-clock or neural-evaluation budget. Pick the knee of strength per inference cost. Guideline: prefer width over depth if measurement supports it; depth is serial and receptive field is already global on a 5x5 board, but additional depth can still add useful computation. Cap depth at 12 for this bake-off.
+Candidate C remains the equivariant continuity control. Add one roughly
+learned-parameter-matched equivariant candidate (initial probe: 6 blocks, 320
+effective channels / multiplicity 40). This does not replace the mathematically
+valid group projection with unconstrained concatenation. If a richer head is
+tested, it must remain equivariant and pass the full §3.1 transformation/export
+suite. Report learned parameters, exported parameters, FLOPs, and measured cost;
+no single matching notion is allowed to stand in for all four.
+
+Selection protocol: (1) matched GPU learning curves at approximately 100k, 300k,
+and 1M training examples, with supervised selection-holdout policy/value loss and
+explicit unique/repetition statistics; (2) equal-simulation round-robin arenas
+between surviving candidates and a diagnostic preview versus Run13; (3) measured
+exported-model self-play throughput at FP32/FP16 and target batch size; (4) Gate
+G1 versus Run13 for the selected scaled checkpoint; (5) an untouched final test
+split and arena opening/seed set used only after selection. Report both
+equal-simulation strength and strength per approximately equal wall-clock or
+neural-evaluation budget. Pick the knee of strength per inference cost.
 
 ### 3.3 Input encoding
 
@@ -202,7 +233,7 @@ Conversion uses `SantoriniOracle.py` FEN mapping and stores one D4-canonical ori
 - **Default bootstrap value:** a calibrated interpolation of engine evaluation and recorded engine-continuation winner, `v_boot = (1-alpha_boot) * z_engine + alpha_boot * v_score`, with `0 < alpha_boot < 1`, where `v_score = 2*sigmoid(score/T)-1` and mate-band scores are clamped. The P1 pilot compares the P0b global mapping against an explicitly recorded stage-aware calibration/downweighting rule because early-stage P0b calibration remained biased. Choose and freeze the mapping and `alpha_boot` using only calibration-fit/pilot-selection data before the reserved evaluation. `z_engine` is converted from the absolute recorded winner to the FEN side-to-move perspective. This is an explicitly declared bootstrap exception to V4's no-oracle-blend rule during AlphaZero training: the teacher policy, evaluation, and continuation outcome are coherent, and evaluation/result interpolation matches how the teacher's own NNUE was trained.
 - **Required value ablation:** pretrain an otherwise identical winner-only variant (`alpha_boot=0`). If winner-only matches the blended model within the predeclared selection margin on the selection holdout and reserved selection arenas, prefer winner-only because it removes the target-semantics transition when the main value head switches to self-play z. If the blend wins clearly, record `alpha_boot`, T, and the transition explicitly in the checkpoint metadata. The final test split and final arena seeds remain untouched until the design is locked.
 - **Policy:** the recorded engine best move is a legally smoothed hard target, weighted below the value loss. Put `1-epsilon` on the best V4-equivalent action set and distribute `epsilon` only over other legal actions; never smooth over all 1,625 logits. A winning no-build move divides best-move mass over its equivalent V4 aliases. Hard policy imitation is acceptable as an initialization with coherent teacher value/outcome supervision; this does not contradict rejecting post-hoc surgery on Run13.
-- **Small pilot ablations:** on the pilot corpus, compare 6 versus 13 input planes, ordinary versus equivariant candidate A, and winner-only versus score+winner. These are screening experiments, not claims of final strength.
+- **Small pilot ablations:** on the pilot corpus, compare 6 versus 13 input planes, ordinary versus equivariant candidate A, and winner-only versus score+winner. These are screening experiments, not claims of final strength. The first P1b run confirmed that this limitation is substantive; architecture and target choices remain provisional until the scaled curves.
 
 ### 5.3 Placement (the oracle cannot teach it)
 
@@ -289,8 +320,9 @@ Working expectation to be replaced by measurement: candidate B is ~2.2x V3 dense
 1. **P0a - deterministic data contract:** pool reset fix + versioned label cache; Mortal-only V4 datagen schema with best action/successor; reset-per-game TT policy; schema/action/FEN tests.
 2. **P0b - measurement:** deeper-adjudicator calibration study; score-stability-by-phase report; rules cross-validation; instrumented Run13 wall-clock split.
 3. **P1a - pilot and architecture feasibility:** 100k-500k corpus pilot + conversion pipeline; V4 encoder rule/covariance tests; pinned-escnn and hand-rolled feasibility spike; exported-model equivariance/checkpoint tests.
-4. **P1b - screening ablations (stopped):** the source-aware trainer, ordinary 6/13-plane control, per-epoch selection, Candidate A-D sizing, matched stage/global/winner targets, and paired standard/full selection arenas are complete. Global blend is the selected target and winner-only fails the match condition. Candidate C is the best equivariant option but loses the matched full-game architecture arena 10-30 to the ordinary control, which also dominates held-out metrics. No architecture is locked; do not enter P1c. The P100 export benchmark remains available as diagnostic work only. Final test data and final arena seeds remain untouched.
-5. **P1c - full corpus and pretraining (not authorized after P1b stop):** if a future architecture clears a repeated P1b, generate 5M valid records, expanding only if the learning curve justifies it; full sizing/pretraining of the selected design including phase-balanced Run13 placement distillation.
-6. **Gate G1 (not reached):** separate standard-play and full-game arenas versus Run13 at 96/128 simulations, plus equal-cost reporting. Stop/debug thresholds use paired-block uncertainty.
-7. **P2 - self-play:** sparring + refreshed seeded starts + low-weight auxiliary head, each independently switchable; replay/telemetry schema extended.
-8. **Review:** after ~20-30 iterations, run the 96/128/1024 battery and component ablations; decide whether to study a nonzero search-facing `lambda` in a following run.
+4. **P1b.1 - small screening ablations (complete, conclusion corrected):** the source-aware trainer, ordinary 6/13-plane baseline, per-epoch selection, Candidate A-D sizing, matched stage/global/winner targets, and paired standard/full selection arenas are complete. Global blend is provisional and winner-only fails at this scale. Candidate C loses the matched full-game pilot arena 10-30 to ordinary 8x96. This rejects the tested candidate at this scale, not V4.
+5. **P1b.2 - scaled architecture screen (active):** generate stage/source-correct supply; record stratum coverage and repetition; run matched 100k/300k/1M learning curves for ordinary 8x96, ordinary 10x128, ordinary 6x192, Candidate C, and one capacity-aware equivariant probe. Use a small Run13 preview only as a diagnostic. Benchmark surviving exports on P100. Final test data and final arena seeds remain untouched.
+6. **P1c - full corpus and pretraining (gated):** after P1b.2 selects an architecture, generate 5M valid records, expanding only if the learning curve justifies it; full pretraining includes phase-balanced Run13 placement distillation.
+7. **Gate G1:** separate standard-play and full-game arenas versus Run13 at 96/128 simulations, plus equal-cost reporting. Stop/debug thresholds use paired-block uncertainty.
+8. **P2 - self-play:** sparring + refreshed seeded starts + low-weight auxiliary head, each independently switchable; replay/telemetry schema extended.
+9. **Review:** after ~20-30 iterations, run the 96/128/1024 battery and component ablations; decide whether to study a nonzero search-facing `lambda` in a following run.

@@ -1,12 +1,14 @@
 # P1b Supervised Target and Architecture Screen
 
-Status: P1b reaches a stop decision. The supervised pipeline, Candidate A-D
-sizing, matched target screen, matched ordinary control, and two paired
-selection-arena gates are complete. Global score+winner blend wins the target
-screen, but no equivariant candidate clears the ordinary control. The plan's
-fresh-start architecture condition is therefore not met, and P1c must not begin
-without a new decision. The final test split and final arena seeds remain
-untouched.
+Status: the original P1b pilot is complete, but its terminal stop conclusion has
+been withdrawn after review. The supervised pipeline, Candidate A-D sizing,
+matched target screen, matched ordinary control, and two paired selection-arena
+gates are valid. Global score+winner blend wins this pilot target screen, and no
+tested equivariant candidate clears the ordinary 8x96 control. The result rejects
+this candidate set at this data scale; it does not select the final architecture
+or reject the fresh-network/bootstrap program. P1b continues with scaled learning
+curves and broader ordinary/equivariant controls. The final test split and final
+arena seeds remain untouched.
 
 ## Implemented contract
 
@@ -187,20 +189,37 @@ summaries. The ordinary control is also faster in local frozen-export smoke
 tests. P100 timing can quantify the cost ratio but cannot repair this strength
 failure.
 
-## Decision
+## Corrected decision after review
 
-Do not proceed to P1c. The global score+winner target is selected conditional on
-future use, but there is no selected V4 architecture. Restarting the ordinary
-control would violate the plan's explicit condition that a fresh run is
-justified only by an architecture upgrade, while Candidate C does not beat that
-control.
+Do not proceed directly to P1c, but continue P1b. The original decision promoted
+a deliberately small screening result into a final-strength architecture claim.
+Only 5,848 unique training positions and one ordinary shape were tested. The
+supported conclusion is therefore limited to the tested checkpoints: Candidate C
+loses to the ordinary 8x96 control under this pilot contract.
 
-`benchmark_santorini_v4_inference.py` remains ready for a P100 diagnostic across
-the ordinary control and Candidates A-D, including FP32/FP16 agreement. It is no
-longer a go/no-go prerequisite because no equivariant candidate survived the
-strength gate. A continuation requires an explicit design choice: return to the
-Run13 continuation plan, or formulate a materially new architecture hypothesis
-and repeat P1b without opening the final evaluation data.
+The next screen adds ordinary 10x128 and 6x192 towers, retains Candidate C as a
+continuity control, and adds one roughly learned-parameter-matched equivariant
+candidate. It uses stage/source-correct data with learning-curve observations at
+approximately 100k, 300k, and 1M training examples. Sampling reports unique
+coverage, maximum repetition, and per-stratum supply; a large nominal draw count
+is not treated as a large corpus when it repeatedly draws a scarce stratum.
+
+The current equivariant policy readout is not classified as an implementation
+bug. It applies a shared local map to every group component, maps all eight
+outputs into canonical policy coordinates, and averages them. The invariant
+value head likewise performs a valid group projection. The open question is
+learned capacity: effective-channel matching gave Candidate C substantially
+fewer learned parameters than the ordinary control, so the scaled screen must
+include a capacity-aware equivariant comparison rather than an unconstrained
+concatenation that would break equivariance.
+
+Global score+winner remains the provisional bootstrap default and winner-only
+remains the declared bake-off ablation. Neither target nor the 13-plane input is
+permanently locked by this pilot. A small candidate-versus-Run13 arena may be run
+as a transfer/pipeline diagnostic during the learning curves, but Gate G1 remains
+the 96/128-simulation comparison of the selected, scaled checkpoint. P1c begins
+only after that repeated P1b selects an architecture. The P100 inference benchmark
+remains part of cost-aware selection.
 
 ## Reproduction and validation
 

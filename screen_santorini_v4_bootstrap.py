@@ -17,6 +17,7 @@ from santorini.V4Supervised import (
     DEFAULT_ALPHA_BOOT,
     DEFAULT_STAGE_RELIABILITY,
     GLOBAL_SCORE_TEMPERATURE,
+    StreamingPreparedV4Corpus,
     apply_d4_augmentation,
     prepare_corpus,
 )
@@ -36,6 +37,21 @@ SCREEN_CONFIGS = (
     {"name": "equivariant_c_13_global_blend", "architecture": "equivariant", "planes": 13, "target": "global_blend", "candidate": "C", "effective_channels": 192, "residual_blocks": 6},
     {"name": "equivariant_c_13_winner", "architecture": "equivariant", "planes": 13, "target": "winner", "candidate": "C", "effective_channels": 192, "residual_blocks": 6},
     {"name": "equivariant_d_13_stage_blend", "architecture": "equivariant", "planes": 13, "target": "stage_blend", "candidate": "D", "effective_channels": 160, "residual_blocks": 12},
+    {"name": "ordinary_10x128_13_global_blend", "architecture": "ordinary", "planes": 13, "target": "global_blend", "candidate": "O-10x128", "channels": 128, "residual_blocks": 10},
+    {"name": "ordinary_6x192_13_global_blend", "architecture": "ordinary", "planes": 13, "target": "global_blend", "candidate": "O-6x192", "channels": 192, "residual_blocks": 6},
+    {"name": "equivariant_e_13_global_blend", "architecture": "equivariant", "planes": 13, "target": "global_blend", "candidate": "E-capacity", "effective_channels": 320, "residual_blocks": 6},
+)
+
+# Preserve the original no-`--configs` behavior for reproducibility. The scaled
+# candidates are deliberately opt-in because running every historical pilot and
+# scaled model together would be expensive and scientifically muddled.
+PILOT_CONFIG_NAMES = tuple(
+    config["name"] for config in SCREEN_CONFIGS
+    if config["name"] not in {
+        "ordinary_10x128_13_global_blend",
+        "ordinary_6x192_13_global_blend",
+        "equivariant_e_13_global_blend",
+    }
 )
 
 
@@ -61,6 +77,13 @@ def parse_args():
     )
     parser.add_argument("--seed", type=int, default=20260812)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument(
+        "--data-loading", choices=("eager", "streaming"), default="eager",
+        help=(
+            "Streaming prepares one batch at a time and is required for scaled "
+            "plans whose dense 1625-action policies would exhaust memory."
+        ),
+    )
     parser.add_argument("--configs", nargs="+", choices=[config["name"] for config in SCREEN_CONFIGS])
     return parser.parse_args()
 
@@ -73,11 +96,11 @@ def _device(name):
     return torch.device(name)
 
 
-def _ordinary_model(game, planes):
+def _ordinary_model(game, planes, channels=96, residual_blocks=8):
     args = SimpleNamespace(
         input_channels=int(planes),
-        num_channels=96,
-        num_residual_blocks=8,
+        num_channels=int(channels),
+        num_residual_blocks=int(residual_blocks),
         policy_channels=65,
         value_hidden_size=128,
         dropout=0.0,
@@ -87,7 +110,12 @@ def _ordinary_model(game, planes):
 
 def _model(game, config):
     if config["architecture"] == "ordinary":
-        return _ordinary_model(game, config["planes"])
+        return _ordinary_model(
+            game,
+            config["planes"],
+            config.get("channels", 96),
+            config.get("residual_blocks", 8),
+        )
     return D4RegularNetwork(
         game,
         input_channels=config["planes"],
@@ -107,47 +135,71 @@ def _evaluate(model, corpus, planes, target_kind, batch_size, device):
     model.eval()
     predictions = []
     policies = []
+    target_policies = []
+    winner_values = []
+    score_values = []
+    stage_blended_values = []
+    global_blended_values = []
+    stage_ids = []
+    source_ids = []
     started = time.perf_counter()
     with torch.no_grad():
-        for start in range(0, len(corpus.encoded_boards), batch_size):
-            end = min(len(corpus.encoded_boards), start + batch_size)
-            boards = torch.from_numpy(
-                np.ascontiguousarray(corpus.encoded_boards[start:end, :planes])
-            ).to(device)
+        for start in range(0, len(corpus), batch_size):
+            end = min(len(corpus), start + batch_size)
+            batch = corpus.batch(np.arange(start, end), planes)
+            boards = torch.from_numpy(np.ascontiguousarray(batch.encoded_boards)).to(device)
             out_policy, out_value = model(boards)
             policies.append(out_policy.cpu().numpy())
             predictions.append(out_value[:, 0].cpu().numpy())
+            target_policies.append(batch.policies)
+            winner_values.append(batch.winner_values)
+            score_values.append(batch.score_values)
+            stage_blended_values.append(batch.stage_blended_values)
+            global_blended_values.append(batch.global_blended_values)
+            stage_ids.append(batch.stage_ids)
+            source_ids.append(batch.source_ids)
     _sync(device)
     elapsed = time.perf_counter() - started
     log_policy = np.concatenate(policies)
     prediction = np.concatenate(predictions)
-    target_policy = corpus.policies
-    selected_target = corpus.value_targets(target_kind)
+    target_policy = np.concatenate(target_policies)
+    winner_values = np.concatenate(winner_values)
+    score_values = np.concatenate(score_values)
+    stage_blended_values = np.concatenate(stage_blended_values)
+    global_blended_values = np.concatenate(global_blended_values)
+    stage_ids = np.concatenate(stage_ids)
+    source_ids = np.concatenate(source_ids)
+    targets = {
+        "winner": winner_values,
+        "stage_blend": stage_blended_values,
+        "global_blend": global_blended_values,
+    }
+    selected_target = targets[target_kind]
     result = {
         "policy_loss": float(-np.mean(np.sum(target_policy * log_policy, axis=1))),
         "policy_top1_accuracy": float(np.mean(np.argmax(log_policy, axis=1) == np.argmax(target_policy, axis=1))),
         "selected_value_mse": float(np.mean((prediction - selected_target) ** 2)),
-        "winner_value_mse": float(np.mean((prediction - corpus.winner_values) ** 2)),
-        "score_value_mse": float(np.mean((prediction - corpus.score_values) ** 2)),
-        "stage_blend_value_mse": float(np.mean((prediction - corpus.stage_blended_values) ** 2)),
-        "global_blend_value_mse": float(np.mean((prediction - corpus.global_blended_values) ** 2)),
-        "winner_sign_accuracy": float(np.mean(np.sign(prediction) == np.sign(corpus.winner_values))),
+        "winner_value_mse": float(np.mean((prediction - winner_values) ** 2)),
+        "score_value_mse": float(np.mean((prediction - score_values) ** 2)),
+        "stage_blend_value_mse": float(np.mean((prediction - stage_blended_values) ** 2)),
+        "global_blend_value_mse": float(np.mean((prediction - global_blended_values) ** 2)),
+        "winner_sign_accuracy": float(np.mean(np.sign(prediction) == np.sign(winner_values))),
         "examples_per_second": float(len(prediction) / elapsed),
         "elapsed_seconds": float(elapsed),
         "by_stage": {},
         "by_source": {},
     }
     for label, ids, names in (
-        ("by_stage", corpus.stage_ids, STAGE_NAMES),
-        ("by_source", corpus.source_ids, SOURCE_NAMES),
+        ("by_stage", stage_ids, STAGE_NAMES),
+        ("by_source", source_ids, SOURCE_NAMES),
     ):
         for index, name in enumerate(names):
             mask = ids == index
             result[label][name] = {
                 "examples": int(np.sum(mask)),
                 "policy_loss": float(-np.mean(np.sum(target_policy[mask] * log_policy[mask], axis=1))),
-                "winner_value_mse": float(np.mean((prediction[mask] - corpus.winner_values[mask]) ** 2)),
-                "stage_blend_value_mse": float(np.mean((prediction[mask] - corpus.stage_blended_values[mask]) ** 2)),
+                "winner_value_mse": float(np.mean((prediction[mask] - winner_values[mask]) ** 2)),
+                "stage_blend_value_mse": float(np.mean((prediction[mask] - stage_blended_values[mask]) ** 2)),
             }
     return result
 
@@ -162,7 +214,6 @@ def _train_one(config, train, selection, args, device, game):
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
     )
-    targets = train.value_targets(config["target"])
     history = []
     selection_history = []
     best_objective = float("inf")
@@ -173,13 +224,14 @@ def _train_one(config, train, selection, args, device, game):
     for epoch in range(args.epochs):
         model.train()
         rng = np.random.RandomState(args.seed + epoch)
-        order = rng.permutation(len(train.encoded_boards))
+        order = rng.permutation(len(train))
         sums = {"policy": 0.0, "value": 0.0, "total": 0.0, "examples": 0}
         optimization_started = time.perf_counter()
         for start in range(0, len(order), args.batch_size):
             indices = order[start:start + args.batch_size]
-            boards = train.encoded_boards[indices, :config["planes"]]
-            policies = train.policies[indices]
+            batch = train.batch(indices, config["planes"])
+            boards = batch.encoded_boards
+            policies = batch.policies
             if config["architecture"] == "ordinary":
                 symmetry_ids = rng.randint(0, 8, size=len(indices))
                 boards, policies = apply_d4_augmentation(
@@ -187,7 +239,9 @@ def _train_one(config, train, selection, args, device, game):
                 )
             board_tensor = torch.from_numpy(np.ascontiguousarray(boards)).to(device)
             policy_tensor = torch.from_numpy(np.ascontiguousarray(policies)).to(device)
-            value_tensor = torch.from_numpy(targets[indices, None]).to(device)
+            value_tensor = torch.from_numpy(
+                batch.value_targets(config["target"])[:, None]
+            ).to(device)
             optimizer.zero_grad(set_to_none=True)
             output_policy, output_value = model(board_tensor)
             policy_loss = -torch.mean(torch.sum(policy_tensor * output_policy, dim=1))
@@ -256,7 +310,7 @@ def _train_one(config, train, selection, args, device, game):
         "best_selection_objective": best_objective,
         "optimization_seconds": optimization_seconds,
         "total_train_and_selection_seconds": total_seconds,
-        "train_examples_per_second": args.epochs * len(train.encoded_boards) / optimization_seconds,
+        "train_examples_per_second": args.epochs * len(train) / optimization_seconds,
         "learned_parameters": sum(parameter.numel() for parameter in model.parameters()),
         "selection": selection_history[best_epoch - 1]["metrics"],
         "final_selection": selection_history[-1]["metrics"],
@@ -289,14 +343,13 @@ def main():
         stage_reliability=args.stage_reliability,
         temperature=args.score_temperature,
     )
-    train = prepare_corpus(
-        plan_path=args.train_plan, expected_split=0, **prepare_kwargs
+    corpus_factory = (
+        StreamingPreparedV4Corpus if args.data_loading == "streaming" else prepare_corpus
     )
-    selection = prepare_corpus(
-        plan_path=args.selection_plan, expected_split=1, **prepare_kwargs
-    )
+    train = corpus_factory(plan_path=args.train_plan, expected_split=0, **prepare_kwargs)
+    selection = corpus_factory(plan_path=args.selection_plan, expected_split=1, **prepare_kwargs)
     preparation_seconds = time.perf_counter() - prepare_started
-    selected_names = set(args.configs or [config["name"] for config in SCREEN_CONFIGS])
+    selected_names = set(args.configs or PILOT_CONFIG_NAMES)
     configs = [config for config in SCREEN_CONFIGS if config["name"] in selected_names]
     game = SantoriniGame(5, sequential_placement=True)
     results = []
@@ -359,14 +412,18 @@ def main():
         "alpha_boot": args.alpha_boot,
         "score_temperature": args.score_temperature,
         "stage_reliability": list(args.stage_reliability),
-        "train_examples": len(train.encoded_boards),
-        "selection_examples": len(selection.encoded_boards),
+        "train_examples": len(train),
+        "selection_examples": len(selection),
+        "data_loading": args.data_loading,
         "preparation_seconds": preparation_seconds,
         "final_test_touched": False,
         "results": results,
     }
     output_path = os.path.join(args.output_dir, "results.json")
     _write_json(output_path, output)
+    if args.data_loading == "streaming":
+        train.close()
+        selection.close()
     print("Results: {}".format(os.path.abspath(output_path)))
 
 

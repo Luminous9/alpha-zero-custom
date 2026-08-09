@@ -12,6 +12,7 @@ import numpy as np
 from tqdm import tqdm
 
 from benchmark_santorini_oracle_budgets import collect_unique_positions, file_sha256
+from build_santorini_v4_corpus import _split_id
 from santorini.OracleResearch import ParallelOraclePool, STAGES
 from santorini.SantoriniOracle import anonymous_board_key, fen_to_canonical_board
 
@@ -26,6 +27,29 @@ def parse_args():
     )
     parser.add_argument("--replay", default=DEFAULT_REPLAY)
     parser.add_argument("--positions", type=int, default=300)
+    parser.add_argument(
+        "--stage-positions", type=int, nargs=3,
+        metavar=("EARLY", "MIDDLE", "LATE"),
+        help=(
+            "Explicit stage quotas. When supplied, overrides the equal split "
+            "implied by --positions and records their sum as the position count."
+        ),
+    )
+    parser.add_argument(
+        "--split-stage-positions", type=int, nargs=9,
+        metavar=(
+            "TRAIN_E", "TRAIN_M", "TRAIN_L",
+            "SELECT_E", "SELECT_M", "SELECT_L",
+            "TEST_E", "TEST_M", "TEST_L",
+        ),
+        help=(
+            "Exact row-major split/stage quotas. Overrides --positions and "
+            "--stage-positions. Splits use the component's history-window key."
+        ),
+    )
+    parser.add_argument("--selection-fraction", type=float, default=0.10)
+    parser.add_argument("--test-fraction", type=float, default=0.10)
+    parser.add_argument("--split-seed", type=int, default=20260808)
     parser.add_argument("--seed", type=int, default=20260810)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--early-nodes", type=int, default=250_000)
@@ -91,34 +115,77 @@ def _history_windows(replay_path):
     return boundaries
 
 
-def select_positions(replay_path, count, seed, excluded_fens, excluded_hashes):
+def select_positions(
+    replay_path, count, seed, excluded_fens, excluded_hashes, stage_positions=None,
+    split_stage_positions=None, split_seed=20260808, selection_fraction=0.10,
+    test_fraction=0.10,
+):
     by_stage = collect_unique_positions(replay_path)
     boundaries = _history_windows(replay_path)
-    quota, remainder = divmod(int(count), len(STAGES))
+    if split_stage_positions is not None:
+        split_stage_positions = np.asarray(split_stage_positions, dtype=np.int64)
+        if split_stage_positions.shape != (3, 3) or np.any(split_stage_positions < 0):
+            raise ValueError("Split/stage quotas must be a nonnegative 3x3 matrix.")
+        if int(split_stage_positions.sum()) != int(count):
+            raise ValueError("Split/stage quotas must sum to the requested count.")
+        stage_positions = split_stage_positions.sum(axis=0)
+    elif stage_positions is None:
+        quota, remainder = divmod(int(count), len(STAGES))
+        stage_positions = [
+            quota + (1 if stage_index < remainder else 0)
+            for stage_index in range(len(STAGES))
+        ]
+    if len(stage_positions) != len(STAGES) or any(
+        int(value) < 0 for value in stage_positions
+    ):
+        raise ValueError("Stage position quotas must be three nonnegative integers.")
     rng = np.random.RandomState(int(seed))
     selected = []
     for stage_index, stage in enumerate(STAGES):
         candidates = [
-            record
+            dict(record)
             for record in by_stage[stage]
             if record["fen"] not in excluded_fens
             and _position_hash(record["fen"]) not in excluded_hashes
         ]
-        stage_quota = quota + (1 if stage_index < remainder else 0)
+        stage_quota = int(stage_positions[stage_index])
         if len(candidates) < stage_quota:
             raise ValueError(
                 "Stage {} has only {} eligible positions for quota {}.".format(
                     stage, len(candidates), stage_quota
                 )
             )
-        indices = rng.choice(len(candidates), size=stage_quota, replace=False)
-        for candidate_index in indices:
-            record = dict(candidates[int(candidate_index)])
+        for record in candidates:
             record["history_window"] = int(
                 np.searchsorted(boundaries, int(record["replay_index"]), side="right")
             )
             record["position_hash"] = _position_hash(record["fen"])
-            selected.append(record)
+        if split_stage_positions is None:
+            indices = rng.choice(len(candidates), size=stage_quota, replace=False)
+            selected.extend(candidates[int(index)] for index in indices)
+        else:
+            for split_id in range(3):
+                split_candidates = [
+                    record for record in candidates
+                    if _split_id(
+                        "run13-window:{}".format(record["history_window"]),
+                        split_seed,
+                        selection_fraction,
+                        test_fraction,
+                    ) == split_id
+                ]
+                split_quota = int(split_stage_positions[split_id, stage_index])
+                if len(split_candidates) < split_quota:
+                    raise ValueError(
+                        "Stage {} split {} has only {} eligible positions for "
+                        "quota {}.".format(
+                            stage, split_id, len(split_candidates), split_quota
+                        )
+                    )
+                indices = rng.choice(
+                    len(split_candidates), size=split_quota, replace=False
+                )
+                selected.extend(split_candidates[int(index)] for index in indices)
     rng.shuffle(selected)
     for position_id, record in enumerate(selected):
         record["position_id"] = int(position_id)
@@ -126,13 +193,15 @@ def select_positions(replay_path, count, seed, excluded_fens, excluded_hashes):
 
 
 def _metadata_identity(metadata):
-    return {
+    identity = {
         key: metadata[key]
         for key in (
             "schema_version", "replay_sha256", "positions", "seed",
             "stage_node_budgets", "engine_digest", "selection",
         )
     }
+    identity["split_contract"] = metadata.get("split_contract")
+    return identity
 
 
 def _load_or_initialize(path, metadata):
@@ -162,7 +231,13 @@ def _append_record(path, record):
 
 def main():
     args = parse_args()
-    if args.positions < 3 or args.workers < 1:
+    if args.split_stage_positions is not None:
+        requested_positions = sum(args.split_stage_positions)
+    elif args.stage_positions is not None:
+        requested_positions = sum(args.stage_positions)
+    else:
+        requested_positions = args.positions
+    if requested_positions < 3 or args.workers < 1:
         raise ValueError("Positions must be at least three and workers must be positive.")
     stage_budgets = {
         "early": int(args.early_nodes),
@@ -174,10 +249,18 @@ def main():
     replay_digest = file_sha256(args.replay)
     selection = select_positions(
         args.replay,
-        args.positions,
+        requested_positions,
         args.seed,
         _excluded_fens(args.exclude_records),
         _excluded_hashes(args.exclude_corpus),
+        args.stage_positions,
+        (
+            np.asarray(args.split_stage_positions, dtype=np.int64).reshape(3, 3)
+            if args.split_stage_positions is not None else None
+        ),
+        args.split_seed,
+        args.selection_fraction,
+        args.test_fraction,
     )
     pool = ParallelOraclePool(args.oracle_binary, cache_path=args.label_cache)
     try:
@@ -191,6 +274,12 @@ def main():
             "stage_node_budgets": stage_budgets,
             "engine_digest": pool.engine_digest,
             "selection": selection,
+            "split_contract": {
+                "split_seed": int(args.split_seed),
+                "selection_fraction": float(args.selection_fraction),
+                "test_fraction": float(args.test_fraction),
+                "split_stage_positions": args.split_stage_positions,
+            },
         }
         completed_records = _load_or_initialize(args.records_out, metadata)
         completed = {int(record["position_id"]) for record in completed_records}

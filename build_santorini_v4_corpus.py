@@ -100,11 +100,17 @@ def _compatible_manifest_identity(manifest):
         "engine_digest": manifest["engine_digest"],
         "gods": manifest["gods"],
         "tt_policy": manifest["tt_policy"],
-        "random_moves_min": int(generation["random_moves_min"]),
-        "random_moves_max": int(generation["random_moves_max"]),
         "requested_node_limit": int(generation["requested_node_limit"]),
         "min_depth_node_limit": int(generation["min_depth_node_limit"]),
         "max_completed_depth": int(generation["max_completed_depth"]),
+    }
+
+
+def _generation_distribution(manifest):
+    generation = manifest["generation"]
+    return {
+        "random_moves_min": int(generation["random_moves_min"]),
+        "random_moves_max": int(generation["random_moves_max"]),
         "subgame_initial_chance": float(generation["subgame_initial_chance"]),
     }
 
@@ -178,6 +184,7 @@ def convert_shards(args):
     aggregates = {}
     shard_summaries = []
     expected_manifest = None
+    generation_distributions = Counter()
     raw_records = 0
     seen_record_ids = set()
     game_winners = {}
@@ -199,6 +206,8 @@ def convert_shards(args):
             expected_manifest = identity
         elif identity != expected_manifest:
             raise ValueError("V4 shards have incompatible generation identities.")
+        distribution = _generation_distribution(manifest)
+        generation_distributions[json.dumps(distribution, sort_keys=True)] += len(records)
         expected_records = int(manifest["generation"]["target_records"])
         if len(records) != expected_records:
             raise ValueError(
@@ -365,6 +374,13 @@ def convert_shards(args):
         "output": output_path,
         "engine_digest": expected_manifest["engine_digest"],
         "generation": expected_manifest,
+        "generation_distributions": [
+            {
+                "configuration": json.loads(configuration),
+                "records": int(records),
+            }
+            for configuration, records in sorted(generation_distributions.items())
+        ],
         "shards": shard_summaries,
         "raw_records": raw_records,
         "unique_d4_positions": len(keys),

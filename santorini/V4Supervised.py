@@ -88,6 +88,24 @@ class PreparedV4Corpus:
     source_ids: np.ndarray
     split_ids: np.ndarray
 
+    def __len__(self):
+        return len(self.encoded_boards)
+
+    def batch(self, indices, planes=None):
+        indices = np.asarray(indices, dtype=np.int64)
+        plane_slice = slice(None) if planes is None else slice(0, int(planes))
+        return PreparedV4Batch(
+            encoded_boards=self.encoded_boards[indices, plane_slice],
+            policies=self.policies[indices],
+            winner_values=self.winner_values[indices],
+            score_values=self.score_values[indices],
+            stage_blended_values=self.stage_blended_values[indices],
+            global_blended_values=self.global_blended_values[indices],
+            stage_ids=self.stage_ids[indices],
+            source_ids=self.source_ids[indices],
+            split_ids=self.split_ids[indices],
+        )
+
     def value_targets(self, target):
         if target == "winner":
             return self.winner_values
@@ -96,6 +114,130 @@ class PreparedV4Corpus:
         if target == "global_blend":
             return self.global_blended_values
         raise ValueError("Unknown V4 value target: {}".format(target))
+
+
+@dataclass
+class PreparedV4Batch(PreparedV4Corpus):
+    pass
+
+
+class StreamingPreparedV4Corpus:
+    """Prepare only the requested batch, avoiding a dense 1625-way full corpus."""
+
+    def __init__(
+        self,
+        engine_path,
+        run13_path,
+        plan_path,
+        expected_split,
+        policy_epsilon=0.05,
+        alpha_boot=DEFAULT_ALPHA_BOOT,
+        stage_reliability=DEFAULT_STAGE_RELIABILITY,
+        temperature=GLOBAL_SCORE_TEMPERATURE,
+    ):
+        self.game = SantoriniGame(5, sequential_placement=True)
+        self.dataset = V4BootstrapDataset(engine_path, run13_path, plan_path)
+        self.policy_epsilon = float(policy_epsilon)
+        self.alpha_boot = float(alpha_boot)
+        self.stage_reliability = tuple(stage_reliability)
+        self.temperature = float(temperature)
+        self.stage_ids = self.dataset.plan["stage_ids"].astype(np.int8, copy=False)
+        self.source_ids = self.dataset.plan["source_ids"].astype(np.int8, copy=False)
+        self.split_ids = self.dataset.plan["split_ids"].astype(np.int8, copy=False)
+        if np.any(self.split_ids != int(expected_split)):
+            raise ValueError("Sampling plan contains an example from the wrong split.")
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def close(self):
+        self.dataset.close()
+
+    def batch(self, indices, planes=None):
+        indices = np.asarray(indices, dtype=np.int64)
+        boards = []
+        policies = []
+        winner_values = []
+        scores = []
+        stages = []
+        sources = []
+        splits = []
+        for index in indices:
+            example = self.dataset[int(index)]
+            policy = _normalized_policy(
+                self.game, example, self.policy_epsilon
+            )
+            boards.append(example.board)
+            policies.append(policy)
+            winner_values.append(example.winner_value)
+            scores.append(example.score)
+            stages.append(example.stage_id)
+            sources.append(example.source_id)
+            splits.append(example.split_id)
+        winner_values = np.asarray(winner_values, dtype=np.float32)
+        scores = np.asarray(scores, dtype=np.float32)
+        stages = np.asarray(stages, dtype=np.int8)
+        score_values, stage_values, global_values = _value_arrays(
+            winner_values,
+            scores,
+            stages,
+            self.alpha_boot,
+            self.stage_reliability,
+            self.temperature,
+        )
+        encoded = encode_v4_boards(boards)
+        if planes is not None:
+            encoded = encoded[:, :int(planes)]
+        return PreparedV4Batch(
+            encoded_boards=encoded,
+            policies=np.asarray(policies, dtype=np.float32),
+            winner_values=winner_values,
+            score_values=score_values,
+            stage_blended_values=stage_values,
+            global_blended_values=global_values,
+            stage_ids=stages,
+            source_ids=np.asarray(sources, dtype=np.int8),
+            split_ids=np.asarray(splits, dtype=np.int8),
+        )
+
+
+def _normalized_policy(game, example, policy_epsilon):
+    policy = example.policy
+    if example.source_id < 2:
+        return smooth_engine_policy(game, example.board, policy, policy_epsilon)
+    valids = game.getValidMoves(example.board, 1).astype(bool)
+    if np.any(policy[~valids] > 1e-7):
+        raise ValueError("Run13 policy assigns mass to an illegal action.")
+    total = float(policy.sum())
+    if not np.isfinite(total) or total <= 0:
+        raise ValueError("Run13 policy must have positive finite mass.")
+    return (policy / total).astype(np.float32)
+
+
+def _value_arrays(
+    winner_values,
+    scores,
+    stages,
+    alpha_boot,
+    stage_reliability,
+    temperature,
+):
+    score_values = np.asarray([
+        score_to_value(score, temperature) for score in scores
+    ], dtype=np.float32)
+    stage_values = np.asarray([
+        blended_value_target(
+            winner, score, stage, alpha_boot, stage_reliability, True, temperature
+        )
+        for winner, score, stage in zip(winner_values, scores, stages)
+    ], dtype=np.float32)
+    global_values = np.asarray([
+        blended_value_target(
+            winner, score, stage, alpha_boot, stage_reliability, False, temperature
+        )
+        for winner, score, stage in zip(winner_values, scores, stages)
+    ], dtype=np.float32)
+    return score_values, stage_values, global_values
 
 
 def prepare_corpus(
@@ -123,19 +265,7 @@ def prepare_corpus(
             example = dataset[index]
             if int(example.split_id) != int(expected_split):
                 raise ValueError("Sampling plan contains an example from the wrong split.")
-            policy = example.policy
-            if example.source_id < 2:
-                policy = smooth_engine_policy(
-                    game, example.board, policy, policy_epsilon
-                )
-            else:
-                valids = game.getValidMoves(example.board, 1).astype(bool)
-                if np.any(policy[~valids] > 1e-7):
-                    raise ValueError("Run13 policy assigns mass to an illegal action.")
-                total = float(policy.sum())
-                if not np.isfinite(total) or total <= 0:
-                    raise ValueError("Run13 policy must have positive finite mass.")
-                policy = (policy / total).astype(np.float32)
+            policy = _normalized_policy(game, example, policy_epsilon)
             score_value = score_to_value(example.score, temperature)
             boards.append(example.board)
             policies.append(policy)
