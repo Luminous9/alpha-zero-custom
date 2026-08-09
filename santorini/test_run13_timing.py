@@ -23,6 +23,11 @@ class TestRun13TimingBenchmark(unittest.TestCase):
         self.assertEqual(command[command.index("--num-eps") + 1], "240")
         self.assertEqual(command[command.index("--num-mcts-sims") + 1], "96")
         self.assertEqual(command[command.index("--playout-cap-fast-sims") + 1], "32")
+        self.assertEqual(command[command.index("--self-play-batch-size") + 1], "128")
+        self.assertEqual(command[command.index("--batch-size") + 1], "512")
+        self.assertEqual(command[command.index("--inference-cache-size") + 1], "4096")
+        self.assertEqual(command[command.index("--symmetry-augmentation") + 1], "on-the-fly")
+        self.assertIn("--compact-replay", command)
         self.assertIn("--load-examples", command)
         self.assertIn("--keep-loaded-examples", command)
 
@@ -70,9 +75,34 @@ class TestRun13TimingBenchmark(unittest.TestCase):
         ):
             ordinary["phases"][phase] = {"seconds": 10.0}
             milestone["phases"][phase] = {"seconds": 20.0}
-        result = combine_profiles(ordinary, milestone, 10)
-        self.assertEqual(result["phases"]["self_play"]["seconds"], 11.0)
-        self.assertEqual(result["wall_total_seconds"], 55.0)
+        result = combine_profiles(ordinary, milestone, 20)
+        self.assertEqual(result["phases"]["self_play"]["seconds"], 10.5)
+        self.assertEqual(result["wall_total_seconds"], 52.5)
+
+    def test_profile_combination_rejects_workload_drift(self):
+        hardware = {"cuda_available": True, "cuda_device": "test"}
+        phases = {
+            phase: {"seconds": 1.0}
+            for phase in (
+                "self_play", "training", "arena_telemetry", "serialization", "other"
+            )
+        }
+        ordinary = {
+            "profile": "ordinary", "smoke": False, "games": 240,
+            "num_mcts_sims": 96, "hardware": hardware, "output": "ordinary",
+            "phases": phases, "command": ["python", "main_santorini.py", "--batch-size", "512"],
+        }
+        milestone = dict(
+            ordinary,
+            profile="milestone",
+            output="milestone",
+            command=[
+                "python", "main_santorini.py", "--batch-size", "256",
+                "--milestone-interval", "1",
+            ],
+        )
+        with self.assertRaisesRegex(ValueError, "different workloads"):
+            combine_profiles(ordinary, milestone, 20)
 
 
 if __name__ == "__main__":

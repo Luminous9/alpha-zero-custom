@@ -81,6 +81,10 @@ The exact reports are
 `temp/santorini_v4_pilot_100k/report.json` and
 `temp/santorini_v4_pilot_branch_010/report.json`.
 
+The follow-up balanced sampler and fresh Run13 component are documented in
+`P1A_MIXED_CORPUS_AND_FEASIBILITY.md`. They resolve the pilot's effective
+training-distribution gate without discarding the immutable raw observations.
+
 Raw shards and converted artifacts live under
 `temp/santorini_v4_pilot_100k/`. They are measurement artifacts rather than
 source-controlled training data.

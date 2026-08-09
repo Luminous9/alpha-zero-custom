@@ -257,6 +257,12 @@ class TestBatchedMCTSArena(unittest.TestCase):
         self.assertEqual((one_won, two_won, draws), (2, 2, 0))
         self.assertGreaterEqual(max(player1_nnet.batch_sizes), 2)
         self.assertGreaterEqual(max(player2_nnet.batch_sizes), 2)
+        self.assertEqual(len(arena.game_records), 4)
+        self.assertEqual({record['pair_index'] for record in arena.game_records}, {0, 1})
+        self.assertEqual(
+            {record['seat_order'] for record in arena.game_records},
+            {'contestant1_first', 'contestant2_first'},
+        )
 
     def test_batched_arena_flattens_and_recombines_root_symmetry_ensembles(self):
         game = SymmetricOneMoveGame()

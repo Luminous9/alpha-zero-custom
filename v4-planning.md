@@ -1,11 +1,19 @@
 # Santorini V4 Design: Bootstrapped D4-Equivariant Network
 
-Status: P0a complete. P0b oracle/rules measurements are complete and Run13
-timing instrumentation is verified; the representative target-GPU Run13 wall
-split remains to be collected. The P1a 100k corpus/conversion correctness gate
-passes, but its phase/source distribution gate blocks scale-up pending explicit
-balancing and the planned Run13-replay mixture. Architecture feasibility work
-has not started.
+Status: P0a and P0b are complete, including the representative P100 Run13 wall
+baseline: 348.45 seconds per amortized iteration, of which 92.69% is self-play.
+The P1a 100k corpus/conversion correctness gate passes. A deterministic
+20/35/45 stage and 70/20/10 main-line/subgame/Run13
+sampler plus a fresh, separately labeled Run13 component now pass the mixed-pilot
+gate. P1a is complete through the hand-rolled path: the 13-plane encoder, exact
+D4 reference, optimized regular tower, invariant auxiliary head, checkpoint
+reload, and frozen ordinary-Conv2d TorchScript export pass. P1b reaches a stop:
+Candidate C (6x192) is the best equivariant option and global score+winner blend
+wins the target bake-off, but the matched ordinary control dominates supervised
+metrics and beats Candidate C 30-10 in the full-game selection arena. No V4
+architecture is selected, so the fresh-start condition is not met and P1c must
+not begin without a new design decision. Final test data and final arena seeds
+remain untouched. See `experiments/santorini_v4/P1B_SUPERVISED_SCREEN.md`.
 Prereq reading: `santorini/santorini_ai_architecture_v3.md` (V3 spec),
 `santorini/SANTORINI_ORACLE.md` (oracle bridge), and
 `experiments/santorini_oracle/RESULTS.md` (Run13 distillation outcomes).
@@ -98,8 +106,8 @@ V3's 6 binary planes (my workers, opp workers, height 1/2/3, dome) are complete 
 | 9   | Opp win threats | same for the opponent on their next turn                                                                                                           |
 | 10  | My mobility     | per-worker legal-move count, normalized, stamped on worker squares                                                                                 |
 | 11  | Opp mobility    | same for opponent                                                                                                                                  |
-| 12  | Climb access    | count of adjacent unoccupied/non-domed squares reachable by a hypothetical current-player worker from each square under the normal climb rule, normalized; exact occupancy convention fixed in the encoder spec |
-| 13  | Phase           | broadcast scalar derived from board state only: workers placed / 4 during placement, then a clipped/normalized build count from the height sum     |
+| 12  | Climb access    | count of adjacent unoccupied/non-domed squares reachable by a hypothetical current-player worker from each non-dome square under the normal climb rule, divided by 8; origin occupancy is ignored, destination occupancy is respected |
+| 13  | Phase           | broadcast scalar derived from board state only: workers placed / 4 during placement, then `min(sum(heights), 40) / 40` during standard play     |
 
 All planes must be well-defined during the placement phase. Threat, mobility, and climb-derived planes are zero until all four workers exist so partially placed workers are not interpreted as standard-play states. Opponent threats are computed by an explicit opponent-perspective legality check. Every plane must be D4-covariant and tested against brute-force rule calculations as well as the end-to-end equivariance test.
 
@@ -281,8 +289,8 @@ Working expectation to be replaced by measurement: candidate B is ~2.2x V3 dense
 1. **P0a - deterministic data contract:** pool reset fix + versioned label cache; Mortal-only V4 datagen schema with best action/successor; reset-per-game TT policy; schema/action/FEN tests.
 2. **P0b - measurement:** deeper-adjudicator calibration study; score-stability-by-phase report; rules cross-validation; instrumented Run13 wall-clock split.
 3. **P1a - pilot and architecture feasibility:** 100k-500k corpus pilot + conversion pipeline; V4 encoder rule/covariance tests; pinned-escnn and hand-rolled feasibility spike; exported-model equivariance/checkpoint tests.
-4. **P1b - screening ablations:** ordinary-CNN control; 6 versus 13 planes; winner-only versus score+winner bootstrap; candidate A-D inference and end-to-end throughput. Lock the architecture and bootstrap target from held-out selection data, preserving the final test split and arena seeds.
-5. **P1c - full corpus and pretraining:** generate 5M valid records, expanding only if the learning curve justifies it; full sizing/pretraining of the selected design including phase-balanced Run13 placement distillation.
-6. **Gate G1:** separate standard-play and full-game arenas versus Run13 at 96/128 simulations, plus equal-cost reporting. Stop/debug thresholds use paired-block uncertainty.
+4. **P1b - screening ablations (stopped):** the source-aware trainer, ordinary 6/13-plane control, per-epoch selection, Candidate A-D sizing, matched stage/global/winner targets, and paired standard/full selection arenas are complete. Global blend is the selected target and winner-only fails the match condition. Candidate C is the best equivariant option but loses the matched full-game architecture arena 10-30 to the ordinary control, which also dominates held-out metrics. No architecture is locked; do not enter P1c. The P100 export benchmark remains available as diagnostic work only. Final test data and final arena seeds remain untouched.
+5. **P1c - full corpus and pretraining (not authorized after P1b stop):** if a future architecture clears a repeated P1b, generate 5M valid records, expanding only if the learning curve justifies it; full sizing/pretraining of the selected design including phase-balanced Run13 placement distillation.
+6. **Gate G1 (not reached):** separate standard-play and full-game arenas versus Run13 at 96/128 simulations, plus equal-cost reporting. Stop/debug thresholds use paired-block uncertainty.
 7. **P2 - self-play:** sparring + refreshed seeded starts + low-weight auxiliary head, each independently switchable; replay/telemetry schema extended.
 8. **Review:** after ~20-30 iterations, run the 96/128/1024 battery and component ablations; decide whether to study a nonzero search-facing `lambda` in a following run.

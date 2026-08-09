@@ -50,6 +50,7 @@ class BatchedMCTSArena:
         self.standard_controller_args = standard_controller_args
         self.record_placement_diagnostics = bool(record_placement_diagnostics)
         self.placement_records = []
+        self.game_records = []
         self.inference_stats = {
             'batches': 0,
             'requested': 0,
@@ -59,6 +60,7 @@ class BatchedMCTSArena:
 
     def playGames(self, num):
         self.placement_records = []
+        self.game_records = []
         for key in self.inference_stats:
             self.inference_stats[key] = 0
         num = int(num / 2)
@@ -160,6 +162,18 @@ class BatchedMCTSArena:
 
                     if self.record_placement_diagnostics:
                         self._recordPlacementGame(game_state, winner, game_result)
+                    self.game_records.append({
+                        'pair_index': game_state.get('game_index'),
+                        'seat_order': game_state.get('seat_order'),
+                        'game_seed': game_state.get('game_seed'),
+                        'contestant1_side': next(
+                            int(side)
+                            for side, contestant in game_state['side_to_player'].items()
+                            if contestant == 1
+                        ),
+                        'winner': int(winner),
+                        'winner_side': int(game_result),
+                    })
 
                     if winner == 1:
                         oneWon += 1

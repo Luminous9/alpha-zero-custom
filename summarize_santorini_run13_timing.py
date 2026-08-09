@@ -7,11 +7,24 @@ import os
 from benchmark_santorini_run13_timing import TIMING_FIELDS, write_json_atomic
 
 
+def _normalized_workload_command(command):
+    """Remove the two profile-specific arguments before workload comparison."""
+    normalized = []
+    index = 0
+    while index < len(command):
+        if command[index] in ("--checkpoint", "--milestone-interval"):
+            index += 2
+            continue
+        normalized.append(command[index])
+        index += 1
+    return normalized
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ordinary", required=True)
     parser.add_argument("--milestone", required=True)
-    parser.add_argument("--milestone-interval", type=int, default=10)
+    parser.add_argument("--milestone-interval", type=int, default=20)
     parser.add_argument("--json-out", required=True)
     return parser.parse_args()
 
@@ -29,6 +42,14 @@ def combine_profiles(ordinary, milestone, milestone_interval):
             raise ValueError("Timing profiles disagree on {}.".format(key))
     if ordinary["hardware"] != milestone["hardware"]:
         raise ValueError("Timing profiles were not measured on identical hardware.")
+    for key in ("iteration", "source", "training_steps"):
+        if key in ordinary and key in milestone and ordinary[key] != milestone[key]:
+            raise ValueError("Timing profiles disagree on {}.".format(key))
+    if "command" in ordinary and "command" in milestone:
+        if _normalized_workload_command(ordinary["command"]) != _normalized_workload_command(
+            milestone["command"]
+        ):
+            raise ValueError("Timing profiles were measured with different workloads.")
 
     milestone_weight = 1.0 / milestone_interval
     ordinary_weight = 1.0 - milestone_weight

@@ -102,7 +102,10 @@ baseline must be collected on the target GPU with the Run13 workload (240 games,
 iteration totals cannot recover this split retroactively.
 
 The target-GPU workflow is pinned and refuses to run the full profile without
-CUDA unless `--allow-cpu` is explicitly supplied:
+CUDA unless `--allow-cpu` is explicitly supplied. The representative run was
+completed on a Tesla P100-PCIE-16GB with 240 games, 96 simulations, and the
+Run13 iteration-301 replay/training state. Recomputing the supplied summaries
+matches `temp/run13_timing_kaggle/run13_timing_baseline.json` exactly.
 
 For Kaggle, use the complete cell-by-cell workflow in
 `santorini/run13_timing_kaggle.ipynb`. The equivalent commands are:
@@ -115,13 +118,39 @@ For Kaggle, use the complete cell-by-cell workflow in
 .venv/bin/python summarize_santorini_run13_timing.py \
   --ordinary temp/run13_timing_ordinary/timing-summary.json \
   --milestone temp/run13_timing_milestone/timing-summary.json \
-  --milestone-interval 10 \
+  --milestone-interval 20 \
   --json-out temp/run13_timing_baseline.json
 ```
 
-The ordinary/milestone combination amortizes the once-per-ten-iterations arena
+The ordinary/milestone combination amortizes the once-per-twenty-iterations arena
 cost instead of reporting either an atypically arena-free iteration or a
 milestone on every iteration.
+
+### Representative P100 result
+
+| Phase | Amortized seconds | Fraction |
+| --- | ---: | ---: |
+| Self-play | 322.973 | 92.69% |
+| Training | 8.238 | 2.36% |
+| Arena/telemetry | 11.625 | 3.34% |
+| Serialization | 2.044 | 0.59% |
+| Other | 3.575 | 1.03% |
+| **Total** | **348.454** | **100.00%** |
+
+This is 5.81 minutes per representative iteration, 1.452 seconds per generated
+game, or 1.346 self-play seconds per game. The ordinary iteration was 336.796
+seconds; forcing a milestone arena raised it to 569.950 seconds, a 233.154-second
+increment that is amortized at one run per 20 iterations.
+
+The ordinary telemetry recorded 418,432 simulations (about 1,296 per self-play
+second), 397,537 executed neural evaluations in 8,503 inference batches, and an
+average of 46.8 executed evaluations per configured batch of 128. Training was
+only 87 optimizer steps. Run13's extra root-symmetry orientations numbered
+13,462, 3.39% of executed evaluations; removing them is worthwhile but cannot
+by itself produce a multi-fold whole-loop speedup. These measurements strengthen
+the P1b requirement to compare exported candidates end-to-end: self-play is the
+only material optimization target, but its underfilled batches mean neither
+convolution FLOPs nor parameter count alone predicts wall time.
 
 ## Reproduction artifacts
 
@@ -131,3 +160,6 @@ Local raw outputs are intentionally kept under `temp/`:
 - `v4_p0b_budget_stability.json`
 - `v4_p0b_score_calibration.json` and its resumable JSONL/SQLite companions
 - `v4_p0b_run13_timing_smoke/telemetry/telemetry.jsonl`
+- `run13_timing_kaggle/ordinary_timing_summary.json`
+- `run13_timing_kaggle/milestone_timing_summary.json`
+- `run13_timing_kaggle/run13_timing_baseline.json`
