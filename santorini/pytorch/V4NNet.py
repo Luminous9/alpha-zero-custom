@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
+from santorini.D4Canonical import canonicalize_board, restore_canonical_policy
 from santorini.V4Encoder import encode_v4_boards
 from .SantoriniNNet import SantoriniNNet
 from .V4Prototype import D4RegularNetwork
@@ -61,6 +62,7 @@ class V4InferenceWrapper:
         device="auto",
         autocast_fp16=False,
         freeze_torchscript=True,
+        canonicalize_d4=False,
     ):
         self.game = game
         self.action_size = game.getActionSize()
@@ -71,6 +73,11 @@ class V4InferenceWrapper:
         model, self.config, self.checkpoint = load_v4_checkpoint(
             checkpoint_path, game
         )
+        self.canonicalize_d4 = bool(canonicalize_d4)
+        if self.canonicalize_d4 and self.config["architecture"] != "ordinary":
+            raise ValueError(
+                "D4 canonicalization is only needed for ordinary V4 checkpoints."
+            )
         self.input_channels = int(self.config["planes"])
         model = export_v4_model(model, self.config).to(self.device).eval()
         if freeze_torchscript:
@@ -104,6 +111,11 @@ class V4InferenceWrapper:
                 np.empty((0, self.action_size), dtype=np.float32),
                 np.empty((0,), dtype=np.float32),
             )
+        matching_transforms = None
+        if self.canonicalize_d4:
+            canonicalized = [canonicalize_board(board) for board in boards]
+            boards = [item[0] for item in canonicalized]
+            matching_transforms = [item[1] for item in canonicalized]
         encoded = encode_v4_boards(boards)[:, :self.input_channels]
         inputs = torch.from_numpy(np.ascontiguousarray(encoded)).to(self.device)
         with torch.inference_mode(), torch.autocast(
@@ -116,4 +128,9 @@ class V4InferenceWrapper:
         values = value[:, 0].float().cpu().numpy()
         if policies.shape != (len(boards), self.action_size):
             raise ValueError("V4 checkpoint returned the wrong policy shape.")
+        if matching_transforms is not None:
+            policies = np.asarray([
+                restore_canonical_policy(self.game, policy, transforms)
+                for policy, transforms in zip(policies, matching_transforms)
+            ], dtype=np.float32)
         return policies, values

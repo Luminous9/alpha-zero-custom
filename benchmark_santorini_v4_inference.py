@@ -13,7 +13,11 @@ import torch
 
 from santorini.SantoriniGame import SantoriniGame
 from santorini.V4Supervised import prepare_corpus
-from santorini.pytorch.V4NNet import export_v4_model, load_v4_checkpoint
+from santorini.pytorch.V4NNet import (
+    V4InferenceWrapper,
+    export_v4_model,
+    load_v4_checkpoint,
+)
 
 
 DEFAULT_CHECKPOINTS = (
@@ -42,6 +46,24 @@ def parse_args():
     parser.add_argument("--allow-cpu", action="store_true")
     parser.add_argument("--output-dir", default="temp/santorini_v4_inference_benchmark")
     parser.add_argument("--json-out")
+    parser.add_argument(
+        "--end-to-end-wrapper",
+        action="store_true",
+        help=(
+            "Also benchmark raw-board encoding, optional D4 canonicalization, "
+            "network inference, and policy restoration through V4InferenceWrapper."
+        ),
+    )
+    parser.add_argument(
+        "--canonical-d4",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "Checkpoint name whose end-to-end ordinary inference must use exact "
+            "D4 canonicalization. May be repeated."
+        ),
+    )
     parser.add_argument(
         "--engine-corpus", default="temp/santorini_v4_pilot_branch_010/corpus.npz"
     )
@@ -150,6 +172,41 @@ def _measure_case(model, inputs, device, fp16, warmups, iterations):
     }
 
 
+def _measure_wrapper_case(wrapper, boards, device, warmups, iterations):
+    for _ in range(warmups):
+        wrapper.predict_batch(boards)
+    _sync(device)
+    started = time.perf_counter()
+    for _ in range(iterations):
+        wrapper.predict_batch(boards)
+    _sync(device)
+    elapsed = time.perf_counter() - started
+    examples = iterations * len(boards)
+    return {
+        "batch_size": len(boards),
+        "iterations": iterations,
+        "examples": examples,
+        "elapsed_seconds": elapsed,
+        "examples_per_second": examples / elapsed,
+        "milliseconds_per_batch": 1_000.0 * elapsed / iterations,
+    }
+
+
+def _raw_selection_boards(args, count):
+    with np.load(args.selection_plan, allow_pickle=False) as plan, np.load(
+        args.engine_corpus, allow_pickle=False
+    ) as engine, np.load(args.run13_component, allow_pickle=False) as run13:
+        if len(plan["position_indices"]) < count:
+            raise ValueError("The selection plan is smaller than the benchmark sample.")
+        boards = []
+        for corpus_id, position_index in zip(
+            plan["corpus_ids"][:count], plan["position_indices"][:count]
+        ):
+            payload = engine if int(corpus_id) == 0 else run13
+            boards.append(payload["boards"][int(position_index)].astype(np.int8))
+    return boards
+
+
 def _predictions(model, boards, batch_size, device, fp16):
     policies = []
     values = []
@@ -207,6 +264,16 @@ def main():
     if device.type != "cuda" and not args.allow_cpu:
         raise RuntimeError("The target benchmark requires CUDA; use --allow-cpu for diagnostics.")
     checkpoints = _checkpoint_specs(args.checkpoints)
+    checkpoint_names = {name for name, _ in checkpoints}
+    unknown_canonical_names = set(args.canonical_d4) - checkpoint_names
+    if unknown_canonical_names:
+        raise ValueError(
+            "Unknown --canonical-d4 checkpoint names: {}".format(
+                sorted(unknown_canonical_names)
+            )
+        )
+    if args.canonical_d4 and not args.end_to_end_wrapper:
+        raise ValueError("--canonical-d4 requires --end-to-end-wrapper.")
     corpus = prepare_corpus(
         args.engine_corpus,
         args.run13_component,
@@ -217,6 +284,10 @@ def main():
     if max_examples > len(corpus.encoded_boards):
         raise ValueError("The selection corpus is smaller than the requested benchmark sample.")
     benchmark_boards = corpus.encoded_boards[:max_examples]
+    raw_boards = (
+        _raw_selection_boards(args, max_examples)
+        if args.end_to_end_wrapper else None
+    )
     trace_input = torch.from_numpy(np.ascontiguousarray(benchmark_boards[:2]))
     os.makedirs(args.output_dir, exist_ok=True)
     game = SantoriniGame(5, sequential_placement=True)
@@ -264,6 +335,47 @@ def main():
                 max(args.batch_sizes),
                 device,
             )
+        end_to_end_cases = []
+        if args.end_to_end_wrapper:
+            canonical_d4 = name in set(args.canonical_d4)
+            precisions = (
+                ("fp32", False), ("autocast_fp16", True)
+            ) if device.type == "cuda" else (("fp32", False),)
+            for precision, fp16 in precisions:
+                wrapper = V4InferenceWrapper(
+                    game,
+                    path,
+                    device=device,
+                    autocast_fp16=fp16,
+                    freeze_torchscript=True,
+                    canonicalize_d4=canonical_d4,
+                )
+                for batch_size in args.batch_sizes:
+                    iterations = max(
+                        args.minimum_iterations,
+                        int(math.ceil(args.examples_per_case / batch_size)),
+                    )
+                    metrics = _measure_wrapper_case(
+                        wrapper,
+                        raw_boards[:batch_size],
+                        device,
+                        args.warmup_iterations,
+                        iterations,
+                    )
+                    metrics.update({
+                        "precision": precision,
+                        "canonical_d4": canonical_d4,
+                    })
+                    end_to_end_cases.append(metrics)
+                    print(
+                        "  wrapper {}{} batch {:>3}: {:>9.1f} examples/sec".format(
+                            precision,
+                            " canonical-D4" if canonical_d4 else "",
+                            batch_size,
+                            metrics["examples_per_second"],
+                        ),
+                        flush=True,
+                    )
         results.append({
             "name": name,
             "checkpoint": path,
@@ -278,6 +390,7 @@ def main():
             "frozen_torchscript_bytes": os.path.getsize(scripted_path),
             "cases": cases,
             "fp16_agreement": agreement,
+            "end_to_end_cases": end_to_end_cases,
         })
     payload = {
         "schema_version": 1,

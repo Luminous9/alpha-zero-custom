@@ -13,15 +13,23 @@ candidates against the ordinary 8x96 control at that scale. Its original termina
 stop conclusion was too strong: only 5,848 unique training positions and one
 ordinary shape were tested. P1b is reopened for stage/source-correct learning
 curves at roughly 100k/300k/1M examples, larger ordinary candidates, and one
-capacity-aware equivariant control. The 100k data gate and matched P100 screen
-now pass with 100,000 unique train and 3,000 unique selection positions, exact
-declared marginals, no repetition, and no cross-corpus D4 overlap. Ordinary
-6x192 is the provisional winner (1.0154 selection objective versus 1.0607 for
-ordinary 8x96) at only a 3.3% training-throughput cost; policy curves still
-improve at epoch four. The strict 300k data gate now passes with 300,000 unique
-draws, exact marginals, maximum repetition one, and zero engine/Run13 D4
-overlap; its matched GPU screen is next. P1c
-remains gated on that selection. Final test data and final arena seeds remain untouched. See
+capacity-aware equivariant control. The 100k and 300k unique-data gates and
+matched P100 screens now pass with exact declared marginals, no repetition, and
+no cross-corpus D4 overlap. At 300k, ordinary 6x192 retains the best supervised
+objective (0.8923), while capacity-aware equivariant E reaches 33.4% policy
+top-1 versus 33.9% for the ordinary winner and slightly improves value MSE. The
+loss gap is real but small enough that exact symmetry remains decision-relevant.
+Bare ordinary inference is no longer selectable: an exact, stabilizer-safe D4
+canonical wrapper now passes unit and real-checkpoint transformation audits
+without changing predictions on canonical selection positions. P1b.2 continues
+to the 1M curve with equivariant E, canonical ordinary 6x192, and canonical
+ordinary 10x128. The frozen-holdout-anchored 1M screen is complete. Ordinary
+6x192 and 10x128 are statistically tied on the paired selection objective;
+equivariant E trails both by a significant margin and remains slower, while
+retaining a small early-stage advantage. P1b.2 now requires the predeclared
+canonical-seam audit, end-to-end P100 benchmark, and paired selection arenas before choosing between
+the ordinary shapes or closing the equivariant branch. P1c remains gated on
+that selection. Final test data and final arena seeds remain untouched. See
 `experiments/santorini_v4/P1B_SUPERVISED_SCREEN.md` and
 `experiments/santorini_v4/P1B_SCALED_SCREEN.md`.
 Prereq reading: `santorini/santorini_ai_architecture_v3.md` (V3 spec),
@@ -31,9 +39,10 @@ Prereq reading: `santorini/santorini_ai_architecture_v3.md` (V3 spec),
 V4 is a fresh network and training run: a candidate-selected tower with enriched
 input encoding, supervised-bootstrapped from `santorini-ai` engine data, then
 trained with the AlphaZero loop using the oracle as a value labeler and
-distribution shaper from iteration 1. Exact D4 equivariance remains an
-architecture candidate rather than a requirement; an ordinary winner retains D4
-augmentation and the existing root-evaluation machinery. Run13 is retired to
+distribution shaper from iteration 1. Exact search-facing D4 behavior is
+required. It may be supplied by the equivariant architecture or by
+stabilizer-safe canonical inference around an ordinary winner; augmentation or
+sampled root averaging alone is insufficient. Run13 is retired to
 benchmark anchor and placement teacher; it is not the starting checkpoint.
 
 ## 1. Why a fresh network instead of continuing Run 13
@@ -56,7 +65,7 @@ Goals:
 
 - Clearly exceed Run13 in direct paired arenas at 96/128 sims, without the deep-budget (1024-sim) regression pattern.
 - Materially close the gap against the santorini-ai oracle at 20k nodes.
-- For an equivariant winner, D4 symmetry by construction up to documented floating-point tolerance and removal of runtime symmetry correction. For an ordinary winner, retain augmentation, symmetry diagnostics, and cost-measured root orientation averaging.
+- D4 neural policy/value symmetry by construction up to documented floating-point tolerance. An equivariant winner supplies it architecturally. An ordinary winner uses deterministic D4-canonical inference at every neural evaluation, projects its policy over the canonical representative's stabilizer, and maps it back; augmentation remains a training aid, while root orientation averaging is disabled as redundant. Finite MCTS is audited separately: action-index tie breaking and uncoupled stochastic root noise can break whole-search equivariance even with an exact network, so stabilizer projection/coupled-noise handling gates the final self-play integration.
 - Oracle in the loop from iteration 1 in its two trustworthy roles: scalar value labeler (auxiliary head first) and distribution shaper (sparring, seeded starts). After the explicitly declared bootstrap exception in §5.2, policy targets remain 100% native search targets produced by V4's configured MCTS/Gumbel search.
 
 Non-goals:
@@ -80,7 +89,13 @@ Explicitly rejected shortcut; constraining kernels to be D4-symmetric (center/ed
 
 Implementation options, in preference order: (a) a pinned `escnn` version; (b) hand-rolled weight tying (small on a 5x5 board; a few hundred lines). The `escnn` prototype must prove checkpoint reload compatibility and export the inference model to ordinary PyTorch layers before throughput measurement, avoiding `GeometricTensor` and filter-expansion overhead in MCTS.
 
-Fallback if both stall: D4 canonicalization at inference. Canonicalization is exact only when positions with a non-trivial stabilizer (especially the empty board) average over every transform that reaches the selected representative before the policy is mapped back. Arbitrary tie-breaking is not equivariant. This is a stopgap rather than the primary architecture.
+Ordinary-tower alternative: D4 canonicalization at inference. Canonicalization
+is exact only when positions with a non-trivial stabilizer (especially the empty
+board) average over every transform that reaches the selected representative
+before the policy is mapped back. Arbitrary tie-breaking is not equivariant.
+The implemented wrapper uses the corpus converter's representative and performs
+that projection, so this is now a first-class architecture-system candidate
+rather than an emergency fallback.
 
 **Equivariance test (required before any training):** for random inputs and all 8 group elements, transformed input must produce the expected permuted policy and numerically equal value under a declared absolute/relative tolerance. Test the input encoder, trunk, policy representation, value/aux pooling, checkpoint reload, and exported inference model independently. This test gates everything downstream.
 
@@ -108,8 +123,10 @@ Candidates (identical corpus, schedule, and selection holdout):
 
 Ordinary-CNN candidates use the same selected input planes, bootstrap corpus,
 targets, and schedule. The 8x96 V3 shape remains the baseline; 10x128 and 6x192
-test the previously unmeasured capacity axis. They retain D4 augmentation and
-the existing root-orientation option. A small 6-plane versus 13-plane comparison
+test the previously unmeasured capacity axis. They retain D4 augmentation during
+training. A surviving ordinary checkpoint is deployed only through exact
+stabilizer-safe canonical inference, with root-orientation sampling set to one.
+A small 6-plane versus 13-plane comparison
 on the baseline separately tests the feature additions.
 
 Candidate C remains the equivariant continuity control. Add one roughly
@@ -265,6 +282,7 @@ Base config inherits Run13 (latest mode, Gumbel search, playout-cap randomizatio
 ### 6.1 Search and throughput
 
 - No root orientation averaging, no symmetry refresh, no consistency loss (§3.1).
+- Before self-play, transformed-root tests cover ordinary/equivariant neural outputs and complete deterministic searches. The returned root policy is projected over non-trivial stabilizers, and stochastic root noise is generated in canonical action coordinates, so finite search does not reintroduce orientation dependence after the network removes it.
 - Exported-model FP16 inference for self-play. P100 peak FP16 arithmetic is 2x FP32, but no end-to-end speedup is assumed until measured; if Kaggle offers T4x2, benchmark it before building process-level parallelism.
 - Self-play batch raised until the §4.3 benchmark identifies the end-to-end throughput knee.
 - Candidate reduction of full sims to 48-64: test whether Gumbel target quality and playing strength hold at the smaller budget given the stronger bootstrap; adopt the reduction only if the benchmark supports it.
@@ -312,7 +330,7 @@ Working expectation to be replaced by measurement: candidate B is ~2.2x V3 dense
 | ---------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | Corpus is invalid                         | action/FEN round trips fail, cross-game score drift, wrong god distribution | Stop before bulk generation; fix versioned Mortal-only schema, reset policy, and conversion tests                                       |
 | Bootstrap transfers poorly               | G1 < 20% vs Run13                                                         | Debug encoding/calibration/action mapping and standard/full-game split; mix more Run13-distribution positions; fallback = Run13 continuation |
-| G-CNN implementation stalls              | equivariance/export tests unstable, BN issues                             | pinned escnn ↔ hand-rolled swap; last resort: stabilizer-aware canonicalization at inference                                             |
+| G-CNN implementation stalls              | equivariance/export tests unstable, BN issues                             | pinned escnn ↔ hand-rolled swap; compare the first-class ordinary + stabilizer-safe canonical-inference candidate                        |
 | Kaggle throughput worse than expected    | benchmark >1.5x per-iteration cost                                        | Drop to candidate A/C width, cut full sims (Gumbel), reduce sparring fraction                                                            |
 | Oracle labeling too expensive            | labeler falls behind self-play                                            | Lower subsample rate; rely on cache hits; per-phase budgets from §4.4                                                                    |
 | Placement regression                     | full-game gate/milestones decline while standard gate improves            | Increase phase-balanced Run13 placement corpus/weight and diagnose each sequential placement; seeded standard starts cannot repair placement |
@@ -326,7 +344,7 @@ Working expectation to be replaced by measurement: candidate B is ~2.2x V3 dense
 2. **P0b - measurement:** deeper-adjudicator calibration study; score-stability-by-phase report; rules cross-validation; instrumented Run13 wall-clock split.
 3. **P1a - pilot and architecture feasibility:** 100k-500k corpus pilot + conversion pipeline; V4 encoder rule/covariance tests; pinned-escnn and hand-rolled feasibility spike; exported-model equivariance/checkpoint tests.
 4. **P1b.1 - small screening ablations (complete, conclusion corrected):** the source-aware trainer, ordinary 6/13-plane baseline, per-epoch selection, Candidate A-D sizing, matched stage/global/winner targets, and paired standard/full selection arenas are complete. Global blend is provisional and winner-only fails at this scale. Candidate C loses the matched full-game pilot arena 10-30 to ordinary 8x96. This rejects the tested candidate at this scale, not V4.
-5. **P1b.2 - scaled architecture screen (active; 100k screen and 300k data gate complete):** generate stage/source-correct supply; record stratum coverage and repetition; run matched 100k/300k/1M learning curves for ordinary 8x96, ordinary 10x128, ordinary 6x192, Candidate C, and one capacity-aware equivariant probe. Ordinary 6x192 provisionally wins the 100k objective with materially better policy and near-baseline training cost. Its diagnostic Run13 preview scores 25% on completed openings and 20% from the empty board at 96 simulations; this is marginal but shows no gross transfer/mapping failure before placement distillation. The strict 300k plan passes with unique draws and a frozen 3k holdout; its GPU screen is next, but no architecture is locked. Benchmark surviving exports on P100. Final test data and final arena seeds remain untouched.
+5. **P1b.2 - scaled architecture screen (active; 100k/300k/1M curves complete):** generate stage/source-correct supply; record stratum coverage and repetition; run matched 100k/300k/1M learning curves. At 1M, ordinary 6x192 and 10x128 score 0.8115 and 0.8138; their paired difference interval crosses zero. Equivariant E scores 0.8436, with an E-minus-6x192 paired interval of 0.0201-0.0439, and trains 28.7% slower. E retains slightly better early policy CE and winner MSE, so this is a strong supervised preference rather than an arena verdict. Ordinary survivors use exact D4 canonical inference, which matches the frozen canonical holdout predictions and passes all eight transformed-position checks exactly on the audited checkpoint. A pre-arena seam audit finds no detectable high-versus-low frame-switch exposure interaction: E-minus-6x192 is +0.03257 in the lowest quartile and +0.03256 in the highest, with a high-minus-low interval of -0.03424 to +0.03448. This does not remove the representational seam or test MCTS dynamics, but it rules out a seam penalty already visible in frozen supervised loss. The 100k ordinary 6x192 diagnostic Run13 preview scores 25% on completed openings and 20% from the empty board at 96 simulations; this is marginal but shows no gross transfer/mapping failure before placement distillation. The 1M plan contains exactly 1,000,000 distinct corpus positions under the frozen 770k/220k/10k source and 200k/350k/450k stage marginals, with zero Run13 overlap. Benchmark raw exported and end-to-end canonical inference on P100, then run paired standard/full selection arenas among the three 1M candidates. Final test data and final arena seeds remain untouched.
 6. **P1c - full corpus and pretraining (gated):** after P1b.2 selects an architecture, generate 5M valid records, expanding only if the learning curve justifies it; full pretraining includes phase-balanced Run13 placement distillation.
 7. **Gate G1:** separate standard-play and full-game arenas versus Run13 at 96/128 simulations, plus equal-cost reporting. Stop/debug thresholds use paired-block uncertainty.
 8. **P2 - self-play:** sparring + refreshed seeded starts + low-weight auxiliary head, each independently switchable; replay/telemetry schema extended.

@@ -9,6 +9,7 @@ import time
 
 import numpy as np
 
+from santorini.D4Canonical import canonicalize_board_policy
 from santorini.OracleResearch import stage_for_builds
 from santorini.SantoriniGame import SantoriniGame
 from santorini.SantoriniOracle import anonymous_board_key
@@ -44,33 +45,6 @@ def parse_args():
         ),
     )
     return parser.parse_args()
-
-
-def _normalize_worker_labels(board):
-    board = np.asarray(board).copy()
-    for sign in (1, -1):
-        for label, location in enumerate(
-            sorted(map(tuple, np.argwhere(board[0] * sign > 0))), start=1
-        ):
-            board[0][location] = sign * label
-    return board
-
-
-def canonicalize_board_policy(game, board, policy):
-    """Choose the minimal D4 board and average policy over its stabilizer."""
-    symmetries = game.getSymmetries(board, policy)
-    keys = [anonymous_board_key(symmetry_board) for symmetry_board, _ in symmetries]
-    canonical_key = min(keys)
-    matching = [
-        (symmetry_board, symmetry_policy)
-        for key, (symmetry_board, symmetry_policy) in zip(keys, symmetries)
-        if key == canonical_key
-    ]
-    canonical_board = _normalize_worker_labels(matching[0][0])
-    canonical_policy = np.mean(
-        np.asarray([item[1] for item in matching], dtype=np.float64), axis=0
-    )
-    return canonical_board, canonical_policy, canonical_key
 
 
 class UnionFind:

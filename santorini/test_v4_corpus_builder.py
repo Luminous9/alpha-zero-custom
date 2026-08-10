@@ -9,10 +9,12 @@ from build_santorini_v4_corpus import (
     UnionFind,
     _retained_key_indices,
     _split_id,
-    canonicalize_board_policy,
     validate_converted_corpus,
 )
+from repartition_santorini_v4_corpus import _subset_payload
+from santorini.D4Canonical import canonicalize_board_policy
 from santorini.SantoriniGame import SantoriniGame
+from santorini.V4BootstrapCorpus import build_sampling_plan
 
 
 class TestV4CorpusBuilder(unittest.TestCase):
@@ -93,6 +95,63 @@ class TestV4CorpusBuilder(unittest.TestCase):
             result = validate_converted_corpus(path, expected_observations=3)
             self.assertEqual(result["positions"], 1)
             self.assertEqual(result["observations"], 3)
+
+    def test_repartition_subset_rebuilds_sparse_policy_and_forces_train(self):
+        payload = {
+            "schema_version": np.asarray([1], dtype=np.int16),
+            "action_size": np.asarray([10], dtype=np.int32),
+            "boards": np.zeros((3, 2, 5, 5), dtype=np.int8),
+            "observation_counts": np.asarray([1, 2, 3], dtype=np.int32),
+            "winner_means": np.asarray([0, 0, 0], dtype=np.float32),
+            "score_means": np.asarray([0, 0, 0], dtype=np.float32),
+            "score_stddevs": np.asarray([0, 0, 0], dtype=np.float32),
+            "requested_nodes": np.asarray([1, 1, 1], dtype=np.int32),
+            "actual_nodes_means": np.asarray([1, 1, 1], dtype=np.float32),
+            "mate_rates": np.asarray([0, 0, 0], dtype=np.float32),
+            "stage_ids": np.asarray([0, 1, 2], dtype=np.int8),
+            "source_counts": np.asarray([[1, 0], [2, 0], [0, 3]], dtype=np.int32),
+            "split_ids": np.asarray([2, 1, 2], dtype=np.int8),
+            "policy_offsets": np.asarray([0, 1, 3, 4], dtype=np.int64),
+            "policy_indices": np.asarray([1, 2, 3, 4], dtype=np.uint16),
+            "policy_values": np.asarray([1, 0.25, 0.75, 1], dtype=np.float32),
+            "position_hashes": np.asarray(["a" * 64, "b" * 64, "c" * 64]),
+        }
+        subset = _subset_payload(payload, np.asarray([0, 2], dtype=np.int64))
+        np.testing.assert_array_equal(subset["observation_counts"], [1, 3])
+        np.testing.assert_array_equal(subset["split_ids"], [0, 0])
+        np.testing.assert_array_equal(subset["policy_offsets"], [0, 1, 2])
+        np.testing.assert_array_equal(subset["policy_indices"], [1, 4])
+        np.testing.assert_allclose(subset["policy_values"], [1, 1])
+
+    def test_unique_plan_reserves_shared_positions_for_rare_source(self):
+        engine = {
+            "stage_ids": np.zeros(7, dtype=np.int8),
+            "split_ids": np.zeros(7, dtype=np.int8),
+            # Main has four exclusive positions and two shared positions;
+            # subgame needs one of the shared positions to reach its quota.
+            "source_counts": np.asarray([
+                [1, 0], [1, 0], [1, 0], [1, 0],
+                [0, 1], [1, 1], [1, 1],
+            ], dtype=np.int32),
+        }
+        run13 = {
+            "stage_ids": np.asarray([0], dtype=np.int8),
+            "split_ids": np.asarray([0], dtype=np.int8),
+        }
+        plan = build_sampling_plan(
+            engine,
+            run13,
+            draws=7,
+            split_id=0,
+            stage_fractions=(1, 0, 0),
+            source_fractions=(4 / 7, 2 / 7, 1 / 7),
+            seed=11,
+            replace=False,
+            joint_counts=np.asarray([[4, 0, 0], [2, 0, 0], [1, 0, 0]]),
+        )
+        pairs = np.stack((plan["corpus_ids"], plan["position_indices"]), axis=1)
+        self.assertEqual(len(np.unique(pairs, axis=0)), 7)
+        self.assertEqual(int(np.sum(plan["source_ids"] == 1)), 2)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,8 @@ import os
 
 import numpy as np
 
-from build_santorini_v4_corpus import STAGE_IDS, _split_id, canonicalize_board_policy
+from build_santorini_v4_corpus import STAGE_IDS, _split_id
+from santorini.D4Canonical import canonicalize_board_policy
 from santorini.OracleResearch import canonical_d4_fen, file_sha256, stage_for_builds
 from santorini.SantoriniGame import SantoriniGame
 from santorini.SantoriniOracle import anonymous_board_key

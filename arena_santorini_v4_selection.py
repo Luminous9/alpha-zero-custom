@@ -37,6 +37,8 @@ def parse_args():
     parser.add_argument("--placement-gumbel-scale", type=float, default=1.5)
     parser.add_argument("--player1-root-symmetries", type=int, default=1)
     parser.add_argument("--player2-root-symmetries", type=int, default=1)
+    parser.add_argument("--player1-canonical-d4", action="store_true")
+    parser.add_argument("--player2-canonical-d4", action="store_true")
     parser.add_argument("--inference-cache-size", type=int, default=4096)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--fp16", action="store_true")
@@ -62,7 +64,7 @@ def _resolve_device(name):
     return torch.device(name)
 
 
-def _load_player(game, kind, path, device, fp16):
+def _load_player(game, kind, path, device, fp16, canonical_d4=False):
     path = os.path.abspath(path)
     if kind == "v4":
         return V4InferenceWrapper(
@@ -71,7 +73,10 @@ def _load_player(game, kind, path, device, fp16):
             device=device,
             autocast_fp16=fp16,
             freeze_torchscript=True,
+            canonicalize_d4=canonical_d4,
         )
+    if canonical_d4:
+        raise ValueError("D4 canonicalization is only available for V4 checkpoints.")
     if fp16:
         raise ValueError("The legacy V3 adapter does not expose FP16 inference.")
     legacy_nnet_args.cuda = device.type == "cuda"
@@ -241,6 +246,15 @@ def main():
     for value in (args.player1_root_symmetries, args.player2_root_symmetries):
         if value < 1 or value > 8:
             raise ValueError("Root symmetry counts must be in [1, 8].")
+    for canonical_d4, root_symmetries, label in (
+        (args.player1_canonical_d4, args.player1_root_symmetries, "player1"),
+        (args.player2_canonical_d4, args.player2_root_symmetries, "player2"),
+    ):
+        if canonical_d4 and root_symmetries != 1:
+            raise ValueError(
+                "{} canonical D4 inference makes root symmetry averaging redundant; "
+                "set its root symmetry count to one.".format(label)
+            )
     device = _resolve_device(args.device)
     game = SantoriniGame(5, sequential_placement=True)
     np.random.seed(args.seed)
@@ -248,10 +262,12 @@ def main():
     if device.type == "cuda":
         torch.cuda.manual_seed_all(args.seed)
     player1 = _load_player(
-        game, args.player1_kind, args.player1, device, args.fp16
+        game, args.player1_kind, args.player1, device, args.fp16,
+        args.player1_canonical_d4,
     )
     player2 = _load_player(
-        game, args.player2_kind, args.player2, device, args.fp16
+        game, args.player2_kind, args.player2, device, args.fp16,
+        args.player2_canonical_d4,
     )
     opening_boards = None
     opening_records = None
@@ -296,6 +312,7 @@ def main():
             "kind": args.player1_kind,
             "checkpoint": os.path.abspath(args.player1),
             "root_symmetries": args.player1_root_symmetries,
+            "canonical_d4": bool(args.player1_canonical_d4),
             "wins": player1_wins,
         },
         "player2": {
@@ -303,6 +320,7 @@ def main():
             "kind": args.player2_kind,
             "checkpoint": os.path.abspath(args.player2),
             "root_symmetries": args.player2_root_symmetries,
+            "canonical_d4": bool(args.player2_canonical_d4),
             "wins": player2_wins,
         },
         "draws": draws,

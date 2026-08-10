@@ -1,5 +1,6 @@
 """Auditable sampling and loading for the mixed V4 bootstrap corpus."""
 
+from collections import Counter
 from dataclasses import dataclass
 
 import numpy as np
@@ -135,10 +136,24 @@ def build_sampling_plan(
             })
 
     # Preserve the historical deterministic order for replacement sampling.
-    # Unique plans process the most supply-constrained strata first so a rare
-    # source wins any positions aggregated under both engine source labels.
+    # Unique plans process the strata with the least exclusive supply first.
+    # A position can carry both engine source labels after aggregation; total
+    # eligible/quota ratios alone can incorrectly give those shared positions
+    # to a large source whose source-exclusive pool already covers its quota.
     if not replace:
+        ownership_counts = {0: Counter(), 1: Counter()}
+        for item in strata:
+            if item["quota"]:
+                ownership_counts[item["corpus_id"]].update(
+                    map(int, item["eligible"])
+                )
+        for item in strata:
+            owners = ownership_counts[item["corpus_id"]]
+            item["exclusive_eligible"] = sum(
+                owners[int(index)] == 1 for index in item["eligible"]
+            )
         strata.sort(key=lambda item: (
+            item["exclusive_eligible"] / max(item["quota"], 1),
             len(item["eligible"]) / max(item["quota"], 1),
             item["source_id"],
             item["stage_id"],
