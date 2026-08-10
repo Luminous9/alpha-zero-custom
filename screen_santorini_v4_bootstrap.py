@@ -59,6 +59,18 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine-corpus", default="temp/santorini_v4_pilot_branch_010/corpus.npz")
     parser.add_argument("--run13-component", default="temp/santorini_v4_mixed_pilot/run13-component.npz")
+    parser.add_argument(
+        "--selection-engine-corpus",
+        help=(
+            "Optional frozen engine corpus referenced by --selection-plan. "
+            "Defaults to --engine-corpus. Use this when an expanded training "
+            "corpus changes position indices or component-aware split IDs."
+        ),
+    )
+    parser.add_argument(
+        "--selection-run13-component",
+        help="Optional frozen Run13 component referenced by --selection-plan.",
+    )
     parser.add_argument("--train-plan", default="temp/santorini_v4_mixed_pilot/train-plan-10k.npz")
     parser.add_argument("--selection-plan", default="temp/santorini_v4_mixed_pilot/selection-plan-3k.npz")
     parser.add_argument("--output-dir", default="temp/santorini_v4_p1b_screen")
@@ -336,8 +348,6 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     prepare_started = time.perf_counter()
     prepare_kwargs = dict(
-        engine_path=args.engine_corpus,
-        run13_path=args.run13_component,
         policy_epsilon=args.policy_epsilon,
         alpha_boot=args.alpha_boot,
         stage_reliability=args.stage_reliability,
@@ -346,8 +356,24 @@ def main():
     corpus_factory = (
         StreamingPreparedV4Corpus if args.data_loading == "streaming" else prepare_corpus
     )
-    train = corpus_factory(plan_path=args.train_plan, expected_split=0, **prepare_kwargs)
-    selection = corpus_factory(plan_path=args.selection_plan, expected_split=1, **prepare_kwargs)
+    train = corpus_factory(
+        engine_path=args.engine_corpus,
+        run13_path=args.run13_component,
+        plan_path=args.train_plan,
+        expected_split=0,
+        **prepare_kwargs
+    )
+    selection_engine_corpus = args.selection_engine_corpus or args.engine_corpus
+    selection_run13_component = (
+        args.selection_run13_component or args.run13_component
+    )
+    selection = corpus_factory(
+        engine_path=selection_engine_corpus,
+        run13_path=selection_run13_component,
+        plan_path=args.selection_plan,
+        expected_split=1,
+        **prepare_kwargs
+    )
     preparation_seconds = time.perf_counter() - prepare_started
     selected_names = set(args.configs or PILOT_CONFIG_NAMES)
     configs = [config for config in SCREEN_CONFIGS if config["name"] in selected_names]
@@ -378,6 +404,12 @@ def main():
                 "stage_reliability": list(args.stage_reliability),
                 "engine_corpus": os.path.abspath(args.engine_corpus),
                 "run13_component": os.path.abspath(args.run13_component),
+                "selection_engine_corpus": os.path.abspath(
+                    selection_engine_corpus
+                ),
+                "selection_run13_component": os.path.abspath(
+                    selection_run13_component
+                ),
                 "train_plan": os.path.abspath(args.train_plan),
                 "selection_plan": os.path.abspath(args.selection_plan),
                 "final_test_touched": False,

@@ -1,11 +1,13 @@
 import unittest
 import os
 import tempfile
+import hashlib
 
 import numpy as np
 
 from build_santorini_v4_corpus import (
     UnionFind,
+    _retained_key_indices,
     _split_id,
     canonicalize_board_policy,
     validate_converted_corpus,
@@ -57,6 +59,13 @@ class TestV4CorpusBuilder(unittest.TestCase):
         first = _split_id("component", 7, 0.1, 0.1)
         self.assertEqual(first, _split_id("component", 7, 0.1, 0.1))
         self.assertIn(first, (0, 1, 2))
+
+    def test_excluded_corpus_hashes_remove_only_owned_positions(self):
+        keys = [b"first-position", b"second-position"]
+        excluded = {hashlib.sha256(keys[0]).hexdigest()}
+        np.testing.assert_array_equal(
+            _retained_key_indices(keys, excluded), np.asarray([1])
+        )
 
     def test_converted_sparse_payload_validates_frequency_and_policy(self):
         with tempfile.TemporaryDirectory() as folder:

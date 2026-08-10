@@ -13,9 +13,14 @@ candidates against the ordinary 8x96 control at that scale. Its original termina
 stop conclusion was too strong: only 5,848 unique training positions and one
 ordinary shape were tested. P1b is reopened for stage/source-correct learning
 curves at roughly 100k/300k/1M examples, larger ordinary candidates, and one
-capacity-aware equivariant control. The 100k data gate now passes with 100,000
-unique train and 3,000 unique selection positions, exact declared marginals, no
-repetition, and no cross-corpus D4 overlap; the matched GPU screen is next. P1c
+capacity-aware equivariant control. The 100k data gate and matched P100 screen
+now pass with 100,000 unique train and 3,000 unique selection positions, exact
+declared marginals, no repetition, and no cross-corpus D4 overlap. Ordinary
+6x192 is the provisional winner (1.0154 selection objective versus 1.0607 for
+ordinary 8x96) at only a 3.3% training-throughput cost; policy curves still
+improve at epoch four. The strict 300k data gate now passes with 300,000 unique
+draws, exact marginals, maximum repetition one, and zero engine/Run13 D4
+overlap; its matched GPU screen is next. P1c
 remains gated on that selection. Final test data and final arena seeds remain untouched. See
 `experiments/santorini_v4/P1B_SUPERVISED_SCREEN.md` and
 `experiments/santorini_v4/P1B_SCALED_SCREEN.md`.
@@ -321,7 +326,7 @@ Working expectation to be replaced by measurement: candidate B is ~2.2x V3 dense
 2. **P0b - measurement:** deeper-adjudicator calibration study; score-stability-by-phase report; rules cross-validation; instrumented Run13 wall-clock split.
 3. **P1a - pilot and architecture feasibility:** 100k-500k corpus pilot + conversion pipeline; V4 encoder rule/covariance tests; pinned-escnn and hand-rolled feasibility spike; exported-model equivariance/checkpoint tests.
 4. **P1b.1 - small screening ablations (complete, conclusion corrected):** the source-aware trainer, ordinary 6/13-plane baseline, per-epoch selection, Candidate A-D sizing, matched stage/global/winner targets, and paired standard/full selection arenas are complete. Global blend is provisional and winner-only fails at this scale. Candidate C loses the matched full-game pilot arena 10-30 to ordinary 8x96. This rejects the tested candidate at this scale, not V4.
-5. **P1b.2 - scaled architecture screen (active):** generate stage/source-correct supply; record stratum coverage and repetition; run matched 100k/300k/1M learning curves for ordinary 8x96, ordinary 10x128, ordinary 6x192, Candidate C, and one capacity-aware equivariant probe. Use a small Run13 preview only as a diagnostic. Benchmark surviving exports on P100. Final test data and final arena seeds remain untouched.
+5. **P1b.2 - scaled architecture screen (active; 100k screen and 300k data gate complete):** generate stage/source-correct supply; record stratum coverage and repetition; run matched 100k/300k/1M learning curves for ordinary 8x96, ordinary 10x128, ordinary 6x192, Candidate C, and one capacity-aware equivariant probe. Ordinary 6x192 provisionally wins the 100k objective with materially better policy and near-baseline training cost. Its diagnostic Run13 preview scores 25% on completed openings and 20% from the empty board at 96 simulations; this is marginal but shows no gross transfer/mapping failure before placement distillation. The strict 300k plan passes with unique draws and a frozen 3k holdout; its GPU screen is next, but no architecture is locked. Benchmark surviving exports on P100. Final test data and final arena seeds remain untouched.
 6. **P1c - full corpus and pretraining (gated):** after P1b.2 selects an architecture, generate 5M valid records, expanding only if the learning curve justifies it; full pretraining includes phase-balanced Run13 placement distillation.
 7. **Gate G1:** separate standard-play and full-game arenas versus Run13 at 96/128 simulations, plus equal-cost reporting. Stop/debug thresholds use paired-block uncertainty.
 8. **P2 - self-play:** sparring + refreshed seeded starts + low-weight auxiliary head, each independently switchable; replay/telemetry schema extended.

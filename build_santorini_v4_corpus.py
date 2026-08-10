@@ -34,6 +34,15 @@ def parse_args():
     parser.add_argument("--selection-fraction", type=float, default=0.10)
     parser.add_argument("--test-fraction", type=float, default=0.10)
     parser.add_argument("--split-seed", type=int, default=20260808)
+    parser.add_argument(
+        "--exclude-corpus",
+        action="append",
+        default=[],
+        help=(
+            "Converted corpus whose D4 position hashes are removed after "
+            "component-aware split assignment. May be repeated."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -113,6 +122,13 @@ def _generation_distribution(manifest):
         "random_moves_max": int(generation["random_moves_max"]),
         "subgame_initial_chance": float(generation["subgame_initial_chance"]),
     }
+
+
+def _retained_key_indices(keys, excluded_hashes):
+    return np.asarray([
+        index for index, key in enumerate(keys)
+        if hashlib.sha256(key).hexdigest() not in excluded_hashes
+    ], dtype=np.int64)
 
 
 def _new_aggregate(board, record):
@@ -300,6 +316,22 @@ def convert_shards(args):
         )
         split_ids[members] = split
 
+    excluded_hashes = set()
+    for path in args.exclude_corpus:
+        with np.load(path, allow_pickle=False) as payload:
+            excluded_hashes.update(map(str, payload["position_hashes"]))
+    retained_indices = _retained_key_indices(keys, excluded_hashes)
+    excluded_indices = np.setdiff1d(
+        np.arange(len(keys), dtype=np.int64), retained_indices,
+        assume_unique=True,
+    )
+    excluded_observations = int(sum(
+        aggregates[keys[index]]["observations"] for index in excluded_indices
+    ))
+    keys = [keys[index] for index in retained_indices]
+    split_ids = split_ids[retained_indices]
+    retained_records = raw_records - excluded_observations
+
     boards = []
     observation_counts = []
     winner_means = []
@@ -366,7 +398,7 @@ def convert_shards(args):
     temporary = output_path + ".tmp.npz"
     np.savez_compressed(temporary, **payload)
     os.replace(temporary, output_path)
-    load_validation = validate_converted_corpus(output_path, raw_records)
+    load_validation = validate_converted_corpus(output_path, retained_records)
 
     elapsed = time.perf_counter() - started
     report = {
@@ -383,9 +415,15 @@ def convert_shards(args):
         ],
         "shards": shard_summaries,
         "raw_records": raw_records,
+        "retained_records": retained_records,
+        "excluded_corpora": [
+            os.path.abspath(path) for path in args.exclude_corpus
+        ],
+        "excluded_positions": int(len(excluded_indices)),
+        "excluded_observations": excluded_observations,
         "unique_d4_positions": len(keys),
-        "duplicate_observations": raw_records - len(keys),
-        "duplicate_rate": (raw_records - len(keys)) / raw_records,
+        "duplicate_observations": retained_records - len(keys),
+        "duplicate_rate": (retained_records - len(keys)) / retained_records,
         "root_games": len(game_positions),
         "independent_trajectories": len(trajectory_ids),
         "split_components": len(component_members),

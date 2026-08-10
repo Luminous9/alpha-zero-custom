@@ -63,6 +63,28 @@ class V4InferenceWrapperTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 V4InferenceWrapper(self.game, path, device="cpu", autocast_fp16=True)
 
+    def test_ordinary_checkpoint_uses_declared_width_and_depth(self):
+        config = {
+            "name": "test_ordinary_nondefault_shape",
+            "architecture": "ordinary",
+            "planes": 13,
+            "target": "global_blend",
+            "channels": 16,
+            "residual_blocks": 1,
+        }
+        model = build_v4_model(self.game, config)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "ordinary.pth.tar")
+            torch.save({"config": config, "state_dict": model.state_dict()}, path)
+            wrapper = V4InferenceWrapper(
+                self.game, path, device="cpu", freeze_torchscript=False
+            )
+            policy, value = wrapper.predict(self.board())
+        self.assertEqual(len(model.residual_blocks), 1)
+        self.assertEqual(model.stem[0].out_channels, 16)
+        self.assertEqual(policy.shape, (self.game.getActionSize(),))
+        self.assertTrue(np.isfinite(value))
+
 
 if __name__ == "__main__":
     unittest.main()

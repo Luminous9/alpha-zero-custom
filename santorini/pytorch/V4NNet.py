@@ -16,8 +16,8 @@ def build_v4_model(game, config):
     if architecture == "ordinary":
         args = SimpleNamespace(
             input_channels=int(config["planes"]),
-            num_channels=96,
-            num_residual_blocks=8,
+            num_channels=int(config.get("channels", 96)),
+            num_residual_blocks=int(config.get("residual_blocks", 8)),
             policy_channels=65,
             value_hidden_size=128,
             dropout=0.0,

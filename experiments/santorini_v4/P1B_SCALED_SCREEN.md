@@ -1,7 +1,10 @@
 # P1b.2 Scaled Architecture Screen
 
-Status: the 100k unique-data gate is complete and the matched GPU screen is
-pending. The engine corpus contains 281,186 unique positions; the fresh Run13
+Status: the 100k unique-data gate and matched GPU screen are complete. The
+screen selects ordinary 6x192 provisionally. The strict 300k data gate now also
+passes and its matched GPU screen is next; architecture selection remains open
+until the scaled curves and selection arenas are available. The frozen 100k
+engine corpus contains 281,186 unique positions; the fresh Run13
 component contains exactly 10,000 train, 300 selection, and 300 reserved-test
 positions. The strict plans contain 100,000 train and 3,000 selection positions,
 with no repetition or cross-corpus D4 overlap and exact declared marginals. This
@@ -176,6 +179,39 @@ For 300k and 1M, use the matrices declared above. Generate additional immutable
 shards and reconvert them; do not obtain scale by switching the plan back to
 replacement sampling.
 
+### 300k data-gate result
+
+The final expansion contains 1.65M differentially validated raw observations
+from 1.25M zero-branch and 400k branch-distribution records. After D4
+aggregation and removal of 243 positions owned by the frozen Run13 component,
+`engine-corpus-300k.npz` contains 1,283,400 unique engine positions and has zero
+cross-corpus hash overlap. Exclusion occurs after connected-component split
+assignment, so removing a Run13-owned position cannot split the remaining
+positions from one root game across data splits.
+
+The strict train availability and quota are:
+
+| Source/stage | Available | Drawn | Margin |
+|---|---:|---:|---:|
+| main / early | 56,680 | 54,878 | 1,802 |
+| main / middle | 181,528 | 75,672 | 105,856 |
+| main / late | 725,950 | 95,006 | 630,944 |
+| subgame / early | 4,868 | 3,222 | 1,646 |
+| subgame / middle | 38,369 | 25,778 | 12,591 |
+| subgame / late | 269,472 | 35,444 | 234,028 |
+
+The resulting `train-300k.npz` has exactly 300,000 unique corpus positions,
+maximum repetition one, repeat effective sample size 300,000, exact declared
+source/stage marginals, and zero engine/Run13 D4 overlap. Its seed is
+`20260908`.
+
+Corpus expansion changes both sorted position indices and connected-component
+split assignments. The trainer therefore accepts a separate
+`--selection-engine-corpus`: 300k training reads the expanded corpus while the
+fixed 3k holdout continues to read the original 100k corpus. Checkpoint metadata
+records both paths. Reinterpreting the old selection plan against the expanded
+corpus is prohibited.
+
 ## GPU learning curves
 
 The scaled trainer uses streaming preparation so it never materializes a full
@@ -189,6 +225,13 @@ It contains only the converted engine corpus, Run13 component, strict train and
 selection plans, and their reports; raw JSONL and reserved evaluation artifacts
 are excluded. Extract it into `temp/santorini_v4_scaled/` in the Kaggle working
 copy before running the command below.
+
+For 300k, use `temp/santorini_v4_300k_kaggle_bundle.tar.gz` (about 96 MB),
+SHA-256 `f130d4a1ab12caa3262cdbde085ceaff61bfdae1be3f34aee308e3691af2883c`.
+It contains the expanded and frozen engine corpora, fixed Run13 component,
+strict 300k train and 3k selection plans, reports, and the two patched runtime
+files. Extract it at the repository root, not inside `temp/`, because its paths
+already include `temp/santorini_v4_scaled/`.
 
 Run four epochs at each scale, from the same initialization seed and optimizer
 contract. Retain per-epoch selection curves and both the best and final
@@ -211,10 +254,89 @@ ablations are not accidentally rerun:
     equivariant_e_13_global_blend
 ```
 
+The 300k command keeps the holdout frozen explicitly:
+
+```bash
+.venv/bin/python screen_santorini_v4_bootstrap.py \
+  --engine-corpus temp/santorini_v4_scaled/engine-corpus-300k.npz \
+  --selection-engine-corpus temp/santorini_v4_scaled/engine-corpus.npz \
+  --run13-component temp/santorini_v4_scaled/run13-component.npz \
+  --train-plan temp/santorini_v4_scaled/train-300k.npz \
+  --selection-plan temp/santorini_v4_scaled/selection-3k.npz \
+  --output-dir temp/santorini_v4_scaled/screen-300k \
+  --epochs 4 --batch-size 256 --device cuda --data-loading streaming \
+  --configs \
+    ordinary_13_global_blend \
+    ordinary_10x128_13_global_blend \
+    ordinary_6x192_13_global_blend \
+    equivariant_c_13_global_blend \
+    equivariant_e_13_global_blend
+```
+
 Repeat with the 300k and 1M plans. Continue from 100k to 300k only if at least
 one candidate's selection policy/value curve is still materially improving;
 continue to 1M on the same rule. Architecture selection uses curve separation,
 paired standard/full arenas between survivors, and measured P100 exported cost.
+
+### 100k result and continuation decision
+
+The matched Kaggle/P100 run used the declared seed and optimizer contract, four
+epochs, streaming data preparation, and did not load the reserved final test.
+Reported metrics below are from each model's best selection-objective checkpoint;
+the objective is `0.25 * policy cross-entropy + global-blend value MSE`.
+
+| Configuration | Best epoch | Objective | Policy CE | Policy top-1 | Value MSE | Train examples/s |
+|---|---:|---:|---:|---:|---:|---:|
+| ordinary 8x96 | 3 | 1.0607 | 2.8814 | 23.60% | 0.3403 | 1,920 |
+| ordinary 10x128 | 3 | 1.0471 | 2.7686 | 26.07% | 0.3549 | 1,949 |
+| **ordinary 6x192** | **3** | **1.0154** | **2.7124** | **26.43%** | **0.3373** | **1,857** |
+| equivariant C | 4 | 1.0798 | 2.9350 | 23.07% | 0.3460 | 1,519 |
+| equivariant E | 4 | 1.0449 | 2.8226 | 24.57% | 0.3392 | 1,330 |
+
+Ordinary 6x192 is the provisional winner. Relative to ordinary 8x96 it lowers
+the selection objective by 4.3%, lowers policy CE by 5.9%, raises policy top-1
+by 2.83 percentage points, and slightly improves value MSE while reducing
+training throughput by only 3.3%. Its policy CE is also lower in every reported
+stage and source stratum. A paired position-level bootstrap on the fixed
+selection set puts its objective advantage over ordinary 10x128 at 0.023-0.041
+(95% interval); this is diagnostic rather than a game-cluster-aware strength
+claim.
+
+Capacity helps the equivariant family: E improves substantially over C and
+slightly beats the ordinary 8x96 objective. It does not win the architecture
+comparison, however: ordinary 6x192 has a 2.8% lower objective, better policy,
+nearly identical value MSE, and 40% higher training throughput. Candidate C is
+also both slower and worse than the ordinary baseline at this scale.
+
+The continuation gate passes. Policy CE and top-1 improve through epoch four
+for all five candidates, while E and C obtain their best combined objective at
+epoch four. The ordinary value heads become noisy at epoch four, so the next
+experiment uses more unique positions from a fresh initialization rather than
+adding epochs over the 100k set. Retain all five candidates at 300k to preserve
+the predeclared curve comparison; use ordinary 6x192's epoch-three checkpoint
+for the optional Run13 diagnostic preview. Do not select the final architecture
+or run the winner-only target bake-off yet.
+
+### 100k Run13 diagnostic preview
+
+The ordinary 6x192 best checkpoint scored 10-30 (25%) in the 40-game,
+96-simulation standard-play preview and 8-32 (20%) in the corresponding
+full-game preview. Paired-opening bootstrap intervals were 15-35% and 10-30%,
+respectively. Both used selection seed `20260814`; reserved final arena seeds
+and final-test positions remained untouched.
+
+This is a marginal transfer result, not a terminal G1 verdict. The five-point
+standard/full difference is not material at 20 paired blocks, and the 100k
+screen intentionally contains no phase-balanced placement distillation. The
+result rules out a gross action/encoding mapping failure, supports continuing
+to 300k, and keeps placement distillation as an explicit P1c dependency.
+
+The initial preview smoke also exposed an inference-only integration defect:
+the ordinary V4 checkpoint loader reconstructed every checkpoint as 8x96 even
+when its config declared another width/depth. The loader now honors saved
+`channels` and `residual_blocks`, with a non-default-shape regression test. The
+screen metrics and checkpoint weights were unaffected because training already
+constructed the declared shapes correctly.
 
 After selecting the best architecture at scale, rerun winner-only against global
 blend on that architecture. The current global result remains the default unless
