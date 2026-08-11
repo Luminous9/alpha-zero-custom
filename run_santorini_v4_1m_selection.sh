@@ -8,9 +8,9 @@ ENGINE_CORPUS="temp/santorini_v4_scaled/engine-corpus.npz"
 RUN13_COMPONENT="temp/santorini_v4_scaled/run13-component.npz"
 SELECTION_PLAN="temp/santorini_v4_scaled/selection-3k.npz"
 
-O10="${CHECKPOINT_DIR}/ordinary_10x128_13_global_blend.pth.zip"
-O6="${CHECKPOINT_DIR}/ordinary_6x192_13_global_blend.pth.zip"
-E="${CHECKPOINT_DIR}/equivariant_e_13_global_blend.pth.zip"
+O10="${CHECKPOINT_DIR}/ordinary_10x128_13_global_blend.pt"
+O6="${CHECKPOINT_DIR}/ordinary_6x192_13_global_blend.pt"
+E="${CHECKPOINT_DIR}/equivariant_e_13_global_blend.pt"
 
 mkdir -p "${OUTPUT_DIR}"
 

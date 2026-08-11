@@ -578,10 +578,13 @@ before this definition and result were recorded.
 
 The selection handoff is
 `temp/santorini_v4_1m_selection_bundle.tar.gz` (about 49 MiB), SHA-256
-`51eeabbfee9070c423a7f77b6049e740fa9727bd4ef4b74c5cc54fd49642276d`.
+`7602f8b1b5198d9f32110bebf0a0b03dd44dd1d9b5df4c1eafce8c2f1e1f95be`.
 It contains the three best checkpoints, frozen selection inputs, canonical
 inference/runtime files, seam diagnostic, benchmark driver, and
 `run_santorini_v4_1m_selection.sh`.
+The checkpoint payloads use a neutral `.pt` suffix; naming PyTorch's internal
+ZIP container `.zip` caused Kaggle input processing to expand it into a
+directory, which is not loadable by `torch.load`.
 Extract it at the repository root and run:
 
 ```bash
