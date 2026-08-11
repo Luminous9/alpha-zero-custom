@@ -5,6 +5,7 @@ PYTHON_BIN="${PYTHON_BIN:-.venv/bin/python}"
 DATA_DIR="${DATA_DIR:-temp/santorini_v4_scaled}"
 P1C_DIR="${P1C_DIR:-temp/santorini_v4_p1c}"
 OUTPUT_DIR="${OUTPUT_DIR:-temp/santorini_v4_p1c_results}"
+PLACEMENT_COMPONENT="${PLACEMENT_COMPONENT:-temp/santorini_v4_placement/oracle-t25-policy.npz}"
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -12,7 +13,7 @@ mkdir -p "${OUTPUT_DIR}"
   --engine-corpus "${DATA_DIR}/engine-corpus-1m-train.npz" \
   --selection-engine-corpus "${DATA_DIR}/engine-corpus.npz" \
   --run13-component "${DATA_DIR}/run13-component.npz" \
-  --placement-component "${P1C_DIR}/placement-component.npz" \
+  --placement-component "${PLACEMENT_COMPONENT}" \
   --train-plan "${P1C_DIR}/train-plan.npz" \
   --selection-plan "${DATA_DIR}/selection-3k.npz" \
   --output-dir "${OUTPUT_DIR}" \

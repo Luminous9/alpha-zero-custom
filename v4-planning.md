@@ -46,8 +46,10 @@ blend with `alpha_boot=0.5` and `T=261.8`; the main head switches explicitly to
 pure self-play `z` at handoff. P1b.2 is complete and P1c is in progress with the
 full-corpus contract frozen. Placement now uses santorini-ai's joint search for
 policy, factored exactly into sequential decisions, with Run13 continuations
-supplying completed outcomes and the comparison policy. Final test data and
-final arena seeds remain untouched. See
+supplying completed outcomes and the comparison policy. Both teachers, all
+three matched policy components, and the 10,640,649-draw epoch plan are
+complete; four-epoch P100 pretraining is next. Final test data and final arena
+seeds remain untouched. See
 `experiments/santorini_v4/P1B_SUPERVISED_SCREEN.md` and
 `experiments/santorini_v4/P1B_SCALED_SCREEN.md`, followed by
 `experiments/santorini_v4/P1C_FULL_PRETRAIN.md`.
@@ -296,17 +298,25 @@ Each root pair is searched independently with a reset TT. Duplicate action
 orders are collapsed by resulting FEN. Because finite search produced different
 scores for D4-equivalent pairs, raw scores are projected by averaging over the
 parent position's D4 stabilizer before softmax. The frozen one-time teacher uses
-50,000 nodes per root pair and policy temperature 300; the latter retains more
-signal than temperature 400 while reducing budget-instability in the sharp
-ranking. Oracle placement values are telemetry only.
+50,000 nodes per root pair. Raw responses are retained so temperature changes
+do not require more search. A placement-only continuation tournament found the
+initial T300 target too diffuse and selected T25. Oracle placement values are
+telemetry only.
 
-Run13 supplies the main placement value target: start continuations from all
-960 prefix orbits, use its native search policy, and record the completed-game
-outcome. Build three otherwise identical components for the placement bake-off:
-Run13 policy, santorini-ai policy, and a declared 50/50 policy mix. All three use
-the same Run13 completed outcomes, position sampling weights, and training plan,
-so the policy teacher is the only intervention. Prefer the pure oracle policy if
-it matches the mixed arm; retain the Run13 arm as the control. Same-player
+Run13 supplies the placement value target: start continuations from all 960
+prefix orbits, use its native search policy, and record the completed-game
+outcome. This is retained because the oracle's static placement evaluation is
+not a game outcome, not because Run13 placement was shown to be superior.
+
+Select the policy teacher before full GPU pretraining with a paired
+placement-only tournament: sample each teacher through all four sequential
+actions, swap teacher seats, then use the same deterministic santorini-ai
+continuation for both sides with TT reset per opening. At 64 paired blocks,
+oracle T25 matched Run13 (46.875%, paired 95% interval 39.0625%-54.6875%) and
+matched the 50/50 T25/Run13 blend (46.875%, 38.2813%-55.4688%). The blend's
+small point-estimate lead was inconclusive. Apply the predeclared preference for
+pure oracle when it matches the mixed arm: P1c uses the pure T25 oracle policy
+with the shared Run13 completed outcomes and frozen sampling plan. Same-player
 sequential transitions keep the existing turn-aware value semantics.
 
 Placement examples use a phase-balanced sampler/loss bucket so millions of
@@ -402,7 +412,7 @@ Working expectation to be replaced by measurement: candidate B is ~2.2x V3 dense
 3. **P1a - pilot and architecture feasibility:** 100k-500k corpus pilot + conversion pipeline; V4 encoder rule/covariance tests; pinned-escnn and hand-rolled feasibility spike; exported-model equivariance/checkpoint tests.
 4. **P1b.1 - small screening ablations (complete, conclusion corrected):** the source-aware trainer, ordinary 6/13-plane baseline, per-epoch selection, Candidate A-D sizing, matched stage/global/winner targets, and paired standard/full selection arenas are complete. Global blend is provisional and winner-only fails at this scale. Candidate C loses the matched full-game pilot arena 10-30 to ordinary 8x96. This rejects the tested candidate at this scale, not V4.
 5. **P1b.2 - scaled architecture and target selection (complete):** the matched 100k/300k/1M curves select canonical ordinary 6x192 by supervised fit plus the frozen ordinary-family speed tie-break. Exact batched D4 inference reaches 3,285 examples/s at arena-relevant batch eight on P100, with a 24% latency premium over the identical uncanonicalized wrapper. Equivariant E retains a small early-stage advantage but loses the supervised/arena selection overall. The required 1M target ablation rejects winner-only noninferiority: its common handoff objective is +0.01031 worse, with a paired interval of +0.00169 to +0.01868, while the standard/full arenas cancel 40-40. Retain global blend (`alpha_boot=0.5`, `T=261.8`) and explicitly switch the main target to pure self-play `z` at handoff. Final data and arena seeds remain untouched.
-6. **P1c - full corpus and pretraining (in progress):** use the selected canonical ordinary 6x192 architecture and global-blend bootstrap contract. The completed 5.05M raw generation already yields 4,166,074 D4-unique train positions, so it is the first full corpus; expand toward 20M only if its four-epoch curve is still materially improving. The frozen coverage-balanced epoch has 7,112,692 standard draws and 3,527,957 placement draws (33.1555%, matching the Run13 replay phase mix). Placement is balanced over the four sequential decisions. Santorini-ai labels all 50 joint boundaries and is factored into all 960 sequential prefix orbits; four fresh Run13 continuations from each prefix supply completed-game `z` and the comparison policy. Run13-only, oracle-only, and 50/50-policy components share outcomes and sampling, while standard play retains the selected global blend. Checkpoint selection remains on the frozen standard holdout because common placement roots make an exact-position plus game-isolated placement holdout impossible; full-game G1 selects the placement teacher.
+6. **P1c - full corpus and pretraining (teacher selected/plan complete; GPU training next):** use the selected canonical ordinary 6x192 architecture and global-blend bootstrap contract. The completed 5.05M raw generation already yields 4,166,074 D4-unique train positions, so it is the first full corpus; expand toward 20M only if its four-epoch curve is still materially improving. The frozen coverage-balanced epoch has 7,112,692 standard draws and 3,527,957 placement draws (33.1555%, matching the Run13 replay phase mix). Placement is balanced over the four sequential decisions. Santorini-ai labels all 50 joint boundaries and is factored into all 960 sequential prefix orbits; four fresh Run13 continuations from each prefix supply completed-game `z`. A paired placement-only tournament showed that lower-temperature oracle T25 matches Run13 and the T25/Run13 blend. Per the predeclared pure-oracle tie-break, run one full pretraining arm with the T25 oracle policy; Run13 contributes outcomes but no placement-policy weight. Standard play keeps the selected global blend. Checkpoint selection remains on the frozen standard holdout because common placement roots make an exact-position plus game-isolated placement holdout impossible; full-game G1 is the next gate.
 7. **Gate G1:** separate standard-play and full-game arenas versus Run13 at 96/128 simulations, plus equal-cost reporting. Stop/debug thresholds use paired-block uncertainty.
 8. **P2 - self-play:** sparring + refreshed seeded starts + low-weight auxiliary head, each independently switchable; replay/telemetry schema extended.
 9. **Review:** after ~20-30 iterations, run the 96/128/1024 battery and component ablations; decide whether to study a nonzero search-facing `lambda` in a following run.
