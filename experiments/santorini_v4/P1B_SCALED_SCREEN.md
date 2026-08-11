@@ -601,6 +601,57 @@ selection seed `20260814`, deterministic standard-play Gumbel scale zero, and
 no root symmetry averaging. This is selection evidence only; final arena seeds
 and final-test positions remain untouched.
 
+### P100 benchmark and paired round-robin result
+
+The P100 run reproduced the seam diagnostic, exported every checkpoint with
+negligible eager/frozen differences, and retained essentially exact FP16
+predictions. Ordinary policy top-1 agreement between FP32 and FP16 was 100%; E
+was 99.61%. All arena files used the same standard openings and paired seeds,
+the declared canonical wrappers, one root orientation, and no final-test or
+final-arena data.
+
+Raw network throughput favors the ordinary towers, but full-wrapper cost is the
+relevant measurement. Canonicalization and policy restoration dominate the
+small 5x5 network at batched inference. The arena's observed executed/batch
+ratios are approximately 6-10, so batch eight is the closest recorded case:
+
+| Candidate | Raw FP32 ex/s | Wrapper FP32 ex/s | Wrapper FP16 ex/s |
+|---|---:|---:|---:|
+| ordinary 10x128 | 7,095 | 1,351 | 1,207 |
+| **ordinary 6x192** | **8,919** | 1,388 | 1,294 |
+| equivariant E | 4,818 | **1,795** | **1,369** |
+
+FP16 autocast is slower than FP32 at batch one/eight on this P100, despite very
+close numerical agreement. Production P100 inference should therefore remain
+FP32 at the observed small batches unless a later end-to-end benchmark changes
+the distribution. E's native equivariance avoids the hard-canonicalization
+overhead and is 29% faster than 6x192 at batch-eight FP32; under the FP16 arena
+setting the advantage is only 5.8%. This implementation cost remains an
+optimization target even though it does not decide the architecture alone.
+
+| Matchup (first candidate score) | Standard | Full | Combined seed-cluster score | Combined 95% interval |
+|---|---:|---:|---:|---:|
+| O6 vs O10 | 19-21 (47.5%) | 17-23 (42.5%) | 45.0% | 35.0-53.75% |
+| O6 vs E | 22-18 (55.0%) | 21-19 (52.5%) | 53.75% | 45.0-63.75% |
+| O10 vs E | 25-15 (62.5%) | 29-11 (72.5%) | 67.5% | 60.0-73.75% |
+
+O10 defeats E clearly across the combined gates: 54-26 games and 14-1-5
+win/loss/tie when each seed's four games form one cluster (two-sided paired sign
+`p=0.00098`). O6-E and O6-O10 remain inconclusive. O10 leans ahead of O6 in
+both gates, but the combined interval still includes 50%; optional stopping for
+more games is prohibited by the predeclared tie-break.
+
+The architecture selection therefore follows the rule frozen before these
+arenas: when the direct ordinary matchup is inconclusive, use end-to-end speed
+at the observed small-batch regime. Ordinary 6x192 is faster than 10x128 at
+batch one/eight in both precisions, has the slightly better supervised
+objective, and does not show a resolved strength deficit. Select canonical
+ordinary 6x192 for the required 1M winner-only versus global-blend target
+ablation. E is closed for this run: its intrinsic smooth equivariance and
+wrapper speed are real advantages, but neither the seam diagnostic nor paired
+playing results overcome its supervised gap. Preserve E as a documented future
+architecture/implementation reference rather than a P1c candidate.
+
 ## Run13 preview and G1
 
 A small standard/full arena against Run13 may be run for the best 100k checkpoint
