@@ -652,6 +652,38 @@ wrapper speed are real advantages, but neither the seam diagnostic nor paired
 playing results overcome its supervised gap. Preserve E as a documented future
 architecture/implementation reference rather than a P1c candidate.
 
+### Frozen 1M value-target ablation protocol
+
+The target bake-off changes only the ordinary 6x192 main value target. The
+winner-only arm reuses the frozen 1M train and 3k selection plans, seed
+`20260812`, four-epoch optimizer schedule, D4 augmentation stream, policy target,
+and all model dimensions from the existing global-blend control. Its checkpoint
+records effective main-head `alpha_boot=0`; the corpus still prepares the
+`alpha_boot=0.5`, `T=261.8` global target strictly as comparison telemetry. The
+already-frozen 1M global checkpoint is the control, so it is not retrained.
+
+The common handoff-facing supervised metric is
+`0.25 * policy CE + winner MSE`. Winner-only is noninferior when the upper end of
+the 10,000-sample paired position-bootstrap 95% interval for winner-minus-blend
+is no greater than `+0.01`. Both checkpoints are also reported against global
+blend, by source, and by stage. Regardless of that result, run exactly 40
+standard and 40 full selection games at 96 simulations with paired seats,
+selection seed `20260814`, FP32, exact canonical D4 inference, and no root
+symmetry averaging. Global blend vetoes the winner-only preference only if its
+combined four-game-per-seed cluster-bootstrap 95% score interval lies entirely
+above 50%. No extra games or threshold changes are allowed after inspection.
+If winner-only passes supervised noninferiority and global blend does not earn
+that clear arena win, prefer winner-only to remove the self-play handoff in value
+semantics; otherwise retain global blend and record the transition explicitly.
+
+The self-contained Kaggle archive is
+`temp/santorini_v4_value_ablation_1m_bundle.tar.gz` (about 280 MiB), SHA-256
+`97c33521fe5dd4e67a9e38fe7cbf7927be5f286e7212c507ecf5ab100b6696d0`.
+Extract it at the repository root and run
+`run_santorini_v4_value_ablation_1m.sh`. The runner trains winner-only, performs
+the paired holdout comparison, runs both arenas, and writes the automatic frozen
+decision to `temp/santorini_v4_value_ablation_1m/decision.json`.
+
 ## Run13 preview and G1
 
 A small standard/full arena against Run13 may be run for the best 100k checkpoint

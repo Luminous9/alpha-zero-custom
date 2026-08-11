@@ -32,8 +32,10 @@ P100 benchmark, and 240-game paired round robin are complete. The direct
 end-to-end speed tie-break selects canonical ordinary 6x192. E's native wrapper
 is faster at batched inference, but it retains the supervised deficit and loses
 the round robin overall; no seam-specific supervised interaction was detected.
-P1b.2 now requires the frozen 1M winner-only target ablation on 6x192. P1c
-remains gated on that result. Final test data and final arena seeds remain untouched. See
+P1b.2 now has a frozen 1M winner-only target ablation on 6x192 ready to run. Its
+common handoff objective uses a +0.01 paired-bootstrap noninferiority margin,
+followed by fixed 40-game standard and full selection arenas with no optional
+stopping. P1c remains gated on that result. Final test data and final arena seeds remain untouched. See
 `experiments/santorini_v4/P1B_SUPERVISED_SCREEN.md` and
 `experiments/santorini_v4/P1B_SCALED_SCREEN.md`.
 Prereq reading: `santorini/santorini_ai_architecture_v3.md` (V3 spec),

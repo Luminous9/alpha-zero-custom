@@ -5,6 +5,13 @@ import unittest
 import numpy as np
 import torch
 
+from santorini.D4Canonical import (
+    D4_TRANSFORMS,
+    canonicalize_board,
+    canonicalize_boards,
+    restore_canonical_policies,
+    restore_canonical_policy,
+)
 from santorini.SantoriniGame import SantoriniGame
 from santorini.pytorch.V4NNet import V4InferenceWrapper, build_v4_model
 
@@ -124,6 +131,39 @@ class V4InferenceWrapperTests(unittest.TestCase):
                     ))
                     self.assertAlmostEqual(transformed_value, value, places=7)
 
+    def test_batched_canonicalization_matches_scalar_reference(self):
+        empty = np.zeros((2, 5, 5), dtype=np.int8)
+        boards = np.asarray([
+            self.board(),
+            np.rot90(self.board(), axes=(-2, -1)),
+            np.flip(self.board(), axis=-1),
+            empty,
+        ])
+        canonical, matching_masks, keys = canonicalize_boards(boards)
+        scalar = [canonicalize_board(board) for board in boards]
+        self.assertTrue(np.array_equal(
+            canonical, np.asarray([item[0] for item in scalar])
+        ))
+        self.assertEqual(keys, [item[2] for item in scalar])
+        expected_masks = np.asarray([
+            [transform in item[1] for transform in D4_TRANSFORMS]
+            for item in scalar
+        ])
+        self.assertTrue(np.array_equal(matching_masks, expected_masks))
+
+        rng = np.random.default_rng(17)
+        policies = rng.random(
+            (len(boards), self.game.getActionSize()), dtype=np.float32
+        )
+        restored = restore_canonical_policies(
+            self.game, policies, matching_masks
+        )
+        expected = np.asarray([
+            restore_canonical_policy(self.game, policy, item[1])
+            for policy, item in zip(policies, scalar)
+        ])
+        self.assertTrue(np.array_equal(restored, expected))
+
     def test_canonical_inference_projects_a_position_stabilizer(self):
         config = {
             "name": "test_ordinary_stabilizer",
@@ -169,6 +209,41 @@ class V4InferenceWrapperTests(unittest.TestCase):
                     device="cpu",
                     canonicalize_d4=True,
                 )
+
+    def test_canonical_frame_cache_is_bounded_and_reports_hits(self):
+        config = {
+            "name": "test_ordinary_canonical_cache",
+            "architecture": "ordinary",
+            "planes": 13,
+            "target": "global_blend",
+            "channels": 16,
+            "residual_blocks": 1,
+        }
+        model = build_v4_model(self.game, config)
+        board = self.board()
+        rotated = np.rot90(board, axes=(-2, -1)).copy()
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "ordinary.pth.tar")
+            torch.save({"config": config, "state_dict": model.state_dict()}, path)
+            wrapper = V4InferenceWrapper(
+                self.game,
+                path,
+                device="cpu",
+                freeze_torchscript=False,
+                canonicalize_d4=True,
+                canonical_cache_size=2,
+            )
+            first_policies, first_values = wrapper.predict_batch([board, rotated])
+            second_policies, second_values = wrapper.predict_batch([board, rotated])
+
+        self.assertTrue(np.array_equal(first_policies, second_policies))
+        self.assertTrue(np.array_equal(first_values, second_values))
+        self.assertEqual(wrapper.canonical_cache_info(), {
+            "size": 2,
+            "capacity": 2,
+            "hits": 2,
+            "misses": 2,
+        })
 
 
 if __name__ == "__main__":

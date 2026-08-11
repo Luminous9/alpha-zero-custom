@@ -39,6 +39,7 @@ SCREEN_CONFIGS = (
     {"name": "equivariant_d_13_stage_blend", "architecture": "equivariant", "planes": 13, "target": "stage_blend", "candidate": "D", "effective_channels": 160, "residual_blocks": 12},
     {"name": "ordinary_10x128_13_global_blend", "architecture": "ordinary", "planes": 13, "target": "global_blend", "candidate": "O-10x128", "channels": 128, "residual_blocks": 10},
     {"name": "ordinary_6x192_13_global_blend", "architecture": "ordinary", "planes": 13, "target": "global_blend", "candidate": "O-6x192", "channels": 192, "residual_blocks": 6},
+    {"name": "ordinary_6x192_13_winner", "architecture": "ordinary", "planes": 13, "target": "winner", "candidate": "O-6x192-winner", "channels": 192, "residual_blocks": 6},
     {"name": "equivariant_e_13_global_blend", "architecture": "equivariant", "planes": 13, "target": "global_blend", "candidate": "E-capacity", "effective_channels": 320, "residual_blocks": 6},
 )
 
@@ -50,6 +51,7 @@ PILOT_CONFIG_NAMES = tuple(
     if config["name"] not in {
         "ordinary_10x128_13_global_blend",
         "ordinary_6x192_13_global_blend",
+        "ordinary_6x192_13_winner",
         "equivariant_e_13_global_blend",
     }
 )
@@ -400,6 +402,9 @@ def main():
                 "policy_weight": args.policy_weight,
                 "policy_epsilon": args.policy_epsilon,
                 "alpha_boot": args.alpha_boot,
+                "effective_main_value_alpha_boot": (
+                    0.0 if config["target"] == "winner" else args.alpha_boot
+                ),
                 "score_temperature": args.score_temperature,
                 "stage_reliability": list(args.stage_reliability),
                 "engine_corpus": os.path.abspath(args.engine_corpus),

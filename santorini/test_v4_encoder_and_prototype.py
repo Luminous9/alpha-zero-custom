@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from santorini.SantoriniGame import SantoriniGame
-from santorini.V4Encoder import encode_v4_board
+from santorini.V4Encoder import encode_v4_board, encode_v4_boards
 from santorini.pytorch.V4Prototype import (
     D4RegularNetwork,
     D4SymmetrizedReference,
@@ -62,6 +62,20 @@ class V4EncoderTests(unittest.TestCase):
                 for plane in original
             ])
             self.assertTrue(np.array_equal(transformed, expected))
+
+    def test_batch_encoder_exactly_matches_scalar_reference(self):
+        placement = np.zeros((2, 5, 5), dtype=np.int8)
+        placement[0, 1, 1] = 1
+        placement[0, 3, 3] = -1
+        boards = np.asarray([
+            self.board(),
+            np.rot90(self.board(), axes=(-2, -1)),
+            placement,
+            np.zeros((2, 5, 5), dtype=np.int8),
+        ])
+        expected = np.asarray([encode_v4_board(board) for board in boards])
+        actual = encode_v4_boards(boards)
+        self.assertTrue(np.array_equal(actual, expected))
 
 
 class V4PrototypeTests(unittest.TestCase):
