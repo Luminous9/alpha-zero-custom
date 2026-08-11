@@ -242,9 +242,12 @@ class V4BootstrapExample:
 
 
 class V4BootstrapDataset:
-    def __init__(self, engine_path, run13_path, plan_path):
+    def __init__(self, engine_path, run13_path, plan_path, placement_path=None):
         self.engine = self._load_arrays(engine_path)
         self.run13 = self._load_arrays(run13_path)
+        self.placement = (
+            self._load_arrays(placement_path) if placement_path is not None else None
+        )
         self.plan = self._load_arrays(plan_path)
         validate_no_cross_corpus_leakage(self.engine, self.run13)
         count = len(self.plan["position_indices"])
@@ -266,7 +269,16 @@ class V4BootstrapDataset:
         corpus_id = int(self.plan["corpus_ids"][item])
         source_id = int(self.plan["source_ids"][item])
         index = int(self.plan["position_indices"][item])
-        payload = self.engine if corpus_id == 0 else self.run13
+        if corpus_id == 0:
+            payload = self.engine
+        elif corpus_id == 1:
+            payload = self.run13
+        elif corpus_id == 2 and self.placement is not None:
+            payload = self.placement
+        else:
+            raise ValueError(
+                "Sampling plan references unavailable corpus ID {}.".format(corpus_id)
+            )
         return V4BootstrapExample(
             board=payload["boards"][index].astype(np.int8),
             policy=decode_sparse_policy(payload, index),
@@ -281,6 +293,8 @@ class V4BootstrapDataset:
     def close(self):
         self.engine.clear()
         self.run13.clear()
+        if self.placement is not None:
+            self.placement.clear()
         self.plan.clear()
 
     def __enter__(self):

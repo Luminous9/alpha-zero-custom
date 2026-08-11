@@ -1,4 +1,7 @@
-use std::io::{self, BufRead, Write};
+use std::{
+    collections::HashSet,
+    io::{self, BufRead, Write},
+};
 
 use santorini_core::{
     board::FullGameState,
@@ -111,7 +114,7 @@ fn legal_moves(request: &Request) -> Result<Value, String> {
     }))
 }
 
-fn analyze_root_moves(request: &Request, tt: &mut TranspositionTable) -> Result<Value, String> {
+fn analyze_root_moves(request: &Request, _tt: &mut TranspositionTable) -> Result<Value, String> {
     let state = parse_state(request)?;
     if state.board.get_winner().is_some() {
         return Err("cannot analyze a terminal position".to_owned());
@@ -127,6 +130,7 @@ fn analyze_root_moves(request: &Request, tt: &mut TranspositionTable) -> Result<
 
     let mut ranked = Vec::new();
     let mut total_nodes_visited = 0usize;
+    let mut seen_successors = HashSet::new();
     for next in state.get_next_states_interactive() {
         let no_moves = next
             .actions
@@ -135,13 +139,22 @@ fn analyze_root_moves(request: &Request, tt: &mut TranspositionTable) -> Result<
         if no_moves {
             continue;
         }
+        // Standard placement exposes both action orders for one unordered
+        // worker pair.  They reach the same state and must be one root move.
+        let next_fen = next.state.to_string();
+        if !seen_successors.insert(next_fen.clone()) {
+            continue;
+        }
 
         let (score, completed_depth, nodes_visited, child_best_score) =
             if next.state.board.get_winner().is_some() {
                 (santorini_core::search::WINNING_SCORE, 0usize, 0usize, None)
             } else {
+                // Per-move scores are selection labels, so no candidate may
+                // inherit another candidate's transposition-table history.
+                let mut move_tt = TranspositionTable::new();
                 let terminator = DynamicNodesVisitedSearchTerminator::new(nodes_per_move);
-                let mut context = SearchContext::new(tt, terminator);
+                let mut context = SearchContext::new(&mut move_tt, terminator);
                 let result = negamax_search(
                     &mut context,
                     next.state.clone(),
@@ -163,7 +176,7 @@ fn analyze_root_moves(request: &Request, tt: &mut TranspositionTable) -> Result<
 
         ranked.push((
             score,
-            next.state.to_string(),
+            next_fen,
             json!({
                 "actions": next.actions,
                 "next_fen": next.state,
@@ -174,9 +187,7 @@ fn analyze_root_moves(request: &Request, tt: &mut TranspositionTable) -> Result<
             }),
         ));
     }
-    ranked.sort_by(|left, right| {
-        right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1))
-    });
+    ranked.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
     let legal_move_count = ranked.len();
     let moves: Vec<Value> = ranked
         .into_iter()
@@ -192,6 +203,7 @@ fn analyze_root_moves(request: &Request, tt: &mut TranspositionTable) -> Result<
         "legal_move_count": legal_move_count,
         "returned_move_count": moves.len(),
         "total_nodes_visited": total_nodes_visited,
+        "tt_policy": "reset_per_root_move",
         "moves": moves,
     }))
 }

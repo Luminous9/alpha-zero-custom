@@ -108,6 +108,21 @@ class FixedOpeningSampler:
 
 
 class TestSantoriniCoachExamples(unittest.TestCase):
+    def test_initial_episode_step_tracks_sampled_placement_depth(self):
+        game = SantoriniGame(5, sequential_placement=True)
+        coach = object.__new__(Coach)
+        coach.game = game
+        board = game.getInitBoard()
+        self.assertEqual(coach._initial_episode_step(board), 0)
+        player = 1
+        for expected_step, location in enumerate(
+            ((0, 0), (0, 1), (4, 4), (4, 3)), start=1
+        ):
+            board, player = game.getNextState(
+                board, player, game.getPlacementAction(location)
+            )
+            self.assertEqual(coach._initial_episode_step(board), expected_step)
+
     def test_wall_phase_timer_accumulates_repeated_segments(self):
         timings = {}
         with patch('Coach.time.perf_counter', side_effect=[1.0, 1.5, 2.0, 3.25]):

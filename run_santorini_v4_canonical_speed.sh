@@ -6,7 +6,7 @@ CHECKPOINT="temp/santorini_v4_screen_1m/ordinary_6x192_13_global_blend.pt"
 ENGINE_CORPUS="temp/santorini_v4_scaled/engine-corpus.npz"
 RUN13_COMPONENT="temp/santorini_v4_scaled/run13-component.npz"
 SELECTION_PLAN="temp/santorini_v4_scaled/selection-3k.npz"
-OUTPUT_DIR="temp/santorini_v4_canonical_speed"
+OUTPUT_DIR="temp/santorini_v4_canonical_speed_v2"
 
 mkdir -p "${OUTPUT_DIR}"
 

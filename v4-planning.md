@@ -30,14 +30,27 @@ retaining a small early-stage advantage. The predeclared seam audit, end-to-end
 P100 benchmark, and 240-game paired round robin are complete. The direct
 6x192-versus-10x128 arena remains inconclusive; the predeclared observed-batch
 end-to-end speed tie-break selects canonical ordinary 6x192. E's native wrapper
-is faster at batched inference, but it retains the supervised deficit and loses
-the round robin overall; no seam-specific supervised interaction was detected.
-P1b.2 now has a frozen 1M winner-only target ablation on 6x192 ready to run. Its
-common handoff objective uses a +0.01 paired-bootstrap noninferiority margin,
-followed by fixed 40-game standard and full selection arenas with no optional
-stopping. P1c remains gated on that result. Final test data and final arena seeds remain untouched. See
+was faster before canonical-path optimization, but it retains the supervised
+deficit and loses the round robin overall; no seam-specific supervised
+interaction was detected. Batched canonicalization plus on-device policy-frame
+restoration subsequently raises 6x192 batch-eight P100 FP32 throughput from
+1,388 to 3,285 examples/s. Against the identical uncanonicalized wrapper, the
+remaining exact-D4 cost is 24% latency rather than the original dominant
+overhead, so this implementation blocker is closed.
+The frozen 1M winner-only ablation is also complete. Winner-only trails global
+blend by +0.01031 on the common handoff objective, with a paired 95% interval of
++0.00169 to +0.01868, and therefore misses the +0.01 noninferiority margin. The
+fixed arenas split 24-16 for global blend in standard play and 16-24 in full
+games, producing an exact 40-40 combined score (95% 42.5-57.5%). Retain global
+blend with `alpha_boot=0.5` and `T=261.8`; the main head switches explicitly to
+pure self-play `z` at handoff. P1b.2 is complete and P1c is in progress with the
+full-corpus contract frozen. Placement now uses santorini-ai's joint search for
+policy, factored exactly into sequential decisions, with Run13 continuations
+supplying completed outcomes and the comparison policy. Final test data and
+final arena seeds remain untouched. See
 `experiments/santorini_v4/P1B_SUPERVISED_SCREEN.md` and
-`experiments/santorini_v4/P1B_SCALED_SCREEN.md`.
+`experiments/santorini_v4/P1B_SCALED_SCREEN.md`, followed by
+`experiments/santorini_v4/P1C_FULL_PRETRAIN.md`.
 Prereq reading: `santorini/santorini_ai_architecture_v3.md` (V3 spec),
 `santorini/SANTORINI_ORACLE.md` (oracle bridge), and
 `experiments/santorini_oracle/RESULTS.md` (Run13 distillation outcomes).
@@ -48,8 +61,9 @@ trained with the AlphaZero loop using the oracle as a value labeler and
 distribution shaper from iteration 1. Exact search-facing D4 behavior is
 required. It may be supplied by the equivariant architecture or by
 stabilizer-safe canonical inference around an ordinary winner; augmentation or
-sampled root averaging alone is insufficient. Run13 is retired to
-benchmark anchor and placement teacher; it is not the starting checkpoint.
+sampled root averaging alone is insufficient. Run13 is retired to benchmark
+anchor, placement outcome teacher, and placement-policy control; it is not the
+starting checkpoint.
 
 ## 1. Why a fresh network instead of continuing Run 13
 
@@ -63,7 +77,9 @@ A corrected Run13 continuation plan exists (distribution shaping via sparring an
 
 Condition retained from that analysis: a fresh start is only justified _because_ it is paired with the architecture upgrade. Restarting the same network would re-buy Run13 at full price.
 
-What Run13 remains for: benchmark/anchor opponent, placement-policy teacher (§5.3), and the source of the position distribution used in calibration (§4.2).
+What Run13 remains for: benchmark/anchor opponent, placement continuation
+outcomes and policy control (§5.3), and the source of the position distribution
+used in calibration (§4.2).
 
 ## 2. Goals and non-goals
 
@@ -76,8 +92,9 @@ Goals:
 
 Non-goals:
 
-- God powers (mortal-vs-mortal only, matching the oracle bridge).
-- Placement supervision from the oracle - unsupported joint-vs-sequential placement boundary (`SANTORINI_ORACLE.md`, "Known boundary").
+- God powers, including placement (mortal-vs-mortal only, matching the oracle
+  bridge). Mortal placement is supported by the explicit joint-to-sequential
+  factorization in §5.3.
 - Replicating NNUE input feature crosses. Those exist because NNUE has one hidden layer and cannot compose conjunctions; a deep conv tower can.
 
 ## 3. Network architecture candidates
@@ -263,11 +280,39 @@ Conversion uses `SantoriniOracle.py` FEN mapping and stores one D4-canonical ori
 - **Policy:** the recorded engine best move is a legally smoothed hard target, weighted below the value loss. Put `1-epsilon` on the best V4-equivalent action set and distribute `epsilon` only over other legal actions; never smooth over all 1,625 logits. A winning no-build move divides best-move mass over its equivalent V4 aliases. Hard policy imitation is acceptable as an initialization with coherent teacher value/outcome supervision; this does not contradict rejecting post-hoc surgery on Run13.
 - **Small pilot ablations:** on the pilot corpus, compare 6 versus 13 input planes, ordinary versus equivariant candidate A, and winner-only versus score+winner. These are screening experiments, not claims of final strength. The first P1b run confirmed that this limitation is substantive; architecture and target choices remain provisional until the scaled curves.
 
-### 5.3 Placement (the oracle cannot teach it)
+### 5.3 Placement (joint oracle, sequential network)
 
-Distill placement from Run13: run the Run13 net with full evaluation-strength search over placement-phase states sampled from its replay and fresh self-play openings. Use its native policy/visit distribution as the policy target and completed-game outcome as the preferred main-value target; keep the Run13 search value only as optional auxiliary telemetry. Same-player sequential placement transitions retain the existing turn-aware value semantics.
+Santorini-ai searches a complete unordered worker pair at each placement turn,
+whereas V4 emits two same-player placement actions. This is representational,
+not a loss of information. Query all 300 unordered pairs from the empty board
+and all 253 pairs from each of the 49 D4-unique post-P1-pair boundaries. Convert
+the joint distribution `q({a,b})` exactly into
+`P(first=a)=0.5*sum_b q({a,b})` and
+`P(second=b|first=a)=q({a,b})/sum_c q({a,c})`. The factorization makes the
+arbitrary order unobservable while producing targets for all 1/6/49/904
+sequential prefix orbits.
 
-Placement examples use a phase-balanced sampler/loss bucket so millions of standard-play records cannot swamp the four placement decisions. The target fraction is declared from the expected V4 self-play phase mix and reported for every pretraining epoch.
+Each root pair is searched independently with a reset TT. Duplicate action
+orders are collapsed by resulting FEN. Because finite search produced different
+scores for D4-equivalent pairs, raw scores are projected by averaging over the
+parent position's D4 stabilizer before softmax. The frozen one-time teacher uses
+50,000 nodes per root pair and policy temperature 300; the latter retains more
+signal than temperature 400 while reducing budget-instability in the sharp
+ranking. Oracle placement values are telemetry only.
+
+Run13 supplies the main placement value target: start continuations from all
+960 prefix orbits, use its native search policy, and record the completed-game
+outcome. Build three otherwise identical components for the placement bake-off:
+Run13 policy, santorini-ai policy, and a declared 50/50 policy mix. All three use
+the same Run13 completed outcomes, position sampling weights, and training plan,
+so the policy teacher is the only intervention. Prefer the pure oracle policy if
+it matches the mixed arm; retain the Run13 arm as the control. Same-player
+sequential transitions keep the existing turn-aware value semantics.
+
+Placement examples use a phase-balanced sampler/loss bucket so millions of
+standard-play records cannot swamp the four placement decisions. The target
+fraction is declared from the expected V4 self-play phase mix and reported for
+every pretraining epoch.
 
 ### 5.4 Gate G1 - bootstrap arena
 
@@ -295,7 +340,13 @@ Base config inherits Run13 (latest mode, Gumbel search, playout-cap randomizatio
 
 ### 6.2 Distribution shaping
 
-- **Sparring (~10% of games):** start from completed placements because the oracle cannot participate in V4's sequential placement phase. Play `SantoriniOraclePlayer` at a node budget laddered to keep the net's win rate ~35-50%, with paired seats/openings. Store only the net's own decisions: native MCTS policy + real game outcome. Raise the ladder when the net clears the current rung. Never spar at a budget that produces ~90% losses, where value labels collapse toward -1.
+- **Sparring (~10% of games):** initially start from completed placements; the
+  pretraining joint-to-sequential adapter is validated separately before it is
+  allowed into live mixed-engine games. Play `SantoriniOraclePlayer` at a node
+  budget laddered to keep the net's win rate ~35-50%, with paired seats/openings.
+  Store only the net's own decisions: native MCTS policy + real game outcome.
+  Raise the ladder when the net clears the current rung. Never spar at a budget
+  that produces ~90% losses, where value labels collapse toward -1.
 - **Disagreement-seeded starts (~10% of games):** mine high-margin, score-stable disagreements with the existing adversarial tooling and use them as starting positions only (no teacher labels). Seed pools are stage/value stratified, D4-deduplicated, versioned by source checkpoint, and replay-capped. Run13 disagreements may initialize the pool, but refresh it periodically from the current V4 checkpoint so training follows V4's blind spots rather than Run13's stale ones.
 - Both components have independent configuration switches and telemetry. Run preplanned short matched branches with and without distribution shaping at an early checkpoint, rather than waiting for an ambiguous main-run trajectory to make the control decision.
 
@@ -350,8 +401,8 @@ Working expectation to be replaced by measurement: candidate B is ~2.2x V3 dense
 2. **P0b - measurement:** deeper-adjudicator calibration study; score-stability-by-phase report; rules cross-validation; instrumented Run13 wall-clock split.
 3. **P1a - pilot and architecture feasibility:** 100k-500k corpus pilot + conversion pipeline; V4 encoder rule/covariance tests; pinned-escnn and hand-rolled feasibility spike; exported-model equivariance/checkpoint tests.
 4. **P1b.1 - small screening ablations (complete, conclusion corrected):** the source-aware trainer, ordinary 6/13-plane baseline, per-epoch selection, Candidate A-D sizing, matched stage/global/winner targets, and paired standard/full selection arenas are complete. Global blend is provisional and winner-only fails at this scale. Candidate C loses the matched full-game pilot arena 10-30 to ordinary 8x96. This rejects the tested candidate at this scale, not V4.
-5. **P1b.2 - scaled architecture screen (active; architecture selected, target ablation pending):** generate stage/source-correct supply; record stratum coverage and repetition; run matched 100k/300k/1M learning curves. At 1M, ordinary 6x192 and 10x128 score 0.8115 and 0.8138; their paired difference interval crosses zero. Equivariant E scores 0.8436, with an E-minus-6x192 paired interval of 0.0201-0.0439, and trains 28.7% slower. E retains slightly better early policy CE and winner MSE. Ordinary survivors use exact D4 canonical inference, which matches the frozen canonical holdout predictions and passes all eight transformed-position checks exactly on the audited checkpoint. A pre-arena seam audit finds no detectable high-versus-low frame-switch exposure interaction: E-minus-6x192 is +0.03257 in the lowest quartile and +0.03256 in the highest, with a high-minus-low interval of -0.03424 to +0.03448. The matched P100 wrapper benchmark shows that canonical preprocessing dominates raw network cost; at batch eight FP16, E/O6/O10 achieve 1,369/1,294/1,207 examples/s. The arenas execute mean batches around 6-10. In the combined standard/full seed-cluster bootstrap, O6 scores 45.0% against O10 (95% 35.0-53.75%), O6 scores 53.75% against E (45.0-63.75%), and O10 scores 67.5% against E (60.0-73.75%). The direct ordinary matchup is inconclusive, so the frozen end-to-end speed tie-break selects ordinary 6x192. The 1M plan contains exactly 1,000,000 distinct corpus positions with zero Run13 overlap. Run the required winner-only versus global-blend ablation on 6x192 next. Final test data and final arena seeds remain untouched.
-6. **P1c - full corpus and pretraining (gated):** after P1b.2 selects an architecture, generate 5M valid records, expanding only if the learning curve justifies it; full pretraining includes phase-balanced Run13 placement distillation.
+5. **P1b.2 - scaled architecture and target selection (complete):** the matched 100k/300k/1M curves select canonical ordinary 6x192 by supervised fit plus the frozen ordinary-family speed tie-break. Exact batched D4 inference reaches 3,285 examples/s at arena-relevant batch eight on P100, with a 24% latency premium over the identical uncanonicalized wrapper. Equivariant E retains a small early-stage advantage but loses the supervised/arena selection overall. The required 1M target ablation rejects winner-only noninferiority: its common handoff objective is +0.01031 worse, with a paired interval of +0.00169 to +0.01868, while the standard/full arenas cancel 40-40. Retain global blend (`alpha_boot=0.5`, `T=261.8`) and explicitly switch the main target to pure self-play `z` at handoff. Final data and arena seeds remain untouched.
+6. **P1c - full corpus and pretraining (in progress):** use the selected canonical ordinary 6x192 architecture and global-blend bootstrap contract. The completed 5.05M raw generation already yields 4,166,074 D4-unique train positions, so it is the first full corpus; expand toward 20M only if its four-epoch curve is still materially improving. The frozen coverage-balanced epoch has 7,112,692 standard draws and 3,527,957 placement draws (33.1555%, matching the Run13 replay phase mix). Placement is balanced over the four sequential decisions. Santorini-ai labels all 50 joint boundaries and is factored into all 960 sequential prefix orbits; four fresh Run13 continuations from each prefix supply completed-game `z` and the comparison policy. Run13-only, oracle-only, and 50/50-policy components share outcomes and sampling, while standard play retains the selected global blend. Checkpoint selection remains on the frozen standard holdout because common placement roots make an exact-position plus game-isolated placement holdout impossible; full-game G1 selects the placement teacher.
 7. **Gate G1:** separate standard-play and full-game arenas versus Run13 at 96/128 simulations, plus equal-cost reporting. Stop/debug thresholds use paired-block uncertainty.
 8. **P2 - self-play:** sparring + refreshed seeded starts + low-weight auxiliary head, each independently switchable; replay/telemetry schema extended.
 9. **Review:** after ~20-30 iterations, run the 96/128/1024 battery and component ablations; decide whether to study a nonzero search-facing `lambda` in a following run.

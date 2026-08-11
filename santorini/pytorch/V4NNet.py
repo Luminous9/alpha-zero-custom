@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from santorini.D4Canonical import canonicalize_boards, restore_canonical_policies
+from santorini.D4Canonical import canonicalize_boards
 from santorini.V4Encoder import encode_v4_boards
 from .SantoriniNNet import SantoriniNNet
 from .V4Prototype import D4RegularNetwork
@@ -88,6 +88,16 @@ class V4InferenceWrapper:
             raise ValueError(
                 "D4 canonicalization is only needed for ordinary V4 checkpoints."
             )
+        self._canonical_policy_permutations = None
+        if self.canonicalize_d4:
+            permutations = np.stack([
+                game.getPolicySymmetryPermutation(rotations, flip)[1]
+                for rotations in range(4)
+                for flip in (False, True)
+            ])
+            self._canonical_policy_permutations = torch.as_tensor(
+                permutations, dtype=torch.long, device=self.device
+            )
         self.input_channels = int(self.config["planes"])
         model = export_v4_model(model, self.config).to(self.device).eval()
         if freeze_torchscript:
@@ -115,7 +125,9 @@ class V4InferenceWrapper:
 
     def _canonicalize_batch(self, boards):
         if not self.canonical_cache_size:
-            canonical, matching_masks, _ = canonicalize_boards(boards)
+            canonical, matching_masks, _ = canonicalize_boards(
+                boards, return_keys=False
+            )
             return canonical, matching_masks
 
         canonical = np.empty((len(boards), 2, 5, 5), dtype=np.int8)
@@ -138,7 +150,7 @@ class V4InferenceWrapper:
 
         if missing_rows:
             missing_canonical, missing_masks, _ = canonicalize_boards(
-                missing_boards
+                missing_boards, return_keys=False
             )
             for row, key, board, mask in zip(
                 missing_rows, missing_keys, missing_canonical, missing_masks
@@ -150,6 +162,75 @@ class V4InferenceWrapper:
                 while len(self._canonical_cache) > self.canonical_cache_size:
                     self._canonical_cache.popitem(last=False)
         return canonical, matching_masks
+
+    def _restore_canonical_policies(self, canonical_policies, matching_masks):
+        """Restore policy frames on-device before the unavoidable CPU copy."""
+        matching_masks = np.asarray(matching_masks, dtype=bool)
+        counts = matching_masks.sum(axis=1)
+        if np.any(counts == 0):
+            raise ValueError("Every canonical policy requires a matching transform.")
+        restored = torch.empty_like(canonical_policies)
+        single_rows = np.flatnonzero(counts == 1)
+        if len(single_rows):
+            row_indices = torch.as_tensor(
+                single_rows, dtype=torch.long, device=self.device
+            )
+            transform_indices = torch.as_tensor(
+                np.argmax(matching_masks[single_rows], axis=1),
+                dtype=torch.long,
+                device=self.device,
+            )
+            permutations = self._canonical_policy_permutations.index_select(
+                0, transform_indices
+            )
+            restored.index_copy_(
+                0,
+                row_indices,
+                torch.gather(
+                    canonical_policies.index_select(0, row_indices),
+                    1,
+                    permutations,
+                ),
+            )
+
+        symmetric_rows = np.flatnonzero(counts > 1)
+        if len(symmetric_rows):
+            symmetric_indices = torch.as_tensor(
+                symmetric_rows, dtype=torch.long, device=self.device
+            )
+            restored.index_fill_(0, symmetric_indices, 0.0)
+            for transform_index in range(8):
+                rows = symmetric_rows[
+                    matching_masks[symmetric_rows, transform_index]
+                ]
+                if not len(rows):
+                    continue
+                row_indices = torch.as_tensor(
+                    rows, dtype=torch.long, device=self.device
+                )
+                permutation = self._canonical_policy_permutations[
+                    transform_index
+                ].expand(len(rows), -1)
+                restored.index_add_(
+                    0,
+                    row_indices,
+                    torch.gather(
+                        canonical_policies.index_select(0, row_indices),
+                        1,
+                        permutation,
+                    ),
+                )
+            restored.index_copy_(
+                0,
+                symmetric_indices,
+                restored.index_select(0, symmetric_indices)
+                / torch.as_tensor(
+                    counts[symmetric_rows, None],
+                    dtype=restored.dtype,
+                    device=self.device,
+                ),
+            )
+        return restored
 
     @staticmethod
     def _resolve_device(name):
@@ -183,12 +264,13 @@ class V4InferenceWrapper:
             enabled=self.autocast_fp16,
         ):
             log_policy, value = self.nnet(inputs)
-        policies = torch.exp(log_policy).float().cpu().numpy()
+        policies = torch.exp(log_policy).float()
+        if matching_masks is not None:
+            policies = self._restore_canonical_policies(
+                policies, matching_masks
+            )
+        policies = policies.cpu().numpy()
         values = value[:, 0].float().cpu().numpy()
         if policies.shape != (len(boards), self.action_size):
             raise ValueError("V4 checkpoint returned the wrong policy shape.")
-        if matching_masks is not None:
-            policies = restore_canonical_policies(
-                self.game, policies, matching_masks
-            )
         return policies, values

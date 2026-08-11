@@ -4,6 +4,7 @@ import numpy as np
 
 from santorini.SantoriniGame import SantoriniGame
 from santorini.V4Supervised import (
+    _value_arrays,
     apply_d4_augmentation,
     blended_value_target,
     score_to_value,
@@ -41,6 +42,18 @@ class V4SupervisedTests(unittest.TestCase):
             blended_value_target(1.0, 10, 3)
         with self.assertRaises(ValueError):
             blended_value_target(1.0, 10, 0, stage_reliability=(1.0, 1.0))
+
+    def test_placement_uses_completed_outcome_for_every_bootstrap_target(self):
+        targets = _value_arrays(
+            np.asarray([-0.25], dtype=np.float32),
+            np.asarray([9_000], dtype=np.float32),
+            np.asarray([-1], dtype=np.int8),
+            0.5,
+            (0.25, 0.75, 1.0),
+            261.8,
+        )
+        for target in targets:
+            self.assertAlmostEqual(float(target[0]), -0.25)
 
     def test_policy_smoothing_uses_only_legal_alternatives(self):
         board = self.standard_board()

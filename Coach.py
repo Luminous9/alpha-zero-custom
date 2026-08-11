@@ -216,6 +216,12 @@ class Coach():
             return self.opening_sampler.sample_self_play_board()
         return self.game.getInitBoard()
 
+    def _initial_episode_step(self, board):
+        """Account for setup plies already present in a sampled starting board."""
+        if getattr(self.game, 'sequential_placement', False):
+            return min(4, int(np.count_nonzero(np.asarray(board)[0])))
+        return 0
+
     def _arena_opening_suite(self):
         if self.opening_sampler is None:
             return None
@@ -447,7 +453,7 @@ class Coach():
         placementActions = []
         board = self._initial_board()
         self.curPlayer = 1
-        episodeStep = 0
+        episodeStep = self._initial_episode_step(board)
 
         while True:
             episodeStep += 1
@@ -541,10 +547,11 @@ class Coach():
         try:
             while completed < numEpisodes:
                 while launched < numEpisodes and len(activeEpisodes) < batch_size:
+                    initial_board = self._initial_board()
                     activeEpisodes.append({
-                        'board': self._initial_board(),
+                        'board': initial_board,
                         'curPlayer': 1,
-                        'episodeStep': 0,
+                        'episodeStep': self._initial_episode_step(initial_board),
                         'trainExamples': [],
                         'placementActions': [],
                         'mcts': self._newSelfPlayMCTS(),

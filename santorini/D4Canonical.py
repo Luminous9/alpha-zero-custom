@@ -42,7 +42,7 @@ def _normalize_worker_labels_batch(boards):
     return boards
 
 
-def canonicalize_boards(boards):
+def canonicalize_boards(boards, return_keys=True):
     """Canonicalize a batch and return representative masks and anonymous keys.
 
     ``matching_masks[i, j]`` is true when transform ``j`` maps input ``i`` to
@@ -56,7 +56,7 @@ def canonicalize_boards(boards):
         return (
             np.empty((0, 2, 5, 5), dtype=boards.dtype),
             np.empty((0, len(D4_TRANSFORMS)), dtype=bool),
-            [],
+            [] if return_keys else None,
         )
     # At one or two positions, setting up the vectorized eight-transform tensor
     # costs more than the scalar path. MCTS commonly emits a few such tail
@@ -70,7 +70,7 @@ def canonicalize_boards(boards):
         return (
             np.asarray([item[0] for item in items]),
             matching_masks,
-            [item[2] for item in items],
+            [item[2] for item in items] if return_keys else None,
         )
 
     transformed = np.stack([
@@ -84,26 +84,36 @@ def canonicalize_boards(boards):
         len(boards), len(D4_TRANSFORMS), -1
     ).view(np.uint8)
 
-    # Python bytes compare lexicographically as unsigned octets. Iteratively
-    # retain transforms matching the smallest byte at each offset to reproduce
-    # ``min(anonymous_board_key(...))`` exactly without Python byte objects.
+    # Python bytes compare lexicographically as unsigned octets. Big-endian
+    # uint64 words preserve that order, reducing the representative search from
+    # 50 small NumPy reduction passes to seven. Zero padding is consulted only
+    # after all 50 meaningful bytes match, so it cannot change the result.
+    padded_keys = np.zeros(
+        (len(boards), len(D4_TRANSFORMS), 56), dtype=np.uint8
+    )
+    padded_keys[:, :, :flat_keys.shape[2]] = flat_keys
+    key_words = padded_keys.view(">u8").reshape(
+        len(boards), len(D4_TRANSFORMS), -1
+    )
     matching_masks = np.ones(
         (len(boards), len(D4_TRANSFORMS)), dtype=bool
     )
-    for offset in range(flat_keys.shape[2]):
-        values = flat_keys[:, :, offset].astype(np.int16)
-        minimum = np.min(
-            np.where(matching_masks, values, 256), axis=1
-        )
+    for offset in range(key_words.shape[2]):
+        values = key_words[:, :, offset]
+        eligible = values.copy()
+        eligible[~matching_masks] = np.iinfo(np.uint64).max
+        minimum = np.min(eligible, axis=1)
         matching_masks &= values == minimum[:, None]
 
     first_indices = np.argmax(matching_masks, axis=1)
     canonical = transformed[np.arange(len(boards)), first_indices]
     canonical = _normalize_worker_labels_batch(canonical)
-    canonical_keys = [
-        anonymous[index, transform].tobytes()
-        for index, transform in enumerate(first_indices)
-    ]
+    canonical_keys = None
+    if return_keys:
+        canonical_keys = [
+            anonymous[index, transform].tobytes()
+            for index, transform in enumerate(first_indices)
+        ]
     return canonical, matching_masks, canonical_keys
 
 

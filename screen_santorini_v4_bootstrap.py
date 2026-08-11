@@ -62,6 +62,10 @@ def parse_args():
     parser.add_argument("--engine-corpus", default="temp/santorini_v4_pilot_branch_010/corpus.npz")
     parser.add_argument("--run13-component", default="temp/santorini_v4_mixed_pilot/run13-component.npz")
     parser.add_argument(
+        "--placement-component",
+        help="Optional P1c Run13 placement component referenced by --train-plan.",
+    )
+    parser.add_argument(
         "--selection-engine-corpus",
         help=(
             "Optional frozen engine corpus referenced by --selection-plan. "
@@ -234,6 +238,19 @@ def _train_one(config, train, selection, args, device, game):
     best_epoch = None
     best_state = None
     optimization_seconds = 0.0
+    training_phase_mix = {
+        "placement_examples": int(np.sum(train.stage_ids == -1)),
+        "standard_examples": int(np.sum(train.stage_ids >= 0)),
+        "placement_fraction": float(np.mean(train.stage_ids == -1)),
+        "standard_by_stage": {
+            name: int(np.sum(train.stage_ids == stage_id))
+            for stage_id, name in enumerate(STAGE_NAMES)
+        },
+        "all_examples_by_source": {
+            name: int(np.sum(train.source_ids == source_id))
+            for source_id, name in enumerate(SOURCE_NAMES)
+        },
+    }
     train_started = time.perf_counter()
     for epoch in range(args.epochs):
         model.train()
@@ -276,6 +293,7 @@ def _train_one(config, train, selection, args, device, game):
             "policy_loss": sums["policy"] / sums["examples"],
             "value_loss": sums["value"] / sums["examples"],
             "total_loss": sums["total"] / sums["examples"],
+            "phase_mix": training_phase_mix,
         })
         selection_metrics = _evaluate(
             model, selection, config["planes"], config["target"],
@@ -326,6 +344,8 @@ def _train_one(config, train, selection, args, device, game):
         "total_train_and_selection_seconds": total_seconds,
         "train_examples_per_second": args.epochs * len(train) / optimization_seconds,
         "learned_parameters": sum(parameter.numel() for parameter in model.parameters()),
+        "training_phase_mix_per_epoch": training_phase_mix,
+        "checkpoint_selection_phase": "standard_only",
         "selection": selection_history[best_epoch - 1]["metrics"],
         "final_selection": selection_history[-1]["metrics"],
     }
@@ -363,6 +383,7 @@ def main():
         run13_path=args.run13_component,
         plan_path=args.train_plan,
         expected_split=0,
+        placement_path=args.placement_component,
         **prepare_kwargs
     )
     selection_engine_corpus = args.selection_engine_corpus or args.engine_corpus
@@ -409,6 +430,10 @@ def main():
                 "stage_reliability": list(args.stage_reliability),
                 "engine_corpus": os.path.abspath(args.engine_corpus),
                 "run13_component": os.path.abspath(args.run13_component),
+                "placement_component": (
+                    os.path.abspath(args.placement_component)
+                    if args.placement_component else None
+                ),
                 "selection_engine_corpus": os.path.abspath(
                     selection_engine_corpus
                 ),
@@ -436,7 +461,11 @@ def main():
         print(json.dumps(result["selection"], indent=2, sort_keys=True), flush=True)
     output = {
         "schema_version": 1,
-        "type": "santorini_v4_p1b_supervised_screen",
+        "type": (
+            "santorini_v4_p1c_full_pretraining"
+            if args.placement_component
+            else "santorini_v4_p1b_supervised_screen"
+        ),
         "device": str(device),
         "torch_version": torch.__version__,
         "seed": args.seed,

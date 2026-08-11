@@ -32,27 +32,55 @@ def _worker_coordinates(pieces, sign):
 
 
 def canonical_board_to_fen(board):
-    """Encode a standard-play canonical board (side to move is positive) as Mortal FEN."""
+    """Encode a canonical Mortal board at a legal joint-action boundary.
+
+    santorini-ai treats each player's two worker placements as one move.  It can
+    therefore search the empty board and the state after player one's complete
+    pair, but not V4's one- or three-worker intermediate states.
+    """
     board = _validate_board(board)
     pieces, heights = board
     positive = _worker_coordinates(pieces, 1)
     negative = _worker_coordinates(pieces, -1)
-    if len(positive) != 2 or len(negative) != 2:
-        raise ValueError(
-            "The first oracle bridge supports completed placements with two workers per side."
-        )
-
     # The Rust engine serializes A5..E5 first; this project stores A1..E1 in row zero.
     height_text = "".join(
         str(int(heights[row, col]))
         for row in range(4, -1, -1)
         for col in range(5)
     )
-    return "{}/1/mortal:{}/mortal:{}".format(
-        height_text,
-        ",".join(positive),
-        ",".join(negative),
+    if len(positive) == 2 and len(negative) == 2:
+        return "{}/1/mortal:{}/mortal:{}".format(
+            height_text, ",".join(positive), ",".join(negative)
+        )
+    if np.any(heights):
+        raise ValueError("Oracle placement boundaries cannot contain buildings.")
+    if not positive and not negative:
+        return "{}/1/mortal:/mortal:".format(height_text)
+    if not positive and len(negative) == 2:
+        # V4 has already canonicalized to player two, so player one's placed
+        # pair is negative in the network-visible board.
+        return "{}/2/mortal:{}/mortal:".format(
+            height_text, ",".join(negative)
+        )
+    raise ValueError(
+        "santorini-ai supports only empty, two-worker joint-boundary, or "
+        "completed-placement boards; one/three-worker states are factored locally."
     )
+
+
+def external_joint_placement_locations(actions, board_size=5):
+    """Decode an unordered standard Mortal worker pair from an action path."""
+    coordinates = [
+        action.get("value")
+        for action in actions
+        if action.get("type") == "place_worker"
+    ]
+    if len(coordinates) != 2 or any(not isinstance(value, str) for value in coordinates):
+        raise ValueError("Oracle placement action must contain exactly two worker squares.")
+    locations = tuple(sorted(parse_coordinate(value, board_size) for value in coordinates))
+    if locations[0] == locations[1]:
+        raise ValueError("Oracle placement pair cannot reuse one square.")
+    return locations
 
 
 def _parse_worker_section(section):

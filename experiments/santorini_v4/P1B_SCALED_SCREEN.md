@@ -629,6 +629,29 @@ overhead and is 29% faster than 6x192 at batch-eight FP32; under the FP16 arena
 setting the advantage is only 5.8%. This implementation cost remains an
 optimization target even though it does not decide the architecture alone.
 
+The first wrapper-optimization pass batches the eight D4 transforms, vectorizes
+the 13-plane encoder and policy restoration, retains the scalar path for
+one/two-position tail batches, and provides an opt-in bounded exact-frame cache.
+On the same P100 and 6x192 checkpoint, batch-eight FP32 canonical throughput rose
+from 1,388 to 2,636 examples/s (1.90x). The matched uncanonicalized wrapper
+reached 3,938 examples/s, so the fair residual cost was 3.04 versus 2.03 ms per
+batch: +49% latency, rather than the original raw-network-relative ~85%
+overhead. Batch-32 and batch-64 canonical throughput reached 7,150 and 9,763
+examples/s. A second exact pass packs the 50-byte lexicographic key into seven
+big-endian words, omits unused key objects during inference, and restores policy
+frames on-device before the required CPU copy. It passes mixed-frame and
+stabilizer tests and lowers local batch-eight preprocessing from 0.61 to 0.45
+ms. The follow-up P100 result reaches 3,285 examples/s at batch-eight FP32,
+another 24.6% over the first pass and 2.37x the original canonical wrapper. The
+matched uncanonicalized wrapper reaches 4,082 examples/s: canonicalization now
+adds 0.48 ms (2.44 versus 1.96 ms), a 24.3% latency premium and 19.5% throughput
+loss. At batches 32 and 64 the latency premium falls to 17.5% and 17.0%.
+Batch-eight FP32 is 21% faster than autocast FP16. The remaining raw-model versus
+wrapper gap is mostly common synchronous inference cost--encoding, allocation,
+GPU synchronization, and returning all 1,625 action probabilities to CPU--not
+the exact canonical map. Production small-batch inference therefore uses FP32,
+and the canonical-specific throughput blocker is closed.
+
 | Matchup (first candidate score) | Standard | Full | Combined seed-cluster score | Combined 95% interval |
 |---|---:|---:|---:|---:|
 | O6 vs O10 | 19-21 (47.5%) | 17-23 (42.5%) | 45.0% | 35.0-53.75% |
@@ -678,11 +701,48 @@ semantics; otherwise retain global blend and record the transition explicitly.
 
 The self-contained Kaggle archive is
 `temp/santorini_v4_value_ablation_1m_bundle.tar.gz` (about 280 MiB), SHA-256
-`97c33521fe5dd4e67a9e38fe7cbf7927be5f286e7212c507ecf5ab100b6696d0`.
+`44660c1faf76e0d9954beb12742627174d502050adf9b50cd1361dd961f74bd3`.
 Extract it at the repository root and run
 `run_santorini_v4_value_ablation_1m.sh`. The runner trains winner-only, performs
 the paired holdout comparison, runs both arenas, and writes the automatic frozen
 decision to `temp/santorini_v4_value_ablation_1m/decision.json`.
+
+### 1M value-target result
+
+The matched winner-only run completed all four epochs and selected epoch four,
+with 38.67% policy top-1 and 0.7201 winner MSE. The frozen global-blend control
+has 38.53% top-1 and 0.7134 winner MSE. On the common handoff objective,
+winner-only scores 1.25987 versus 1.24956 for global blend. The paired
+winner-minus-blend difference is +0.01031 with a 95% interval of +0.00169 to
++0.01868. Its upper endpoint exceeds the frozen +0.01 noninferiority margin, so
+winner-only fails the required supervised gate. It also trails on the teacher
+objective by +0.01176 (95% +0.00500 to +0.01856). The overall winner-MSE gap
+itself is +0.00666 with an interval crossing zero; the combined objective,
+rather than any one component alone, resolves the gate.
+
+The arena evidence cancels across phases. Global blend wins the standard gate
+24-16 (60%, paired-cluster interval 47.5-72.5%) and loses the full gate 16-24
+(40%, 27.5-52.5%). Across the same 20 four-game seed clusters the score is
+exactly 40-40, 50.0% with a 42.5-57.5% interval. Thus global blend does not earn
+the arena-veto condition, but the arena cannot rescue winner-only after its
+supervised noninferiority failure. No optional games are added.
+
+Retain the global score+winner bootstrap target for the selected canonical
+ordinary 6x192 architecture. The declared bootstrap semantics are
+`alpha_boot=0.5` and `T=261.8`: engine examples interpolate the side-to-move
+engine-continuation outcome and mapped engine evaluation. At the P1c self-play
+handoff, the search-facing main target changes directly to pure completed-game
+self-play outcome `z`; oracle values remain auxiliary/telemetry-only unless a
+later separately declared ablation authorizes otherwise. Monitor the first
+self-play iterations for value-loss or calibration discontinuity, but do not
+insert a post-hoc winner-only pretraining transition based on this completed
+selection result. The final test split and final arena seeds remain untouched.
+
+The winner checkpoint SHA-256 is
+`44548386f7f06bff4087a9ed86ee23450a273f438637c3d1da66d0f21e070d82`.
+Exploratory strata show winner-only improving the 300-position Run13-replay
+handoff objective by 0.0246 while trailing on engine main-line by 0.0151; these
+unadjusted subgroup observations do not override the frozen aggregate gate.
 
 ## Run13 preview and G1
 

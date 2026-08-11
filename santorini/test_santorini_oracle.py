@@ -11,6 +11,7 @@ from santorini.SantoriniOracle import (
     canonical_board_to_fen,
     compare_legal_successors,
     external_actions_to_v3_actions,
+    external_joint_placement_locations,
     fen_to_canonical_board,
 )
 
@@ -36,6 +37,41 @@ class TestSantoriniOracleAdapter(unittest.TestCase):
         self.assertTrue(fen.startswith("0002000000000000000001000/1/"))
         decoded = fen_to_canonical_board(fen)
         self.assertEqual(anonymous_board_key(decoded), anonymous_board_key(board))
+
+    def test_joint_placement_boundaries_round_trip(self):
+        empty = self.game.getInitBoard()
+        empty_fen = canonical_board_to_fen(empty)
+        self.assertEqual(empty_fen, "0" * 25 + "/1/mortal:/mortal:")
+        self.assertEqual(
+            anonymous_board_key(fen_to_canonical_board(empty_fen)),
+            anonymous_board_key(empty),
+        )
+
+        board, player = self.game.getNextState(
+            empty, 1, self.game.getPlacementAction((0, 0))
+        )
+        with self.assertRaises(ValueError):
+            canonical_board_to_fen(board)
+        board, player = self.game.getNextState(
+            board, player, self.game.getPlacementAction((1, 1))
+        )
+        boundary = self.game.getCanonicalForm(board, player)
+        fen = canonical_board_to_fen(boundary)
+        self.assertEqual(fen, "0" * 25 + "/2/mortal:A1,B2/mortal:")
+        self.assertEqual(
+            anonymous_board_key(fen_to_canonical_board(fen)),
+            anonymous_board_key(boundary),
+        )
+
+    def test_decodes_unordered_joint_placement(self):
+        actions = [
+            {"type": "place_worker", "value": "E5"},
+            {"type": "place_worker", "value": "A1"},
+        ]
+        self.assertEqual(
+            external_joint_placement_locations(actions),
+            ((0, 0), (4, 4)),
+        )
 
     def test_maps_standard_move_build_action(self):
         board = self.standard_board()
@@ -101,6 +137,18 @@ class TestSantoriniOracleIntegration(unittest.TestCase):
             self.assertTrue(actions)
             successors.add(move["next_fen"])
         self.assertEqual(len(successors), len(response["moves"]))
+
+    def test_empty_board_ranked_placement_has_300_unordered_pairs(self):
+        game = SantoriniGame(5, sequential_placement=True)
+        with SantoriniOracleProcess() as oracle:
+            response = oracle.analyze_root_moves(
+                game.getInitBoard(), nodes_per_move=2, top_k=4
+            )
+        self.assertEqual(response["legal_move_count"], 300)
+        self.assertEqual(response["tt_policy"], "reset_per_root_move")
+        self.assertEqual(len(response["moves"]), 4)
+        for move in response["moves"]:
+            self.assertEqual(len(external_joint_placement_locations(move["actions"])), 2)
 
     def test_legal_successors_match_on_reachable_positions(self):
         game = SantoriniGame(5, sequential_placement=True)

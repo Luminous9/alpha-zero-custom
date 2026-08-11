@@ -130,13 +130,16 @@ class StreamingPreparedV4Corpus:
         run13_path,
         plan_path,
         expected_split,
+        placement_path=None,
         policy_epsilon=0.05,
         alpha_boot=DEFAULT_ALPHA_BOOT,
         stage_reliability=DEFAULT_STAGE_RELIABILITY,
         temperature=GLOBAL_SCORE_TEMPERATURE,
     ):
         self.game = SantoriniGame(5, sequential_placement=True)
-        self.dataset = V4BootstrapDataset(engine_path, run13_path, plan_path)
+        self.dataset = V4BootstrapDataset(
+            engine_path, run13_path, plan_path, placement_path=placement_path
+        )
         self.policy_epsilon = float(policy_epsilon)
         self.alpha_boot = float(alpha_boot)
         self.stage_reliability = tuple(stage_reliability)
@@ -222,21 +225,26 @@ def _value_arrays(
     stage_reliability,
     temperature,
 ):
-    score_values = np.asarray([
-        score_to_value(score, temperature) for score in scores
-    ], dtype=np.float32)
-    stage_values = np.asarray([
-        blended_value_target(
+    score_values = np.empty(len(winner_values), dtype=np.float32)
+    stage_values = np.empty(len(winner_values), dtype=np.float32)
+    global_values = np.empty(len(winner_values), dtype=np.float32)
+    for index, (winner, score, stage) in enumerate(
+        zip(winner_values, scores, stages)
+    ):
+        # The engine has no placement phase.  Placement distillation therefore
+        # uses Run13's completed-game outcome for every named bootstrap target.
+        if int(stage) == -1:
+            score_values[index] = winner
+            stage_values[index] = winner
+            global_values[index] = winner
+            continue
+        score_values[index] = score_to_value(score, temperature)
+        stage_values[index] = blended_value_target(
             winner, score, stage, alpha_boot, stage_reliability, True, temperature
         )
-        for winner, score, stage in zip(winner_values, scores, stages)
-    ], dtype=np.float32)
-    global_values = np.asarray([
-        blended_value_target(
+        global_values[index] = blended_value_target(
             winner, score, stage, alpha_boot, stage_reliability, False, temperature
         )
-        for winner, score, stage in zip(winner_values, scores, stages)
-    ], dtype=np.float32)
     return score_values, stage_values, global_values
 
 
@@ -245,6 +253,7 @@ def prepare_corpus(
     run13_path,
     plan_path,
     expected_split,
+    placement_path=None,
     policy_epsilon=0.05,
     alpha_boot=DEFAULT_ALPHA_BOOT,
     stage_reliability=DEFAULT_STAGE_RELIABILITY,
@@ -260,35 +269,45 @@ def prepare_corpus(
     stage_ids = []
     source_ids = []
     split_ids = []
-    with V4BootstrapDataset(engine_path, run13_path, plan_path) as dataset:
+    with V4BootstrapDataset(
+        engine_path, run13_path, plan_path, placement_path=placement_path
+    ) as dataset:
         for index in range(len(dataset)):
             example = dataset[index]
             if int(example.split_id) != int(expected_split):
                 raise ValueError("Sampling plan contains an example from the wrong split.")
             policy = _normalized_policy(game, example, policy_epsilon)
-            score_value = score_to_value(example.score, temperature)
+            is_placement = int(example.stage_id) == -1
+            score_value = (
+                example.winner_value
+                if is_placement else score_to_value(example.score, temperature)
+            )
             boards.append(example.board)
             policies.append(policy)
             winner_values.append(example.winner_value)
             score_values.append(score_value)
-            stage_blended_values.append(blended_value_target(
-                example.winner_value,
-                example.score,
-                example.stage_id,
-                alpha_boot,
-                stage_reliability,
-                True,
-                temperature,
-            ))
-            global_blended_values.append(blended_value_target(
-                example.winner_value,
-                example.score,
-                example.stage_id,
-                alpha_boot,
-                stage_reliability,
-                False,
-                temperature,
-            ))
+            stage_blended_values.append(
+                example.winner_value if is_placement else blended_value_target(
+                    example.winner_value,
+                    example.score,
+                    example.stage_id,
+                    alpha_boot,
+                    stage_reliability,
+                    True,
+                    temperature,
+                )
+            )
+            global_blended_values.append(
+                example.winner_value if is_placement else blended_value_target(
+                    example.winner_value,
+                    example.score,
+                    example.stage_id,
+                    alpha_boot,
+                    stage_reliability,
+                    False,
+                    temperature,
+                )
+            )
             stage_ids.append(example.stage_id)
             source_ids.append(example.source_id)
             split_ids.append(example.split_id)

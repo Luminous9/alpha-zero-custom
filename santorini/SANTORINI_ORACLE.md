@@ -146,9 +146,17 @@ The tested adversarial fine-tunes were neutral at direct play at best and
 regressed with deeper MCTS. See
 `experiments/santorini_oracle/RESULTS.md` before starting another training run.
 
-## Known boundary
+## Placement boundary
 
-The adapter deliberately starts after all four workers have been placed. The
-external engine chooses both workers in one joint placement action, while V3
-learns four sequential placement actions. Standard-play agreement is therefore
-validated, but placement-policy distillation is not supported.
+The engine searches each player's two worker placements as one unordered joint
+action. V4 represents the same decision as two consecutive actions by the same
+player. The bridge supports the two legal joint boundaries: the empty board and
+the state after player one's complete pair. It deliberately does not send a
+one- or three-worker board to the engine.
+
+An engine distribution over unordered pairs is factored locally into an exact
+first-square marginal and a second-square conditional. Both pair orderings are
+represented with equal probability, avoiding an arbitrary coordinate-order
+convention. Ranked placement queries independently search each distinct pair
+with a fresh transposition table. Standard Mortal placement has 300 legal pairs
+on the empty board, rather than 600 ordered action paths.

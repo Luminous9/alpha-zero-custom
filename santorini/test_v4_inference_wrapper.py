@@ -245,6 +245,46 @@ class V4InferenceWrapperTests(unittest.TestCase):
             "misses": 2,
         })
 
+    def test_on_device_policy_restoration_matches_numpy_reference(self):
+        config = {
+            "name": "test_ordinary_device_restore",
+            "architecture": "ordinary",
+            "planes": 13,
+            "target": "global_blend",
+            "channels": 16,
+            "residual_blocks": 1,
+        }
+        model = build_v4_model(self.game, config)
+        empty = np.zeros((2, 5, 5), dtype=np.int8)
+        boards = np.asarray([
+            self.board(),
+            np.rot90(self.board(), axes=(-2, -1)),
+            np.flip(self.board(), axis=-1),
+            empty,
+        ])
+        _, matching_masks, _ = canonicalize_boards(boards)
+        rng = np.random.default_rng(31)
+        policies = rng.random(
+            (len(boards), self.game.getActionSize()), dtype=np.float32
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "ordinary.pth.tar")
+            torch.save({"config": config, "state_dict": model.state_dict()}, path)
+            wrapper = V4InferenceWrapper(
+                self.game,
+                path,
+                device="cpu",
+                freeze_torchscript=False,
+                canonicalize_d4=True,
+            )
+            actual = wrapper._restore_canonical_policies(
+                torch.from_numpy(policies), matching_masks
+            ).numpy()
+        expected = restore_canonical_policies(
+            self.game, policies, matching_masks
+        )
+        self.assertTrue(np.array_equal(actual, expected))
+
 
 if __name__ == "__main__":
     unittest.main()
