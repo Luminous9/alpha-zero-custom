@@ -1,8 +1,8 @@
 # P1c full corpus and pretraining
 
-Status: in progress. The placement-only tournament selected the pure
-santorini-ai T25 policy, and the frozen full-corpus plan is complete. One
-four-epoch P100 pretraining job is ready to run.
+Status: complete. The placement-only tournament selected the pure santorini-ai
+T25 policy and the four-epoch full-corpus P100 job completed successfully. The
+selected epoch-four checkpoint is ready for Gate G1.
 
 ## Full-corpus audit
 
@@ -227,3 +227,105 @@ final checkpoints, `results.json`, and `job-contract.json`.
 
 After it returns, inspect the four-epoch curves and execute the standard/full-
 game Gate G1 at 96/128 simulations.
+
+## P1c pretraining result
+
+The returned job completed the exact frozen contract in 12,141 seconds (3.37
+hours), including 12,120 seconds of optimization. All six input SHA-256 digests
+match the bundle manifest, the selected arm is `oracle_t25`, and neither the
+final test split nor final arena seeds were touched. Effective training
+throughput was 3,512 examples/s. Epoch four is both the selected and final
+checkpoint; their state dictionaries are byte-for-byte tensor-equivalent.
+
+| Epoch | Train total | Selection objective | Policy CE | Global value MSE | Policy top-1 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.67743 | 0.79004 | 2.07514 | 0.27126 | 40.77% |
+| 2 | 0.60618 | 0.75959 | 2.01163 | 0.25668 | 42.03% |
+| 3 | 0.58713 | 0.74482 | 1.98215 | 0.24928 | 42.27% |
+| 4 | 0.57603 | 0.73775 | 1.94496 | 0.25150 | 43.97% |
+
+The objective improved 6.62% from epoch one to four, but only 0.95% in the
+last epoch. The value term reached its minimum at epoch three and then regressed
+slightly; continued policy improvement still made epoch four the declared
+combined-objective winner. Relative to the selected 1M-screen checkpoint on the
+same 3,000-position holdout, the full run improves the objective by 9.09%,
+policy CE by 9.31%, global value MSE by 8.67%, and top-1 by 5.43 percentage
+points. The Run13-replay subgroup did not improve, so Gate G1 is necessary
+before interpreting the engine-corpus gains as transferred playing strength.
+
+The placement roots cannot form an independent holdout, but a weighted fit
+diagnostic confirms that training consumed the selected target correctly:
+99.9963% predicted legal mass, policy CE 1.68285 versus target entropy 1.67396
+(excess CE 0.00889), and 78.10% top-1 over the frozen epoch weights. These are
+fit/pipeline checks, not generalization evidence.
+
+The selected checkpoint SHA-256 is
+`374f0b72adbdf009d19abaed87addbdfe89364ecc1e6a7246b423233be51b42e`.
+The complete result JSON SHA-256 is
+`1dabe347a4992f6f290975d46cc0d938248391e9351ba28424f534815686844e`.
+
+Do not expand datagen toward 20M before Gate G1. The last-epoch improvement is
+small and comes entirely from policy while held-out value has flattened. A
+transfer or placement failure at G1 would be more actionable than another
+supervised corpus expansion; a green G1 can revisit expansion versus beginning
+P2 using actual playing-strength and iteration-cost evidence.
+
+## Gate G1 Kaggle job
+
+Gate G1 is frozen before seeing any game result. It uses selection-only seed
+`20260901`, FP32, exact canonical D4 inference with one root orientation for
+P1c, Run13's native evaluation-time eight standard/eight placement root
+orientations, Gumbel
+search, and 40 paired-seat games per gate. The four primary
+arenas are standard/full games at equal 96 and 128 simulations. Standard gates
+use 20 fixed completed selection openings. Full gates start from the empty
+board and sample placement visit policies at temperature 1.0 with reproducible
+per-pair RNG; this corrects the older selection runner's hardcoded greedy
+placement and actually exercises the distilled distribution.
+
+Before any game, the job times both frozen wrappers on the same 64 selection
+boards at batch eight for seven alternating rounds. Predicted per-move cost
+includes Run13's seven additional evaluations for its eight-frame root average.
+The cheaper player is anchored at 128 simulations and the other receives the
+nearest multiple of eight with equal predicted model-inference time, clamped to
+16-128. Separate
+standard/full arenas report this approximately equal-cost comparison. It is a
+supplementary diagnostic and cannot alter the primary equal-simulation
+thresholds.
+
+The automatic decision is:
+
+- `green_light` when both standard gates score at least 35% and each paired
+  bootstrap lower bound exceeds the 20% stop region, with no material phase gap;
+- `stop_and_debug` if any primary standard/full score is below 20%, or if an
+  absolute standard/full score gap of at least 15 percentage points has a paired
+  bootstrap interval excluding zero;
+- `inconclusive` otherwise.
+
+Build the upload with:
+
+```bash
+.venv/bin/python prepare_santorini_v4_g1_bundle.py
+```
+
+Upload `temp/santorini_v4_g1_bundle.zip` as a Kaggle dataset and attach it to a
+GPU notebook. The archive is about 39 MiB and has SHA-256
+`388b7c5f597a91c9e5879f86ba2c98789d2ea7316af7cdfe86e58e9135ad97c8`.
+Kaggle exposes its contents already extracted, so run this cell without opening
+the zip:
+
+```python
+import subprocess
+import sys
+from pathlib import Path
+
+entries = list(Path("/kaggle/input").rglob("run_santorini_v4_g1_kaggle.py"))
+assert len(entries) == 1, entries
+subprocess.run([sys.executable, str(entries[0])], check=True)
+```
+
+Download the complete `/kaggle/working/santorini_v4_g1` directory. Its primary
+handoff is `g1-summary.json`; it also contains the pre-game calibration, every
+arena record, and both job contracts. The runner validates every embedded hash
+and safely reuses only complete reports with the exact frozen parameters if a
+notebook is resumed. Final-test data and final arena seeds remain untouched.

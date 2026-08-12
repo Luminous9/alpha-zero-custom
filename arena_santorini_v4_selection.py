@@ -1,4 +1,4 @@
-"""Run paired P1b selection arenas without touching final-test openings/seeds."""
+"""Run paired V4 selection arenas without touching final-test openings/seeds."""
 
 import argparse
 import hashlib
@@ -31,12 +31,32 @@ def parse_args():
     parser.add_argument("--gate", choices=("standard", "full"), default="standard")
     parser.add_argument("--games", type=int, default=40)
     parser.add_argument("--simulations", type=int, default=96)
+    parser.add_argument(
+        "--player1-simulations", type=int,
+        help="Optional player-one override used by equal-cost arenas.",
+    )
+    parser.add_argument(
+        "--player2-simulations", type=int,
+        help="Optional player-two override used by equal-cost arenas.",
+    )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--search-mode", choices=("puct", "gumbel"), default="gumbel")
     parser.add_argument("--gumbel-scale", type=float, default=0.0)
     parser.add_argument("--placement-gumbel-scale", type=float, default=1.5)
+    parser.add_argument(
+        "--placement-temperature", type=float, default=0.0,
+        help="Sample placement actions from visit counts when positive.",
+    )
     parser.add_argument("--player1-root-symmetries", type=int, default=1)
     parser.add_argument("--player2-root-symmetries", type=int, default=1)
+    parser.add_argument(
+        "--player1-placement-root-symmetries", type=int,
+        help="Defaults to --player1-root-symmetries.",
+    )
+    parser.add_argument(
+        "--player2-placement-root-symmetries", type=int,
+        help="Defaults to --player2-root-symmetries.",
+    )
     parser.add_argument("--player1-canonical-d4", action="store_true")
     parser.add_argument("--player2-canonical-d4", action="store_true")
     parser.add_argument("--inference-cache-size", type=int, default=4096)
@@ -85,9 +105,17 @@ def _load_player(game, kind, path, device, fp16, canonical_d4=False):
     return wrapper
 
 
-def _search_args(args, root_symmetries):
+def _search_args(
+    args, root_symmetries, simulations=None, placement_root_symmetries=None
+):
+    placement_root_symmetries = (
+        root_symmetries
+        if placement_root_symmetries is None else placement_root_symmetries
+    )
     return dotdict({
-        "numMCTSSims": int(args.simulations),
+        "numMCTSSims": int(
+            args.simulations if simulations is None else simulations
+        ),
         "cpuct": 1.0,
         "searchMode": args.search_mode,
         "gumbelMaxConsideredActions": 16,
@@ -96,7 +124,7 @@ def _search_args(args, root_symmetries):
         "tacticalShortcuts": True,
         "searchSymmetryEvaluation": int(root_symmetries) > 1,
         "rootSymmetrySamples": int(root_symmetries),
-        "placementRootSymmetrySamples": int(root_symmetries),
+        "placementRootSymmetrySamples": int(placement_root_symmetries),
         "inferenceDeduplication": True,
         "inferenceCacheSize": int(args.inference_cache_size),
     })
@@ -241,19 +269,54 @@ def main():
     args = parse_args()
     if args.games < 2 or args.games % 2:
         raise ValueError("Selection arena games must be a positive even number.")
-    if args.simulations < 1 or args.batch_size < 1:
+    player1_simulations = (
+        args.simulations
+        if args.player1_simulations is None else args.player1_simulations
+    )
+    player2_simulations = (
+        args.simulations
+        if args.player2_simulations is None else args.player2_simulations
+    )
+    player1_placement_root_symmetries = (
+        args.player1_root_symmetries
+        if args.player1_placement_root_symmetries is None
+        else args.player1_placement_root_symmetries
+    )
+    player2_placement_root_symmetries = (
+        args.player2_root_symmetries
+        if args.player2_placement_root_symmetries is None
+        else args.player2_placement_root_symmetries
+    )
+    if min(args.simulations, player1_simulations, player2_simulations) < 1 or args.batch_size < 1:
         raise ValueError("Simulation and batch sizes must be positive.")
-    for value in (args.player1_root_symmetries, args.player2_root_symmetries):
+    if args.placement_temperature < 0:
+        raise ValueError("Placement temperature cannot be negative.")
+    for value in (
+        args.player1_root_symmetries,
+        args.player2_root_symmetries,
+        player1_placement_root_symmetries,
+        player2_placement_root_symmetries,
+    ):
         if value < 1 or value > 8:
             raise ValueError("Root symmetry counts must be in [1, 8].")
-    for canonical_d4, root_symmetries, label in (
-        (args.player1_canonical_d4, args.player1_root_symmetries, "player1"),
-        (args.player2_canonical_d4, args.player2_root_symmetries, "player2"),
+    for canonical_d4, root_symmetries, placement_root_symmetries, label in (
+        (
+            args.player1_canonical_d4,
+            args.player1_root_symmetries,
+            player1_placement_root_symmetries,
+            "player1",
+        ),
+        (
+            args.player2_canonical_d4,
+            args.player2_root_symmetries,
+            player2_placement_root_symmetries,
+            "player2",
+        ),
     ):
-        if canonical_d4 and root_symmetries != 1:
+        if canonical_d4 and (root_symmetries != 1 or placement_root_symmetries != 1):
             raise ValueError(
                 "{} canonical D4 inference makes root symmetry averaging redundant; "
-                "set its root symmetry count to one.".format(label)
+                "set both root symmetry counts to one.".format(label)
             )
     device = _resolve_device(args.device)
     game = SantoriniGame(5, sequential_placement=True)
@@ -278,15 +341,30 @@ def main():
         game,
         player1,
         player2,
-        _search_args(args, args.player1_root_symmetries),
+        _search_args(
+            args,
+            args.player1_root_symmetries,
+            player1_simulations,
+            player1_placement_root_symmetries,
+        ),
         player_args={
-            1: _search_args(args, args.player1_root_symmetries),
-            -1: _search_args(args, args.player2_root_symmetries),
+            1: _search_args(
+                args,
+                args.player1_root_symmetries,
+                player1_simulations,
+                player1_placement_root_symmetries,
+            ),
+            -1: _search_args(
+                args,
+                args.player2_root_symmetries,
+                player2_simulations,
+                player2_placement_root_symmetries,
+            ),
         },
         batch_size=args.batch_size,
         quiet=False,
         opening_boards=opening_boards,
-        placement_temperature=0.0,
+        placement_temperature=args.placement_temperature,
         game_seeds=game_seeds,
     )
     started = time.perf_counter()
@@ -301,10 +379,13 @@ def main():
         "selection_seed": args.seed,
         "games": args.games,
         "simulations": args.simulations,
+        "player1_simulations": int(player1_simulations),
+        "player2_simulations": int(player2_simulations),
         "batch_size": args.batch_size,
         "search_mode": args.search_mode,
         "gumbel_scale": args.gumbel_scale,
         "placement_gumbel_scale": args.placement_gumbel_scale,
+        "placement_temperature": args.placement_temperature,
         "device": str(device),
         "fp16": bool(args.fp16),
         "player1": {
@@ -312,6 +393,8 @@ def main():
             "kind": args.player1_kind,
             "checkpoint": os.path.abspath(args.player1),
             "root_symmetries": args.player1_root_symmetries,
+            "placement_root_symmetries": int(player1_placement_root_symmetries),
+            "simulations": int(player1_simulations),
             "canonical_d4": bool(args.player1_canonical_d4),
             "wins": player1_wins,
         },
@@ -320,6 +403,8 @@ def main():
             "kind": args.player2_kind,
             "checkpoint": os.path.abspath(args.player2),
             "root_symmetries": args.player2_root_symmetries,
+            "placement_root_symmetries": int(player2_placement_root_symmetries),
+            "simulations": int(player2_simulations),
             "canonical_d4": bool(args.player2_canonical_d4),
             "wins": player2_wins,
         },
