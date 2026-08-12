@@ -1332,6 +1332,14 @@ class Coach():
                 with accumulate_wall_time(phase_timings, 'self_play'):
                     sparring_games = self._oracleSparringGameCount(self.args.numEps)
                     ordinary_games = int(self.args.numEps) - sparring_games
+                    if self._quiet():
+                        log.info(
+                            'Self-play plan: %s ordinary game(s), %s paired oracle-sparring '
+                            'game(s), batch size %s.',
+                            ordinary_games,
+                            sparring_games,
+                            self._self_play_batch_size(),
+                        )
                     if ordinary_games and self._self_play_batch_size() > 1:
                         iterationTrainExamples += self.executeEpisodesBatched(ordinary_games)
                     elif ordinary_games:
@@ -1345,6 +1353,13 @@ class Coach():
                         )
                     self._oracle_sparring_stats['fresh_examples'] = len(
                         iterationTrainExamples
+                    )
+                if self._quiet():
+                    log.info(
+                        'Self-play complete: %s game(s), %s fresh example(s), %.1f seconds.',
+                        int(self.args.numEps),
+                        len(iterationTrainExamples),
+                        phase_timings['self_play'],
                     )
 
                 # save the iteration examples to the history 
@@ -1541,6 +1556,38 @@ class Coach():
                     phase_timings=phase_timings,
                     iteration_started=iteration_started,
                 )
+                if self._quiet():
+                    log.info(
+                        'Iteration %s summary: replay=%s target/actual reuse=%s/%s; '
+                        'steps=%s; teacher step=%s; seam delta=%s; oracle=%s/%s; '
+                        'ratchet pairs=%s rolling=%s; wall=%.1fs.',
+                        i,
+                        telemetry_payload.get('replay_examples'),
+                        self._formatTelemetryMetric(
+                            telemetry_payload.get('target_replay_reuse')
+                        ),
+                        self._formatTelemetryMetric(
+                            telemetry_payload.get('actual_replay_reuse')
+                        ),
+                        telemetry_payload.get('training_steps'),
+                        self._formatTelemetryMetric(
+                            telemetry_payload.get('v4_teacher_objective_step_delta')
+                        ),
+                        self._formatTelemetryMetric(
+                            telemetry_payload.get(
+                                'v4_seam_contrast_delta_from_baseline'
+                            )
+                        ),
+                        telemetry_payload.get('oracle_sparring_neural_wins'),
+                        telemetry_payload.get('oracle_sparring_games'),
+                        telemetry_payload.get(
+                            'oracle_sparring_ratchet_history_pairs'
+                        ),
+                        self._formatTelemetryMetric(
+                            telemetry_payload.get('oracle_sparring_rolling_score')
+                        ),
+                        telemetry_payload.get('wall_total_seconds', 0.0),
+                    )
                 if local_iteration == 1 and self._arg('deleteLoadedExamplesAfterFirstIteration', False):
                     self._deleteLoadedTrainExamplesFile()
                 self._haltForIterationControls(telemetry_payload)

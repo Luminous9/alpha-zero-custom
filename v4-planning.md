@@ -57,9 +57,11 @@ small replay window. Exact live-policy calibration now selects 5k nodes as
 ladder version 2 (17-23 over 40 confirmation games), while an isolated 2x
 first-iteration retrain preserves P1c strength at 22-18 and holds the frozen
 objective shift to +0.0106. P2 therefore uses an eight-iteration linear
-2x-to-16x replay-reuse warm-up and requires one revised 5k transition smoke
-before the production lineage starts. Disagreement starts and the auxiliary
-head remain disabled. Final test data and final arena seeds remain untouched. See
+2x-to-16x replay-reuse warm-up. The corrected 5k transition passes: its teacher
+objective step is +0.01414, seam contrast delta is -0.00409, and its equal-96
+standard check against P1c is 19-21. It is promoted to production iteration 1.
+Disagreement starts and the auxiliary head remain disabled. Final test data and
+final arena seeds remain untouched. See
 `experiments/santorini_v4/P1B_SUPERVISED_SCREEN.md` and
 `experiments/santorini_v4/P1B_SCALED_SCREEN.md`, followed by
 `experiments/santorini_v4/P1C_FULL_PRETRAIN.md`.
@@ -446,10 +448,15 @@ control branch.
   Their frozen teacher objective jumped by +0.346/+0.349, and equal-96 standard
   matches against P1c scored 35.0%/22.5% for ordinary/mixed. Retraining the
   exact ordinary replay from P1c at 2x reuse scored 55.0% against P1c and moved
-  the frozen objective by only +0.0106. Linearly warm replay reuse by absolute
-  iteration over the first eight iterations: 2x, 4x, 6x, 8x, 10x, 12x, 14x,
-  then 16x. This is an optimizer-dose transition, not retention of blended
-  teacher labels; the P2 main value target remains pure self-play `z`.
+  the frozen objective by only +0.0106. The accepted iteration-one transition
+  also used 2x. The first production continuation then demonstrated that 4x at
+  iteration 2 was tolerable (+0.02522) but 6x at iteration 3 crossed the
+  standing gate (+0.05651). Discard that branch and restart from iteration 1
+  with a 16-iteration absolute warm-up: 2x again at iteration 2, 3x at iteration
+  3, and one additional unit per iteration through 16x at iteration 16. The
+  iteration-one 2x dose is an explicit fixed entry exception to the formula.
+  This is an optimizer-dose transition, not retention of blended teacher
+  labels; the P2 main value target remains pure self-play `z`.
 - **Sparring-rung ratchet:** retain the most recent 40 complete seat-swapped
   pair scores (80 games) in resumable checkpoint metadata. At 50%-55% V4 score,
   emit a watch signal. At **55% or higher**, finish and save the current
@@ -614,5 +621,5 @@ blocked on dual-GPU support.
 5. **P1b.2 - scaled architecture and target selection (complete):** the matched 100k/300k/1M curves select canonical ordinary 6x192 by supervised fit plus the frozen ordinary-family speed tie-break. Exact batched D4 inference reaches 3,285 examples/s at arena-relevant batch eight on P100, with a 24% latency premium over the identical uncanonicalized wrapper. Equivariant E retains a small early-stage advantage but loses the supervised/arena selection overall. The required 1M target ablation rejects winner-only noninferiority: its common handoff objective is +0.01031 worse, with a paired interval of +0.00169 to +0.01868, while the standard/full arenas cancel 40-40. Retain global blend (`alpha_boot=0.5`, `T=261.8`) and explicitly switch the main target to pure self-play `z` at handoff. Final data and arena seeds remain untouched.
 6. **P1c - full corpus and pretraining (complete):** the selected canonical ordinary 6x192/global-blend model completed four epochs over the 10,640,649-draw frozen epoch with the pure T25 oracle placement policy. All input hashes match and no final data were touched. Epoch four wins the standard-only combined objective at 0.73775, improving 9.09% over the selected 1M-screen checkpoint; policy top-1 rises from 38.53% to 43.97%. The final epoch adds only 0.95% objective improvement and held-out value bottoms at epoch three, while the Run13-replay subgroup does not improve. Therefore do not authorize 20M datagen before the transfer gate. Placement fit is healthy (99.9963% legal mass and only 0.00889 policy CE above target entropy), but shared roots make this a pipeline check rather than generalization evidence. Proceed to G1 with checkpoint SHA-256 `374f0b72adbdf009d19abaed87addbdfe89364ecc1e6a7246b423233be51b42e`.
 7. **Gate G1 (complete; green after diagnostic):** P1c beats Run13 28-12/30-10 on standard selection openings and 40-0/39-1 from sampled empty-board starts at equal 96/128 simulations. Equal-cost P1c-128 versus Run13-120 scores 31-9 standard and 40-0 full. The symmetric phase-gap rule correctly paused on the unexpectedly positive +30/+22.5-point full-game gaps. A separate 40-game-per-arm, selection-only decomposition resolves the stop: with shared P1c continuation, P1c placements score 50%/52.5%; with shared Run13, 45%/37.5%; replaying a balanced sample of those exact openings with normal contestants scores 97.5%/87.5%; greedy full placement at 128 remains 40-0. Controller substitution leaves placement boards identical. Thus the gap is natural-opening standard-play distribution/style compatibility, not mapping, seating, or sampling failure. Proceed to P2 while retaining placement-only telemetry. Final data remain untouched.
-8. **P2 - self-play (entry correction in progress):** the trainable canonical 6x192 wrapper, checkpoint migration, transformed-search preflight, replay/source metadata, paired reset-per-game sparring loop, frozen seam telemetry, and P100 throughput smoke pass. The first arms identified and isolated two entry-contract errors before production: exact live-policy calibration selects 5k ladder v2 rather than deterministic-proxy 100k ladder v1, and first-iteration reuse must warm from 2x rather than begin at 16x. The 2x replay isolate preserves strength (22-18 versus P1c) and seam behavior. Run one revised 240-game P100 transition smoke with 5k sparring and the eight-iteration warm-up, then start the production lineage if its local P1c match is non-regressive. Disagreement starts and the low-weight auxiliary head remain separately gated as specified in §6.2-6.3. Milestone self-matches are the primary longitudinal progress signal; Run13 is a manual fixed anchor only.
+8. **P2 - self-play (restarting from iteration 1):** the trainable canonical 6x192 wrapper, checkpoint migration, transformed-search preflight, replay/source metadata, paired reset-per-game sparring loop, frozen seam telemetry, and P100 throughput smoke pass. Exact live-policy calibration selects 5k ladder v2. The corrected transition remains production iteration 1. The first continuation's iteration 2 passed at 4x, but iteration 3's 6x dose triggered the standing teacher gate at +0.05651. This was a valid safety pause, not a seam event: the seam contrast delta was +0.01233 with an interval crossing zero, standard strength was 19-21 versus iteration 1 and 17-23 versus P1c, and placement-inclusive strength was 20-20 versus iteration 1. Nevertheless discard iterations 2-3 from the production lineage. Restart from the exact iteration-one checkpoint/replay with the revised 16-iteration ramp: 2x at iteration 2, 3x at iteration 3, then up by 1x per iteration to 16x. The restart retains iteration 1's 12 oracle pairs. Disagreement starts and the low-weight auxiliary head remain separately gated as specified in §6.2-6.3. Milestone self-matches are the primary longitudinal progress signal; Run13 is a manual fixed anchor only.
 9. **Review:** after ~20-30 iterations, run the 96/128/1024 battery and component ablations; decide whether to study a nonzero search-facing `lambda` in a following run.

@@ -228,17 +228,7 @@ class NNetWrapper(NeuralNet):
             consistency_pi_losses = AverageMeter()
             consistency_v_losses = AverageMeter()
 
-            if runtime_args.quiet:
-                log.info(
-                    'Training segment %s/%s (%s/%s batches; %s/%s total steps)',
-                    epoch + 1,
-                    runtime_args.epochs,
-                    steps_this_epoch,
-                    epoch_batch_count,
-                    completed_steps + steps_this_epoch,
-                    training_steps,
-                )
-            else:
+            if not runtime_args.quiet:
                 print('TRAINING SEGMENT ::: ' + str(epoch + 1))
 
             t = tqdm(range(steps_this_epoch), desc='Training Net', disable=runtime_args.quiet)
@@ -381,14 +371,6 @@ class NNetWrapper(NeuralNet):
 
             completed_steps += steps_this_epoch
 
-            if runtime_args.quiet:
-                log.info(
-                    'Finished training segment %s/%s: pi_loss=%.4f v_loss=%.4f',
-                    epoch + 1,
-                    runtime_args.epochs,
-                    pi_losses.avg,
-                    v_losses.avg,
-                )
             metrics = {
                 'policy_loss': float(pi_losses.avg),
                 'value_loss': float(v_losses.avg),

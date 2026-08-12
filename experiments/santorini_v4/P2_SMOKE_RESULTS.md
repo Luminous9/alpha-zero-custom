@@ -45,6 +45,7 @@ P1c handoff confirm a playing-strength shock:
 | Ordinary, 16x reuse | 14-26 (35.0%) | 22.5%-47.5% | 1 / 12 / 7 |
 | Mixed 100k, 16x reuse | 9-31 (22.5%) | 12.5%-32.5% | 0 / 9 / 11 |
 | Exact ordinary replay, 2x reuse | 22-18 (55.0%) | 45.0%-65.0% | 3 / 16 / 1 |
+| Mixed 5k ladder v2, 2x reuse | 19-21 (47.5%) | 37.5%-57.5% | 2 / 15 / 3 |
 
 The 2x isolate uses the same P1c checkpoint, ordinary replay, AdamW state,
 3e-4 learning rate, and held-out split. It changes only optimizer dose: 27
@@ -59,6 +60,18 @@ objective is checkpointed. Separately, the live oracle rung ratchets when the
 latest 40 complete paired openings (80 games) reach 55% V4 score; 50%-55% is a
 watch band. Its rolling scores and ladder identity are checkpointed as well.
 
+The corrected mixed transition passes all entry controls. It stores 3,205
+positions (3,094 ordinary and 111 sparring), takes 25 optimizer steps at 2.072x
+actual reuse, moves the teacher objective by +0.01414, and moves the seam
+contrast by -0.00409 (95% -0.01721 to +0.00922). Its live 5k sparring score is
+9-15 (37.5%; pairs 3/3/6), initializing 12 of the ratchet's 40-pair window.
+It is promoted to production P2 iteration 1.
+On the identical paired standard suite, it improves by +25.0 percentage points
+over the failed 100k/16x mixed checkpoint (paired 95% +10.0 to +40.0; ten pairs
+improve, nine tie, one worsens). Its -7.5-point difference from the ordinary 2x
+isolate is unresolved (paired 95% -22.5 to +10.0), so there is no evidence that
+the corrected 5k mixture itself creates a regression.
+
 ## Artifact integrity
 
 The downloaded `.zip` suffixes are browser renames of native PyTorch/NPZ zip
@@ -68,6 +81,8 @@ containers, not outer archives. Their payload hashes match the Kaggle contracts.
 | --- | --- | --- | --- |
 | Ordinary | `452955e401d404c90a08e5d36cee4f61f2c74a59122cd07dda30a96cc6c9bc4b` | `ac67674749c7facc55348f4f151e7593bfb7f09bcec675b6f8396825fc71337c` | `199dbabd250d6bed081c0cf5dc09556522b022e3ec3b26c12a1c94930fe7a338` |
 | Mixed | `bdcab6937ac457677f04dda8041b8e554f00613e0a1a14908174a86ddf5024fe` | `d05ec359531411213092f18d2675e08207cc81b4fc9b8fa59b12f32dd1c9a781` | `78410d8cab0a382921d853099ea9c0ebe878a25766705fc1f60d0a536ab681bc` |
+| Transition | `42b61409ec5ac6a3fd15d93ec6a700b87623e840e468fb8f80e857c1c8df1f78` | `ffb947a7af216f1c77cc4a1369e407e97dbe2d6b2a51587e3df6b58d3f834f10` | `d18f76903a7d17b1fdd35537cbaf424f62c688bb191e32ff75fe6da6c378b2c3` |
 
-Neither first-smoke checkpoint is part of the production P2 lineage. Final-test
-data and final arena seeds remain untouched.
+Neither first-smoke checkpoint is part of the production P2 lineage. The
+corrected transition is iteration 1. Final-test data and final arena seeds
+remain untouched.
