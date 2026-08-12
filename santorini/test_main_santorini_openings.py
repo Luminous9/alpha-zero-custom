@@ -205,6 +205,7 @@ class TestMainSantoriniOpenings(unittest.TestCase):
                 '--v4-seam-telemetry-bootstrap-samples', '500',
                 '--v4-seam-telemetry-seed', '42',
                 '--v4-seam-telemetry-alert-delta', '0.04',
+                '--no-v4-teacher-objective-gate',
             ],
         ):
             coach_args = build_coach_args(parse_args())
@@ -214,6 +215,7 @@ class TestMainSantoriniOpenings(unittest.TestCase):
         self.assertEqual(coach_args.v4SeamTelemetryBootstrapSamples, 500)
         self.assertEqual(coach_args.v4SeamTelemetrySeed, 42)
         self.assertEqual(coach_args.v4SeamTelemetryAlertDelta, 0.04)
+        self.assertFalse(coach_args.v4TeacherObjectiveGateEnabled)
 
     def test_exact_inference_reuse_defaults_to_v3_only(self):
         with patch('sys.argv', ['main_santorini.py', '--architecture', 'v3']):

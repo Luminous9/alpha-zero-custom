@@ -149,6 +149,32 @@ class Coach():
                 len(self._v4_seam_telemetry_suite['boards']),
                 seam_suite_path,
             )
+        resume_metadata = dict(self._arg('resumeMetadata', {}) or {})
+        self._v4_teacher_previous_objective = None
+        if self._v4_seam_telemetry_suite is not None:
+            self._v4_teacher_previous_objective = float(np.mean(
+                self._v4_seam_telemetry_suite['baseline_objective']
+            ))
+            if (
+                resume_metadata.get('v4_seam_suite_fingerprint')
+                == self._v4_seam_telemetry_suite['fingerprint']
+                and resume_metadata.get('v4_teacher_objective_current') is not None
+            ):
+                self._v4_teacher_previous_objective = float(
+                    resume_metadata['v4_teacher_objective_current']
+                )
+        same_oracle_rung = (
+            int(resume_metadata.get('oracle_sparring_nodes', -1))
+            == int(self._arg('oracleSparringNodes', 5_000))
+            and int(resume_metadata.get('oracle_sparring_ladder_version', -1))
+            == int(self._arg('oracleSparringLadderVersion', 2))
+        )
+        self._oracle_sparring_pair_score_history = (
+            [float(score) for score in resume_metadata.get(
+                'oracle_sparring_pair_score_history', []
+            )]
+            if same_oracle_rung else []
+        )
         self._reference_suite = None
         reference_suite_path = self._arg('referenceSuite', None)
         if reference_suite_path:
@@ -1139,6 +1165,131 @@ class Coach():
             'oracle_sparring_pair_losses_0_2': int(sum(score == 0 for score in pair_scores)),
         }
 
+    def _iterationControlMetrics(self, iteration, seam_metrics):
+        """Update resumable P2 safety controls after one completed iteration."""
+        controls = {
+            'v4_teacher_objective_gate_enabled': bool(
+                self._arg('v4TeacherObjectiveGateEnabled', True)
+            ),
+            'v4_teacher_objective_step_threshold': float(
+                self._arg('v4TeacherObjectiveStepThreshold', 0.05)
+            ),
+            'v4_teacher_objective_gate_triggered': False,
+            'oracle_sparring_ratchet_enabled': bool(
+                self._arg('oracleSparringRatchetEnabled', True)
+            ),
+            'oracle_sparring_ratchet_games': int(
+                self._arg('oracleSparringRatchetGames', 80)
+            ),
+            'oracle_sparring_ratchet_score_threshold': float(
+                self._arg('oracleSparringRatchetScore', 0.55)
+            ),
+            'oracle_sparring_ratchet_eligible': False,
+            'oracle_sparring_ratchet_watch': False,
+            'oracle_sparring_ratchet_triggered': False,
+        }
+
+        current_objective = seam_metrics.get('v4_seam_objective')
+        previous_objective = self._v4_teacher_previous_objective
+        if current_objective is not None and previous_objective is not None:
+            step_delta = float(current_objective) - float(previous_objective)
+            controls.update({
+                'v4_teacher_objective_previous': float(previous_objective),
+                'v4_teacher_objective_current': float(current_objective),
+                'v4_teacher_objective_step_delta': float(step_delta),
+                'v4_teacher_objective_gate_triggered': bool(
+                    controls['v4_teacher_objective_gate_enabled']
+                    and step_delta
+                    > controls['v4_teacher_objective_step_threshold']
+                ),
+            })
+            self._v4_teacher_previous_objective = float(current_objective)
+            if controls['v4_teacher_objective_gate_triggered']:
+                log.error(
+                    'Frozen teacher-objective gate triggered at iteration %s: '
+                    'step delta %+.4f exceeds +%.4f.',
+                    iteration,
+                    step_delta,
+                    controls['v4_teacher_objective_step_threshold'],
+                )
+
+        pair_groups = {}
+        for record in self._oracle_sparring_stats.get('game_records', []):
+            pair_groups.setdefault(int(record['pair_index']), []).append(record)
+        current_pair_scores = []
+        for records in pair_groups.values():
+            if len(records) != 2:
+                continue
+            current_pair_scores.append(sum(
+                1.0 if record['neural_result'] == 1
+                else 0.5 if record['neural_result'] == 0 else 0.0
+                for record in records
+            ))
+        self._oracle_sparring_pair_score_history.extend(current_pair_scores)
+        window_pairs = controls['oracle_sparring_ratchet_games'] // 2
+        self._oracle_sparring_pair_score_history = (
+            self._oracle_sparring_pair_score_history[-window_pairs:]
+        )
+        history = self._oracle_sparring_pair_score_history
+        controls['oracle_sparring_ratchet_history_pairs'] = int(len(history))
+        controls['oracle_sparring_ratchet_new_pairs'] = int(len(current_pair_scores))
+        if len(history) == window_pairs:
+            scores = np.asarray(history, dtype=np.float64)
+            rolling_score = float(np.mean(scores) / 2.0)
+            rng = np.random.RandomState(
+                int(self._arg('oracleSparringOpeningSeed', 20260921))
+                ^ int(iteration)
+                ^ 0x5A17
+            )
+            bootstrap = scores[
+                rng.randint(len(scores), size=(2000, len(scores)))
+            ].mean(axis=1) / 2.0
+            controls.update({
+                'oracle_sparring_ratchet_eligible': True,
+                'oracle_sparring_rolling_score': rolling_score,
+                'oracle_sparring_rolling_score_95ci_low': float(
+                    np.quantile(bootstrap, 0.025)
+                ),
+                'oracle_sparring_rolling_score_95ci_high': float(
+                    np.quantile(bootstrap, 0.975)
+                ),
+                'oracle_sparring_rolling_pair_wins_2_0': int(np.sum(scores == 2)),
+                'oracle_sparring_rolling_split_pairs_1_1': int(np.sum(scores == 1)),
+                'oracle_sparring_rolling_pair_losses_0_2': int(np.sum(scores == 0)),
+                'oracle_sparring_ratchet_watch': bool(rolling_score >= 0.50),
+                'oracle_sparring_ratchet_triggered': bool(
+                    controls['oracle_sparring_ratchet_enabled']
+                    and bool(current_pair_scores)
+                    and rolling_score
+                    >= controls['oracle_sparring_ratchet_score_threshold']
+                ),
+            })
+            if controls['oracle_sparring_ratchet_triggered']:
+                log.error(
+                    'Oracle sparring ratchet triggered at iteration %s: '
+                    'rolling %s-game score %.1f%% reached %.1f%%.',
+                    iteration,
+                    controls['oracle_sparring_ratchet_games'],
+                    100.0 * rolling_score,
+                    100.0 * controls['oracle_sparring_ratchet_score_threshold'],
+                )
+        return controls
+
+    @staticmethod
+    def _haltForIterationControls(payload):
+        reasons = []
+        if payload.get('v4_teacher_objective_gate_triggered'):
+            reasons.append('frozen teacher-objective step gate')
+        if payload.get('oracle_sparring_ratchet_triggered'):
+            reasons.append('oracle sparring ladder ratchet')
+        if reasons:
+            raise RuntimeError(
+                'P2 paused after writing its resumable checkpoint, replay, and '
+                'telemetry: {}. Review/recalibrate before resuming.'.format(
+                    ' and '.join(reasons)
+                )
+            )
+
     def learn(self):
         """
         Performs numIters iterations of self-play and training. Arena mode pits
@@ -1236,6 +1387,10 @@ class Coach():
                         validation_examples=validationExamples,
                         iteration=i,
                     )
+                with accumulate_wall_time(phase_timings, 'arena_telemetry'):
+                    seam_metrics = self._v4SeamTelemetry(i)
+                metrics.update(seam_metrics)
+                metrics.update(self._iterationControlMetrics(i, seam_metrics))
                 metadata = {
                     'iteration': i,
                     'training_mode': self.training_mode,
@@ -1330,6 +1485,30 @@ class Coach():
                     'oracle_sparring_opening_seed': self._arg(
                         'oracleSparringOpeningSeed', 20260921
                     ),
+                    'oracle_sparring_pair_score_history': list(
+                        self._oracle_sparring_pair_score_history
+                    ),
+                    'oracle_sparring_ratchet_enabled': metrics.get(
+                        'oracle_sparring_ratchet_enabled'
+                    ),
+                    'oracle_sparring_ratchet_games': metrics.get(
+                        'oracle_sparring_ratchet_games'
+                    ),
+                    'oracle_sparring_ratchet_score_threshold': metrics.get(
+                        'oracle_sparring_ratchet_score_threshold'
+                    ),
+                    'v4_seam_suite_fingerprint': metrics.get(
+                        'v4_seam_suite_fingerprint'
+                    ),
+                    'v4_teacher_objective_current': metrics.get(
+                        'v4_teacher_objective_current'
+                    ),
+                    'v4_teacher_objective_gate_enabled': metrics.get(
+                        'v4_teacher_objective_gate_enabled'
+                    ),
+                    'v4_teacher_objective_step_threshold': metrics.get(
+                        'v4_teacher_objective_step_threshold'
+                    ),
                 }
                 with accumulate_wall_time(phase_timings, 'serialization'):
                     self.nnet.save_checkpoint(
@@ -1354,7 +1533,7 @@ class Coach():
                     with accumulate_wall_time(phase_timings, 'arena_telemetry'):
                         with preserve_rng_state():
                             metrics.update(self._runAnchorMatch(i))
-                self._writeTelemetry(
+                telemetry_payload = self._writeTelemetry(
                     i,
                     metrics,
                     time.perf_counter() - iteration_started,
@@ -1364,6 +1543,7 @@ class Coach():
                 )
                 if local_iteration == 1 and self._arg('deleteLoadedExamplesAfterFirstIteration', False):
                     self._deleteLoadedTrainExamplesFile()
+                self._haltForIterationControls(telemetry_payload)
                 continue
 
             # Arena mode keeps a copy of the old network for promotion testing.
@@ -1420,7 +1600,7 @@ class Coach():
                     else:
                         self._deleteExamplesFile('best.pth.tar.examples')
 
-            self._writeTelemetry(
+            telemetry_payload = self._writeTelemetry(
                 i,
                 metrics,
                 time.perf_counter() - iteration_started,
@@ -1431,6 +1611,7 @@ class Coach():
 
             if local_iteration == 1 and self._arg('deleteLoadedExamplesAfterFirstIteration', False):
                 self._deleteLoadedTrainExamplesFile()
+            self._haltForIterationControls(telemetry_payload)
 
     def getCheckpointFile(self, iteration):
         return 'checkpoint_' + str(iteration) + '.pth.tar'
@@ -1739,7 +1920,8 @@ class Coach():
         payload.update(self._oracleSparringTelemetry())
         symmetry_metrics = self._symmetryTelemetry()
         payload.update(symmetry_metrics)
-        payload.update(self._v4SeamTelemetry(iteration))
+        if 'v4_seam_telemetry_due' not in payload:
+            payload.update(self._v4SeamTelemetry(iteration))
         payload.update(self._policyTelemetry())
         if self._reference_suite is not None:
             payload.update(self._reference_suite.evaluate(self.game, self.nnet))
@@ -1835,6 +2017,8 @@ class Coach():
                 100.0 * payload['inference_reuse_rate'],
                 payload['inference_executed_evaluations'],
             )
+
+        return payload
 
     @staticmethod
     def _formatTelemetryMetric(value):

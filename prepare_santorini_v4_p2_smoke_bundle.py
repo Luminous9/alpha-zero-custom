@@ -81,6 +81,8 @@ def build_bundle(args):
                 "transition": 5_000,
             },
             "oracle_workers": 4,
+            "oracle_ratchet_games": 80,
+            "oracle_ratchet_score": 0.55,
             "oracle_ladder_version": {
                 "ordinary": 1,
                 "mixed": 1,
@@ -92,6 +94,7 @@ def build_bundle(args):
                 "mixed": 0,
                 "transition": 8,
             },
+            "teacher_objective_step_threshold": 0.05,
             "opening_seed": 20260921,
             "inference_precision": "fp32",
             "disagreement_starts": False,

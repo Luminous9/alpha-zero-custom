@@ -450,6 +450,13 @@ control branch.
   iteration over the first eight iterations: 2x, 4x, 6x, 8x, 10x, 12x, 14x,
   then 16x. This is an optimizer-dose transition, not retention of blended
   teacher labels; the P2 main value target remains pure self-play `z`.
+- **Sparring-rung ratchet:** retain the most recent 40 complete seat-swapped
+  pair scores (80 games) in resumable checkpoint metadata. At 50%-55% V4 score,
+  emit a watch signal. At **55% or higher**, finish and save the current
+  iteration, then pause before the next one and recalibrate with the exact live
+  search contract. Reset the rolling history only when the declared node rung
+  or ladder version changes. Report the rolling paired bootstrap interval and
+  2-0/1-1/0-2 counts, but use the predeclared point threshold for the ratchet.
 - **Disagreement-seeded starts (target ~10% after activation):** adapt the existing
   Run13-specific adversarial miner to the canonical V4 checkpoint and use
   high-margin, score-stable disagreements only as starting positions--never as
@@ -512,6 +519,17 @@ an automatic strength gate: one warning prompts inspection, while a confirmed
 warning or a persistent upward trend pauses promotion for a targeted
 frame-switch/search diagnostic and exposure-stratified arena. Do not silently
 change the suite, targets, quartiles, baseline, or threshold during P2.
+
+The suite's overall teacher objective is also a standing optimizer-dose gate,
+separate from the seam contrast. Compare every checkpoint with the immediately
+preceding checkpoint (the frozen P1c baseline for iteration one). If the
+objective rises by more than **+0.05 in one iteration**, save the completed
+checkpoint, replay, control history, and telemetry, then pause before further
+self-play. Resume only after reviewing optimizer dose, effective replay reuse,
+learning rate, replay-window composition, and a paired strength check. Persist
+the preceding objective in resumable checkpoint metadata; a process restart
+must not reset the comparison. The gate is one-sided: improvements and smaller
+increases are recorded without pausing.
 
 The frozen P1c baseline objective is `0.737597`; Q1 is `0.699188`, Q4 is
 `0.760605`, and the baseline high-minus-low contrast is `+0.061416`. The suite

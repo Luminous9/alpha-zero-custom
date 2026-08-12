@@ -119,9 +119,12 @@ def main():
         "--oracle-sparring-workers", "4",
         "--oracle-sparring-opening-seed", "20260921",
         "--oracle-sparring-ladder-version", str(oracle_ladder_version),
+        "--oracle-sparring-ratchet-games", "80",
+        "--oracle-sparring-ratchet-score", "0.55",
         "--v4-seam-telemetry-suite", str(seam_suite),
         "--v4-seam-telemetry-interval", "1",
         "--v4-seam-telemetry-batch-size", "256",
+        "--v4-teacher-objective-step-threshold", "0.05",
         "--milestone-interval", "20",
         "--no-telemetry-matches",
         "--seed", "20260930",
@@ -155,6 +158,12 @@ def main():
             raise RuntimeError("Transition smoke did not retain the warm-up contract.")
     if telemetry.get("v4_seam_telemetry_due") is not True:
         raise RuntimeError("Frozen V4 seam telemetry did not run.")
+    if telemetry.get("v4_teacher_objective_gate_triggered") is not False:
+        raise RuntimeError("Frozen teacher-objective step gate did not pass.")
+    if telemetry.get("oracle_sparring_ratchet_games") != 80:
+        raise RuntimeError("Oracle ratchet window changed.")
+    if abs(float(telemetry.get("oracle_sparring_ratchet_score_threshold", -1)) - 0.55) > 1e-9:
+        raise RuntimeError("Oracle ratchet threshold changed.")
     required_outputs = (
         output_dir / "latest-training.pth.tar",
         output_dir / "latest.pth.tar",

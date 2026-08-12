@@ -318,6 +318,23 @@ def parse_args():
     parser.add_argument('--oracle-sparring-workers', type=int, default=4)
     parser.add_argument('--oracle-sparring-opening-seed', type=int, default=20260921)
     parser.add_argument('--oracle-sparring-ladder-version', type=int, default=2)
+    parser.add_argument(
+        '--oracle-sparring-ratchet-games',
+        type=int,
+        default=80,
+        help='Rolling paired-game window used to detect a stale oracle rung.',
+    )
+    parser.add_argument(
+        '--oracle-sparring-ratchet-score',
+        type=float,
+        default=0.55,
+        help='Pause after a checkpoint when V4 reaches this rolling sparring score.',
+    )
+    parser.add_argument(
+        '--no-oracle-sparring-ratchet',
+        action='store_true',
+        help='Disable the rolling oracle-rung recalibration gate.',
+    )
     parser.add_argument('--oracle-binary', type=str)
     parser.add_argument(
         '--opening-source',
@@ -395,6 +412,21 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        '--v4-teacher-objective-step-threshold',
+        type=float,
+        default=0.05,
+        help=(
+            'Pause after a resumable checkpoint when the frozen teacher '
+            'objective rises by more than this amount versus the preceding '
+            'iteration (the P1c baseline for iteration one).'
+        ),
+    )
+    parser.add_argument(
+        '--no-v4-teacher-objective-gate',
+        action='store_true',
+        help='Report but do not pause on frozen teacher-objective step increases.',
+    )
+    parser.add_argument(
         '--anchor-checkpoint',
         type=str,
         help='Exact checkpoint file, or a directory containing one, for fixed-opponent telemetry.',
@@ -415,6 +447,10 @@ def parse_args():
     ):
         if value < 1:
             parser.error('{} must be at least 1.'.format(option))
+    if args.oracle_sparring_ratchet_games < 2 or args.oracle_sparring_ratchet_games % 2:
+        parser.error('--oracle-sparring-ratchet-games must be a positive even number.')
+    if not 0.0 < args.oracle_sparring_ratchet_score <= 1.0:
+        parser.error('--oracle-sparring-ratchet-score must be in (0, 1].')
     if args.oracle_sparring_probability > 0 and not args.oracle_binary:
         parser.error('--oracle-binary is required when oracle sparring is enabled.')
     if args.oracle_sparring_probability > 0 and args.architecture != 'v4':
@@ -449,6 +485,17 @@ def parse_args():
             parser.error('{} must be at least 1.'.format(option))
     if args.v4_seam_telemetry_alert_delta < 0:
         parser.error('--v4-seam-telemetry-alert-delta cannot be negative.')
+    if args.v4_teacher_objective_step_threshold < 0:
+        parser.error('--v4-teacher-objective-step-threshold cannot be negative.')
+    if (
+        args.v4_seam_telemetry_suite
+        and not args.no_v4_teacher_objective_gate
+        and args.v4_seam_telemetry_interval != 1
+    ):
+        parser.error(
+            '--v4-teacher-objective gate requires '
+            '--v4-seam-telemetry-interval 1.'
+        )
     if args.replay_reuse_warmup_iters < 0:
         parser.error('--replay-reuse-warmup-iters cannot be negative.')
     if args.inference_cache_size is not None and args.inference_cache_size < 0:
@@ -629,6 +676,15 @@ def build_coach_args(parsed_args):
         'oracleSparringLadderVersion': getattr(
             parsed_args, 'oracle_sparring_ladder_version', 2
         ),
+        'oracleSparringRatchetGames': getattr(
+            parsed_args, 'oracle_sparring_ratchet_games', 80
+        ),
+        'oracleSparringRatchetScore': getattr(
+            parsed_args, 'oracle_sparring_ratchet_score', 0.55
+        ),
+        'oracleSparringRatchetEnabled': not getattr(
+            parsed_args, 'no_oracle_sparring_ratchet', False
+        ),
         'oracleBinary': getattr(parsed_args, 'oracle_binary', None),
         'quiet': parsed_args.quiet,
         'trainingMode': training_mode,
@@ -747,6 +803,12 @@ def build_coach_args(parsed_args):
         ),
         'v4SeamTelemetryAlertDelta': getattr(
             parsed_args, 'v4_seam_telemetry_alert_delta', 0.02
+        ),
+        'v4TeacherObjectiveStepThreshold': getattr(
+            parsed_args, 'v4_teacher_objective_step_threshold', 0.05
+        ),
+        'v4TeacherObjectiveGateEnabled': not getattr(
+            parsed_args, 'no_v4_teacher_objective_gate', False
         ),
     })
 
@@ -1018,6 +1080,7 @@ def main():
                         resume_anchor_path,
                     )
                     nnet.save_checkpoint(coach_args.checkpoint, resume_anchor)
+        coach_args['resumeMetadata'] = dict(loaded_metadata)
     else:
         log.warning('Not loading a checkpoint!')
 

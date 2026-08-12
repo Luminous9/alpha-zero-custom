@@ -52,6 +52,13 @@ steps rather than 211. Its frozen objective delta is +0.01063 and seam-contrast
 delta is +0.00157 (95% -0.01292 to +0.01627). This isolates first-window 16x
 reuse as the ordinary-arm regression mechanism.
 
+The resulting production control is a standing one-step gate, not a comparison
+only to P1c: a frozen-objective increase greater than +0.05 versus the preceding
+checkpoint saves all resumable artifacts and pauses the run. The preceding
+objective is checkpointed. Separately, the live oracle rung ratchets when the
+latest 40 complete paired openings (80 games) reach 55% V4 score; 50%-55% is a
+watch band. Its rolling scores and ladder identity are checkpointed as well.
+
 ## Artifact integrity
 
 The downloaded `.zip` suffixes are browser renames of native PyTorch/NPZ zip

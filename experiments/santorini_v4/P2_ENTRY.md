@@ -43,7 +43,7 @@ Full measurements and hashes are in
 ## Revised transition smoke
 
 Upload `temp/santorini_v4_p2_smoke_bundle.zip` (SHA-256
-`954e946a7a9efb901372ca6337267814adae43a98e9b96ae0e0837079ff5537f`)
+`c0f6f257f13fa4b719a325b62d93a8c5baa4599b7f2bde6fe7125295ec70c9be`)
 as a Kaggle dataset and run only the corrected `transition` arm:
 
 ```python
@@ -67,8 +67,10 @@ and compact replay.
 
 The transition arm uses 240 games, 10% paired 5k ladder-v2 sparring, FP32 P100
 inference, the frozen 96/32 search contract, and iteration-one 2x reuse from the
-declared eight-iteration warm-up. It includes the Linux oracle and requires no
-Kaggle Cargo installation.
+declared eight-iteration warm-up. It also freezes the per-iteration teacher
+objective gate at +0.05 and the live-rung ratchet at 55% over the latest 80
+paired games. Both controls save resumable state before pausing. The bundle
+includes the Linux oracle and requires no Kaggle Cargo installation.
 
 After download, run the same local 40-game equal-96 P1c comparison. Start the
 production P2 lineage only if replay/rung provenance is correct, the seam

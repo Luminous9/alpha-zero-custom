@@ -812,6 +812,95 @@ class TestSantoriniCoachExamples(unittest.TestCase):
 
 
 class TestSantoriniCoachBatchedSelfPlay(unittest.TestCase):
+    def test_iteration_control_state_resumes_for_same_oracle_rung(self):
+        suite = {
+            'fingerprint': 'suite-sha',
+            'boards': np.zeros((4, 2, 5, 5), dtype=np.int8),
+            'baseline_objective': np.asarray([0.7, 0.8, 0.7, 0.8]),
+        }
+        args = dotdict({
+            'trainingMode': 'latest',
+            'numMCTSSims': 2,
+            'cpuct': 1.0,
+            'v4SeamTelemetrySuite': 'suite.npz',
+            'oracleSparringNodes': 5_000,
+            'oracleSparringLadderVersion': 2,
+            'telemetryMatchGames': 0,
+            'telemetryPlacementGames': 0,
+            'resumeMetadata': {
+                'v4_seam_suite_fingerprint': 'suite-sha',
+                'v4_teacher_objective_current': 0.81,
+                'oracle_sparring_nodes': 5_000,
+                'oracle_sparring_ladder_version': 2,
+                'oracle_sparring_pair_score_history': [0.0, 1.0, 2.0],
+            },
+        })
+        with patch('Coach.load_seam_telemetry_suite', return_value=suite):
+            coach = Coach(TinyGame(), BatchCountingNNet(TinyGame()), args)
+        try:
+            self.assertEqual(coach._v4_teacher_previous_objective, 0.81)
+            self.assertEqual(
+                coach._oracle_sparring_pair_score_history, [0.0, 1.0, 2.0]
+            )
+        finally:
+            coach.close()
+
+    def test_iteration_controls_gate_teacher_step_and_ratchet_complete_pairs(self):
+        coach = object.__new__(Coach)
+        coach.args = dotdict({
+            'v4TeacherObjectiveGateEnabled': True,
+            'v4TeacherObjectiveStepThreshold': 0.05,
+            'oracleSparringRatchetEnabled': True,
+            'oracleSparringRatchetGames': 8,
+            'oracleSparringRatchetScore': 0.55,
+            'oracleSparringOpeningSeed': 37,
+        })
+        coach._v4_teacher_previous_objective = 0.75
+        coach._oracle_sparring_pair_score_history = [2.0, 1.0]
+        coach._oracle_sparring_stats = coach._newOracleSparringStats()
+        coach._oracle_sparring_stats['game_records'] = [
+            {'pair_index': 0, 'neural_result': 1},
+            {'pair_index': 0, 'neural_result': -1},
+            {'pair_index': 1, 'neural_result': 1},
+            {'pair_index': 1, 'neural_result': 1},
+        ]
+
+        metrics = coach._iterationControlMetrics(
+            3, {'v4_seam_objective': 0.81}
+        )
+
+        self.assertAlmostEqual(metrics['v4_teacher_objective_step_delta'], 0.06)
+        self.assertTrue(metrics['v4_teacher_objective_gate_triggered'])
+        self.assertTrue(metrics['oracle_sparring_ratchet_eligible'])
+        self.assertEqual(metrics['oracle_sparring_ratchet_history_pairs'], 4)
+        self.assertAlmostEqual(metrics['oracle_sparring_rolling_score'], 0.75)
+        self.assertTrue(metrics['oracle_sparring_ratchet_triggered'])
+        with self.assertRaisesRegex(RuntimeError, 'teacher-objective.*ratchet'):
+            coach._haltForIterationControls(metrics)
+
+    def test_ratchet_waits_for_full_window_and_new_pairs(self):
+        coach = object.__new__(Coach)
+        coach.args = dotdict({
+            'v4TeacherObjectiveGateEnabled': True,
+            'v4TeacherObjectiveStepThreshold': 0.05,
+            'oracleSparringRatchetEnabled': True,
+            'oracleSparringRatchetGames': 8,
+            'oracleSparringRatchetScore': 0.55,
+            'oracleSparringOpeningSeed': 37,
+        })
+        coach._v4_teacher_previous_objective = 0.75
+        coach._oracle_sparring_pair_score_history = [2.0, 2.0, 2.0, 2.0]
+        coach._oracle_sparring_stats = coach._newOracleSparringStats()
+
+        metrics = coach._iterationControlMetrics(
+            4, {'v4_seam_objective': 0.76}
+        )
+
+        self.assertTrue(metrics['oracle_sparring_ratchet_eligible'])
+        self.assertEqual(metrics['oracle_sparring_ratchet_new_pairs'], 0)
+        self.assertFalse(metrics['oracle_sparring_ratchet_triggered'])
+        self.assertFalse(metrics['v4_teacher_objective_gate_triggered'])
+
     def test_oracle_sparring_pairs_seats_and_labels_only_neural_decisions(self):
         game = ShapedTwoPlyGame()
         nnet = BatchCountingNNet(game)
