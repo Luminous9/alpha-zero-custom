@@ -79,6 +79,36 @@ class RecordingTinyGame(TinyGame):
         return super().getNextState(board, player, action)
 
 
+class ShapedTwoPlyGame(TinyGame):
+    """Tiny deterministic game that accepts completed Santorini opening boards."""
+
+    sequential_placement = True
+
+    def getNextState(self, board, player, action):
+        next_board = np.array(board, copy=True)
+        next_board[1, 0, 0] += 1
+        return next_board, -player
+
+    def getGameEnded(self, board, player):
+        return -1 if board[1, 0, 0] >= 2 else 0
+
+    def stringRepresentation(self, board):
+        return np.ascontiguousarray(board).tobytes()
+
+
+class FirstLegalOraclePlayer:
+    def __init__(self):
+        self.starts = 0
+        self.moves = 0
+
+    def startGame(self):
+        self.starts += 1
+
+    def play(self, canonical_board):
+        self.moves += 1
+        return 0
+
+
 class SplitPolicyMCTS:
     def __init__(self):
         self.calls = []
@@ -108,6 +138,22 @@ class FixedOpeningSampler:
 
 
 class TestSantoriniCoachExamples(unittest.TestCase):
+    def test_no_symmetry_mode_stores_exactly_one_position(self):
+        game = SantoriniGame(5, sequential_placement=True)
+        coach = object.__new__(Coach)
+        coach.game = game
+        coach.args = dotdict({'symmetryAugmentation': 'none'})
+        board = game.getInitBoard()
+        policy = game.getValidMoves(board, 1).astype(np.float32)
+        policy /= policy.sum()
+        examples = []
+
+        coach._appendTrainingPosition(examples, board, 1, policy)
+
+        self.assertEqual(len(examples), 1)
+        np.testing.assert_array_equal(examples[0][0], board)
+        np.testing.assert_array_equal(examples[0][2], policy)
+
     def test_initial_episode_step_tracks_sampled_placement_depth(self):
         game = SantoriniGame(5, sequential_placement=True)
         coach = object.__new__(Coach)
@@ -766,6 +812,40 @@ class TestSantoriniCoachExamples(unittest.TestCase):
 
 
 class TestSantoriniCoachBatchedSelfPlay(unittest.TestCase):
+    def test_oracle_sparring_pairs_seats_and_labels_only_neural_decisions(self):
+        game = ShapedTwoPlyGame()
+        nnet = BatchCountingNNet(game)
+        players = [FirstLegalOraclePlayer(), FirstLegalOraclePlayer()]
+        args = dotdict({
+            'numMCTSSims': 2,
+            'cpuct': 1.0,
+            'tempThreshold': 10,
+            'policyTargetTemperature': 1.0,
+            'symmetryAugmentation': 'none',
+            'oracleSparringNodes': 100_000,
+            'oracleSparringWorkers': 2,
+            'oracleSparringOpeningSeed': 37,
+            'oracleSparringLadderVersion': 1,
+            'quiet': True,
+        })
+        coach = Coach(
+            game,
+            nnet,
+            args,
+            oracle_sparring_players=players,
+        )
+
+        examples = coach.executeOracleSparringEpisodes(2, iteration=3)
+
+        self.assertEqual(len(examples), 2)
+        self.assertEqual(sum(player.starts for player in players), 2)
+        self.assertEqual(sum(player.moves for player in players), 2)
+        self.assertEqual({example[3]['neural_seat'] for example in examples}, {1, -1})
+        self.assertEqual({example[3]['source'] for example in examples}, {'oracle_sparring'})
+        self.assertEqual({example[3]['oracle_nodes'] for example in examples}, {100_000})
+        self.assertEqual(coach._oracle_sparring_stats['games'], 2)
+        self.assertEqual(coach._oracle_sparring_stats['examples'], 2)
+
     def test_policy_target_remains_soft_when_action_selection_is_greedy(self):
         game = RecordingTinyGame()
         nnet = BatchCountingNNet(game)

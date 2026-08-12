@@ -6,6 +6,7 @@ import random
 import sys
 import time
 from collections import Counter, deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pickle import Pickler, Unpickler
 from random import shuffle
@@ -18,6 +19,8 @@ from Arena import Arena
 from BatchedArena import BatchedMCTSArena
 from MCTS import MCTS
 from santorini.SantoriniInference import predict_batch_deduplicated
+from santorini.OracleResearch import file_sha256, stage_for_builds
+from santorini.SantoriniOracle import SantoriniOraclePlayer, SantoriniOracleProcess
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -97,7 +100,15 @@ class Coach():
     in Game and NeuralNet. args are specified in main.py.
     """
 
-    def __init__(self, game, nnet, args, opening_sampler=None, anchor_nnet=None):
+    def __init__(
+        self,
+        game,
+        nnet,
+        args,
+        opening_sampler=None,
+        anchor_nnet=None,
+        oracle_sparring_players=None,
+    ):
         self.game = game
         self.nnet = nnet
         self.args = args
@@ -105,6 +116,10 @@ class Coach():
         self.pnet = self.nnet.__class__(self.game) if self.training_mode == 'arena' else None
         self.opening_sampler = opening_sampler
         self.anchor_nnet = anchor_nnet
+        self._oracle_sparring_players = oracle_sparring_players
+        self._oracle_sparring_processes = []
+        self._oracle_sparring_executor = None
+        self._oracle_sparring_stats = self._newOracleSparringStats()
         self.mcts = MCTS(self.game, self.nnet, self.args)
         self.trainExamplesHistory = []  # history of examples from args.numItersForTrainExamplesHistory latest iterations
         self.skipFirstSelfPlay = False  # can be overriden in loadTrainExamples()
@@ -146,6 +161,55 @@ class Coach():
         telemetry_dir = self._arg('telemetryDir', None)
         if telemetry_dir and SummaryWriter is not None:
             self._writer = SummaryWriter(telemetry_dir)
+
+    @staticmethod
+    def _newOracleSparringStats():
+        return {
+            'games': 0,
+            'neural_wins': 0,
+            'oracle_wins': 0,
+            'draws': 0,
+            'examples': 0,
+        }
+
+    def close(self):
+        if self._oracle_sparring_executor is not None:
+            self._oracle_sparring_executor.shutdown(wait=True)
+            self._oracle_sparring_executor = None
+        for process in self._oracle_sparring_processes:
+            process.close()
+        self._oracle_sparring_processes = []
+        if self._writer is not None:
+            self._writer.close()
+
+    def _ensureOracleSparringPlayers(self, count):
+        count = max(1, int(count))
+        if self._oracle_sparring_players is not None:
+            if len(self._oracle_sparring_players) < count:
+                raise ValueError(
+                    'Oracle sparring needs {} players, but only {} were supplied.'.format(
+                        count, len(self._oracle_sparring_players)
+                    )
+                )
+            return self._oracle_sparring_players[:count]
+
+        binary = self._arg('oracleBinary', None)
+        if not binary:
+            raise ValueError('oracleBinary is required when oracle sparring is enabled.')
+        nodes = int(self._arg('oracleSparringNodes', 100_000))
+        self._oracle_sparring_processes = [
+            SantoriniOracleProcess(binary) for _ in range(count)
+        ]
+        self._oracle_sparring_players = [
+            SantoriniOraclePlayer(self.game, process, nodes=nodes)
+            for process in self._oracle_sparring_processes
+        ]
+        if count > 1:
+            self._oracle_sparring_executor = ThreadPoolExecutor(
+                max_workers=count,
+                thread_name_prefix='oracle-sparring',
+            )
+        return self._oracle_sparring_players
 
     def _quiet(self):
         return bool(getattr(self.args, 'quiet', False))
@@ -194,9 +258,14 @@ class Coach():
     def _appendTrainingPosition(self, examples, canonical_board, player, policy):
         if hasattr(self, '_policy_target_stats'):
             self._recordPolicyTarget(canonical_board, policy)
-        if self._uses_on_the_fly_symmetry():
+        symmetry_mode = self._arg('symmetryAugmentation', 'expanded')
+        if symmetry_mode in ('on-the-fly', 'none'):
             examples.append([canonical_board, player, policy, None])
             return
+        if symmetry_mode != 'expanded':
+            raise ValueError(
+                'Unknown symmetry augmentation mode: {}'.format(symmetry_mode)
+            )
         for sym_board, sym_policy in self.game.getSymmetries(canonical_board, policy):
             examples.append([sym_board, player, sym_policy, None])
 
@@ -756,6 +825,291 @@ class Coach():
             [action_policy for _, action_policy in pairs],
         )
 
+    def _oracleSparringGameCount(self, total_games):
+        probability = float(self._arg('oracleSparringProbability', 0.0))
+        if probability <= 0.0:
+            return 0
+        total_games = int(total_games)
+        paired_games = 2 * int(round(total_games * probability / 2.0))
+        return min(total_games - (total_games % 2), max(0, paired_games))
+
+    def _oracleSparringOpeningSuite(self, pair_count, iteration):
+        if SantoriniRandomOpeningSampler is None:
+            raise RuntimeError('Santorini random-opening support is unavailable.')
+        seed = int(self._arg('oracleSparringOpeningSeed', 20260921))
+        # Iteration-addressed sampling makes resumed iteration N reproduce the
+        # same suite without depending on unrelated RNG consumption.
+        rng = np.random.RandomState(seed + 1_000_003 * int(iteration))
+        sampler = SantoriniRandomOpeningSampler(
+            board_size=5,
+            random_orientation=True,
+            rng=rng,
+        )
+        return sampler.sample_distinct_arena_suite(int(pair_count))
+
+    def _oracleSparringMetadata(self, episode):
+        board = np.asarray(episode['canonicalBoard'])
+        return {
+            'source': 'oracle_sparring',
+            'oracle_nodes': int(self._arg('oracleSparringNodes', 100_000)),
+            'oracle_ladder_version': int(
+                self._arg('oracleSparringLadderVersion', 1)
+            ),
+            'oracle_binary_sha256': self._oracleSparringBinaryDigest(),
+            'opening_pool': 'symmetry_distinct_completed_placements',
+            'opening_pool_version': 1,
+            'opening_seed': int(self._arg('oracleSparringOpeningSeed', 20260921)),
+            'opening_hash': episode['opening_hash'],
+            'pair_index': int(episode['pair_index']),
+            'neural_seat': int(episode['neural_seat']),
+            'stage': stage_for_builds(int(np.sum(board[1]))),
+        }
+
+    def _oracleSparringBinaryDigest(self):
+        digest = getattr(self, '_cached_oracle_sparring_digest', None)
+        if digest is not None:
+            return digest
+        binary = self._arg('oracleBinary', None)
+        digest = file_sha256(binary) if binary and os.path.isfile(binary) else 'injected'
+        self._cached_oracle_sparring_digest = digest
+        return digest
+
+    def _finishOracleSparringEpisode(self, episode, result):
+        player_one_result = int(episode['curPlayer'] * result)
+        self._completed_game_lengths.append(episode['episodeStep'])
+        self._completed_game_results.append(player_one_result)
+        self._oracle_sparring_stats['games'] += 1
+        if player_one_result == 0:
+            self._oracle_sparring_stats['draws'] += 1
+        elif player_one_result == episode['neural_seat']:
+            self._oracle_sparring_stats['neural_wins'] += 1
+        else:
+            self._oracle_sparring_stats['oracle_wins'] += 1
+
+        examples = [
+            (
+                item[0],
+                item[2],
+                result * ((-1) ** (item[1] != episode['curPlayer'])),
+                item[3],
+            )
+            for item in episode['trainExamples']
+        ]
+        self._oracle_sparring_stats['examples'] += len(examples)
+        return examples
+
+    def executeOracleSparringEpisodes(self, numEpisodes, iteration):
+        """Play paired completed-opening games against the calibrated oracle.
+
+        Only full-search neural decisions enter replay. Oracle decisions are
+        actions only, and their per-game TT is reset before the paired game is
+        launched. Each active game owns one persistent oracle process so TT
+        history can never leak between concurrently interleaved games.
+        """
+        numEpisodes = int(numEpisodes)
+        if numEpisodes == 0:
+            return []
+        if numEpisodes < 0 or numEpisodes % 2:
+            raise ValueError('Oracle sparring requires a non-negative even game count.')
+        if self._arg('symmetryAugmentation', 'expanded') != 'none':
+            raise ValueError('Oracle sparring currently requires symmetryAugmentation=none.')
+
+        worker_count = min(
+            numEpisodes,
+            max(1, int(self._arg('oracleSparringWorkers', 4))),
+        )
+        players = self._ensureOracleSparringPlayers(worker_count)
+        openings = self._oracleSparringOpeningSuite(numEpisodes // 2, iteration)
+        specifications = []
+        for pair_index, opening in enumerate(openings):
+            opening_hash = hashlib.sha256(
+                np.ascontiguousarray(opening).tobytes()
+            ).hexdigest()
+            for neural_seat in (1, -1):
+                specifications.append({
+                    'opening': np.array(opening, copy=True),
+                    'opening_hash': opening_hash,
+                    'pair_index': pair_index,
+                    'neural_seat': neural_seat,
+                })
+
+        completed_examples = []
+        active = []
+        free_slots = list(range(worker_count))
+        launched = 0
+        completed = 0
+        progress = tqdm(total=numEpisodes, desc='Oracle Sparring', disable=self._quiet())
+
+        def launch(slot, specification):
+            player = players[slot]
+            player.startGame()
+            self._recordCompletedOpening(specification['opening'])
+            return {
+                **specification,
+                'slot': slot,
+                'oracle_player': player,
+                'board': np.array(specification['opening'], copy=True),
+                'curPlayer': 1,
+                'episodeStep': 4,
+                'trainExamples': [],
+                # Sparring begins after placement, so do not draw or report a
+                # placement-scale exploration bucket for these games.
+                'mcts': MCTS(self.game, self.nnet, self.args),
+            }
+
+        def apply_action(episode, action):
+            episode['board'], episode['curPlayer'] = self.game.getNextState(
+                episode['board'], episode['curPlayer'], int(action)
+            )
+            return self.game.getGameEnded(episode['board'], episode['curPlayer'])
+
+        try:
+            while completed < numEpisodes:
+                while free_slots and launched < numEpisodes:
+                    slot = free_slots.pop(0)
+                    active.append(launch(slot, specifications[launched]))
+                    launched += 1
+
+                oracle_turns = [
+                    episode for episode in active
+                    if episode['curPlayer'] != episode['neural_seat']
+                ]
+                for episode in oracle_turns:
+                    episode['episodeStep'] += 1
+                    episode['canonicalBoard'] = self.game.getCanonicalForm(
+                        episode['board'], episode['curPlayer']
+                    )
+                if self._oracle_sparring_executor is not None and len(oracle_turns) > 1:
+                    actions = list(self._oracle_sparring_executor.map(
+                        lambda episode: episode['oracle_player'].play(
+                            episode['canonicalBoard']
+                        ),
+                        oracle_turns,
+                    ))
+                else:
+                    actions = [
+                        episode['oracle_player'].play(episode['canonicalBoard'])
+                        for episode in oracle_turns
+                    ]
+
+                finished_ids = set()
+                for episode, action in zip(oracle_turns, actions):
+                    result = apply_action(episode, action)
+                    if result != 0:
+                        completed_examples.extend(
+                            self._finishOracleSparringEpisode(episode, result)
+                        )
+                        finished_ids.add(id(episode))
+                        free_slots.append(episode['slot'])
+                        completed += 1
+                        progress.update(1)
+                active = [episode for episode in active if id(episode) not in finished_ids]
+
+                neural_turns = [
+                    episode for episode in active
+                    if episode['curPlayer'] == episode['neural_seat']
+                ]
+                for episode in neural_turns:
+                    episode['episodeStep'] += 1
+                    episode['canonicalBoard'] = self.game.getCanonicalForm(
+                        episode['board'], episode['curPlayer']
+                    )
+                    episode['temp'] = self._temperature(
+                        episode['canonicalBoard'], episode['episodeStep']
+                    )
+                    episode['fullSearch'], episode['searchSims'] = self._playoutCapSearch(
+                        episode['canonicalBoard']
+                    )
+                    if not episode['fullSearch']:
+                        episode['temp'] = 0
+                    episode['tactical'] = self._prepareTacticalRoot(
+                        episode['mcts'], episode['canonicalBoard']
+                    )
+                    if not (
+                        episode['tactical'] is not None
+                        and episode['tactical']['policy'] is not None
+                    ):
+                        self._prepareSearchRoot(
+                            episode['mcts'],
+                            episode['canonicalBoard'],
+                            episode['searchSims'],
+                        )
+                    self._recordTacticalRoot(episode['tactical'], episode['searchSims'])
+
+                if neural_turns:
+                    training_policies, action_policies = self._getBatchedSelfPlayPolicies(
+                        neural_turns
+                    )
+                    finished_ids = set()
+                    for episode, training_policy, action_policy in zip(
+                        neural_turns, training_policies, action_policies
+                    ):
+                        self._recordSearchSymmetryStats(episode['mcts'])
+                        if episode['fullSearch']:
+                            self._recordPolicyTarget(
+                                episode['canonicalBoard'], training_policy
+                            )
+                            episode['trainExamples'].append([
+                                episode['canonicalBoard'],
+                                episode['curPlayer'],
+                                training_policy,
+                                self._oracleSparringMetadata(episode),
+                            ])
+                        self._recordPlayoutCapSearch(
+                            episode['canonicalBoard'],
+                            episode['fullSearch'],
+                            (
+                                0
+                                if episode['tactical'] is not None
+                                and episode['tactical']['policy'] is not None
+                                else episode['searchSims']
+                            ),
+                        )
+                        action = np.random.choice(len(action_policy), p=action_policy)
+                        result = apply_action(episode, action)
+                        if result != 0:
+                            completed_examples.extend(
+                                self._finishOracleSparringEpisode(episode, result)
+                            )
+                            finished_ids.add(id(episode))
+                            free_slots.append(episode['slot'])
+                            completed += 1
+                            progress.update(1)
+                    active = [
+                        episode for episode in active if id(episode) not in finished_ids
+                    ]
+        finally:
+            progress.close()
+
+        return completed_examples
+
+    def _oracleSparringTelemetry(self):
+        stats = dict(getattr(self, '_oracle_sparring_stats', self._newOracleSparringStats()))
+        games = int(stats['games'])
+        total_examples = int(stats['examples'])
+        fresh_examples = int(stats.get('fresh_examples', 0))
+        return {
+            'oracle_sparring_probability': float(
+                self._arg('oracleSparringProbability', 0.0)
+            ),
+            'oracle_sparring_nodes': int(self._arg('oracleSparringNodes', 100_000)),
+            'oracle_sparring_workers': int(self._arg('oracleSparringWorkers', 4)),
+            'oracle_sparring_ladder_version': int(
+                self._arg('oracleSparringLadderVersion', 1)
+            ),
+            'oracle_sparring_games': games,
+            'oracle_sparring_neural_wins': int(stats['neural_wins']),
+            'oracle_sparring_oracle_wins': int(stats['oracle_wins']),
+            'oracle_sparring_draws': int(stats['draws']),
+            'oracle_sparring_neural_win_rate': (
+                float(stats['neural_wins'] / games) if games else None
+            ),
+            'oracle_sparring_examples': total_examples,
+            'oracle_sparring_fresh_replay_fraction': (
+                float(total_examples / fresh_examples) if fresh_examples else None
+            ),
+        }
+
     def learn(self):
         """
         Performs numIters iterations of self-play and training. Arena mode pits
@@ -789,18 +1143,29 @@ class Coach():
             self._playout_cap_stats = self._newPlayoutCapStats()
             self._tactical_stats = self._newTacticalStats()
             self._search_symmetry_stats = self._newSearchSymmetryStats()
+            self._oracle_sparring_stats = self._newOracleSparringStats()
             iterationTrainExamples = None
             # examples of the iteration
             if not self.skipFirstSelfPlay or local_iteration > 1:
                 iterationTrainExamples = deque([], maxlen=self.args.maxlenOfQueue)
 
                 with accumulate_wall_time(phase_timings, 'self_play'):
-                    if self._self_play_batch_size() > 1:
-                        iterationTrainExamples += self.executeEpisodesBatched(self.args.numEps)
-                    else:
-                        for _ in tqdm(range(self.args.numEps), desc="Self Play", disable=self._quiet()):
+                    sparring_games = self._oracleSparringGameCount(self.args.numEps)
+                    ordinary_games = int(self.args.numEps) - sparring_games
+                    if ordinary_games and self._self_play_batch_size() > 1:
+                        iterationTrainExamples += self.executeEpisodesBatched(ordinary_games)
+                    elif ordinary_games:
+                        for _ in tqdm(range(ordinary_games), desc="Self Play", disable=self._quiet()):
                             self.mcts = self._newSelfPlayMCTS()  # reset search tree
                             iterationTrainExamples += self.executeEpisode()
+                    if sparring_games:
+                        iterationTrainExamples += self.executeOracleSparringEpisodes(
+                            sparring_games,
+                            i,
+                        )
+                    self._oracle_sparring_stats['fresh_examples'] = len(
+                        iterationTrainExamples
+                    )
 
                 # save the iteration examples to the history 
                 self.trainExamplesHistory.append(iterationTrainExamples)
@@ -917,6 +1282,18 @@ class Coach():
                     'playout_cap_fast_sims': self._arg('playoutCapFastSims', None),
                     'playout_cap_full_placement': self._arg('playoutCapFullPlacement', True),
                     'tactical_shortcuts': self._arg('tacticalShortcuts', True),
+                    'oracle_sparring_probability': self._arg(
+                        'oracleSparringProbability', 0.0
+                    ),
+                    'oracle_sparring_nodes': self._arg(
+                        'oracleSparringNodes', 100_000
+                    ),
+                    'oracle_sparring_ladder_version': self._arg(
+                        'oracleSparringLadderVersion', 1
+                    ),
+                    'oracle_sparring_opening_seed': self._arg(
+                        'oracleSparringOpeningSeed', 20260921
+                    ),
                 }
                 with accumulate_wall_time(phase_timings, 'serialization'):
                     self.nnet.save_checkpoint(
@@ -1323,6 +1700,7 @@ class Coach():
         payload.update(self._playoutCapTelemetry())
         payload.update(self._tacticalTelemetry())
         payload.update(self._searchSymmetryTelemetry())
+        payload.update(self._oracleSparringTelemetry())
         symmetry_metrics = self._symmetryTelemetry()
         payload.update(symmetry_metrics)
         payload.update(self._v4SeamTelemetry(iteration))

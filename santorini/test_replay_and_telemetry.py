@@ -66,6 +66,45 @@ class TestReplayAndTelemetry(unittest.TestCase):
             np.testing.assert_allclose(actual[1], expected[1])
             self.assertEqual(actual[2], expected[2])
 
+    def test_compact_replay_preserves_source_metadata(self):
+        board = np.zeros((2, 5, 5), dtype=int)
+        policy = np.zeros(1625, dtype=np.float32)
+        policy[64] = 1.0
+        metadata = {
+            'source': 'oracle_sparring',
+            'oracle_nodes': 100000,
+            'oracle_ladder_version': 1,
+            'neural_seat': 1,
+            'stage': 'middle',
+        }
+        history = [deque([(board, policy, -1.0, metadata)])]
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, 'latest.examples.npz')
+            save_compact_replay(path, history)
+            loaded = load_compact_replay(path)
+
+        self.assertEqual(loaded[0][0][3], metadata)
+
+    def test_compact_replay_still_loads_v1_without_metadata(self):
+        board = np.zeros((1, 2, 5, 5), dtype=np.int8)
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, 'legacy.examples.npz')
+            np.savez_compressed(
+                path,
+                format_version=np.asarray([1], dtype=np.int16),
+                action_size=np.asarray([1625], dtype=np.int32),
+                history_lengths=np.asarray([1], dtype=np.int64),
+                boards=board,
+                values=np.asarray([1.0], dtype=np.float32),
+                policy_offsets=np.asarray([0, 1], dtype=np.int64),
+                policy_indices=np.asarray([64], dtype=np.uint16),
+                policy_values=np.asarray([1.0], dtype=np.float32),
+            )
+            loaded = load_compact_replay(path)
+
+        self.assertEqual(len(loaded[0][0]), 3)
+
     def test_trim_compact_replay_keeps_latest_windows_atomically(self):
         policy = np.zeros(1625, dtype=np.float32)
         policy[[64, 129]] = [0.25, 0.75]

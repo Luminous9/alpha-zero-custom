@@ -38,6 +38,8 @@ args = dotdict({
     'symmetry_consistency_policy_weight': 0.0,
     'symmetry_consistency_value_weight': 0.0,
     'freeze_batch_norm': False,
+    'v4_freeze_torchscript': True,
+    'v4_autocast_fp16': False,
     'quiet': False,
 })
 
@@ -540,7 +542,9 @@ class NNetWrapper(NeuralNet):
         batch_size = max(1, int(self.net_args.batch_size))
         for offset in range(0, len(examples), batch_size):
             batch = examples[offset:offset + batch_size]
-            boards, target_pis, target_vs = list(zip(*batch))
+            boards = [example[0] for example in batch]
+            target_pis = [example[1] for example in batch]
+            target_vs = [example[2] for example in batch]
             predicted_pis, predicted_vs = self.predict_batch(boards)
             for board, target_pi, target_v, predicted_pi, predicted_v in zip(
                 boards,
@@ -718,7 +722,9 @@ class NNetWrapper(NeuralNet):
         return transformed_boards, transformed_pis
 
     def _encode_training_examples(self, examples):
-        boards, pis, vs = list(zip(*examples))
+        boards = [example[0] for example in examples]
+        pis = [example[1] for example in examples]
+        vs = [example[2] for example in examples]
         return (
             self.encode_boards(boards),
             np.array(pis, dtype=np.float32),
@@ -892,4 +898,9 @@ def build_nnet(game, architecture='v2'):
         return NNetWrapper(game)
     if architecture == 'v3':
         return V3NNetWrapper(game)
+    if architecture == 'v4':
+        # Imported lazily to avoid a module cycle: V4 reuses the mature V3
+        # optimizer/telemetry training implementation from this module.
+        from .V4NNet import V4TrainableNNet
+        return V4TrainableNNet(game)
     raise ValueError("Unknown Santorini neural architecture: {}".format(architecture))

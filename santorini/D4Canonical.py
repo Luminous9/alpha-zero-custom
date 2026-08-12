@@ -153,6 +153,42 @@ def canonicalize_board_policy(game, board, policy):
     return canonical_board, canonical_policy, canonical_key
 
 
+def canonicalize_board_policies(game, boards, policies):
+    """Batch equivalent of :func:`canonicalize_board_policy`.
+
+    Every transform that reaches the anonymous minimal representative
+    contributes to the policy.  Averaging those copies is important at
+    symmetric roots: choosing only the first transform would teach an arbitrary
+    directional preference that exact canonical inference cannot reproduce.
+    """
+    boards = np.asarray(boards)
+    policies = np.asarray(policies)
+    if policies.ndim != 2 or len(policies) != len(boards):
+        raise ValueError("Boards and policies must be matching batches.")
+    if policies.shape[1] != game.getActionSize():
+        raise ValueError("Policies have the wrong action size.")
+    canonical, matching_masks, keys = canonicalize_boards(boards)
+    counts = matching_masks.sum(axis=1)
+    if np.any(counts == 0):
+        raise ValueError("Every board requires a canonical transform.")
+
+    transformed = np.zeros_like(policies)
+    for transform_index, (rotations, flip) in enumerate(D4_TRANSFORMS):
+        rows = np.flatnonzero(matching_masks[:, transform_index])
+        if not len(rows):
+            continue
+        old_indices, new_indices = game.getPolicySymmetryPermutation(
+            rotations, flip
+        )
+        transformed[
+            rows[:, None], np.asarray(new_indices)[None, :]
+        ] += policies[
+            rows[:, None], np.asarray(old_indices)[None, :]
+        ]
+    transformed /= counts[:, None]
+    return canonical, transformed, keys
+
+
 def restore_canonical_policy(game, canonical_policy, matching_transforms):
     """Project a canonical-frame policy and map it to the original frame."""
     canonical_policy = np.asarray(canonical_policy)

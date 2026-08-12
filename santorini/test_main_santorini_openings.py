@@ -126,6 +126,38 @@ class TestMainSantoriniOpenings(unittest.TestCase):
         self.assertEqual(coach_args.replayReuse, 16.0)
         self.assertEqual(coach_args.validationFraction, 0.05)
 
+    def test_v4_defaults_to_latest_without_augmentation_or_root_ensembling(self):
+        with patch('sys.argv', ['main_santorini.py', '--architecture', 'v4']):
+            parsed = parse_args()
+
+        coach_args = build_coach_args(parsed)
+        self.assertEqual(coach_args.trainingMode, 'latest')
+        self.assertEqual(coach_args.symmetryAugmentation, 'none')
+        self.assertEqual(coach_args.replayReuse, 16.0)
+        self.assertEqual(coach_args.validationFraction, 0.05)
+        self.assertTrue(coach_args.inferenceDeduplication)
+        self.assertEqual(coach_args.inferenceCacheSize, 4096)
+        self.assertFalse(coach_args.searchSymmetryEvaluation)
+        self.assertEqual(coach_args.rootSymmetrySamples, 1)
+        self.assertEqual(coach_args.placementRootSymmetrySamples, 1)
+
+    def test_v4_oracle_sparring_contract_reaches_coach(self):
+        with patch('sys.argv', [
+            'main_santorini.py',
+            '--architecture', 'v4',
+            '--oracle-sparring-probability', '0.10',
+            '--oracle-sparring-nodes', '100000',
+            '--oracle-sparring-workers', '4',
+            '--oracle-binary', '/tmp/test-oracle',
+        ]):
+            coach_args = build_coach_args(parse_args())
+
+        self.assertEqual(coach_args.oracleSparringProbability, 0.10)
+        self.assertEqual(coach_args.oracleSparringNodes, 100000)
+        self.assertEqual(coach_args.oracleSparringWorkers, 4)
+        self.assertEqual(coach_args.oracleSparringLadderVersion, 1)
+        self.assertEqual(coach_args.oracleBinary, '/tmp/test-oracle')
+
     def test_v2_retains_legacy_epoch_schedule_without_validation(self):
         with patch('sys.argv', ['main_santorini.py', '--architecture', 'v2']):
             parsed = parse_args()

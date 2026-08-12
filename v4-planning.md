@@ -43,12 +43,19 @@ blend by +0.01031 on the common handoff objective, with a paired 95% interval of
 fixed arenas split 24-16 for global blend in standard play and 16-24 in full
 games, producing an exact 40-40 combined score (95% 42.5-57.5%). Retain global
 blend with `alpha_boot=0.5` and `T=261.8`; the main head switches explicitly to
-pure self-play `z` at handoff. P1b.2 is complete and P1c is in progress with the
-full-corpus contract frozen. Placement now uses santorini-ai's joint search for
-policy, factored exactly into sequential decisions, with Run13 continuations
-supplying completed outcomes and the comparison policy. Both teachers, all
-three matched policy components, and the 10,640,649-draw epoch plan are
-complete; four-epoch P100 pretraining is next. Final test data and final arena
+pure self-play `z` at handoff. P1c and G1 are complete, and the P2 entry
+implementation is now locally green. The selected P1c checkpoint migrates to a
+trainable V4 checkpoint with bit-identical policy/value inference; complete
+deterministic transformed searches pass on asymmetric, symmetric, and tactical
+roots. Compact replay now preserves per-record source metadata while remaining
+backward-compatible. The 100k ladder-v1 sparring stream uses paired
+symmetry-distinct completed openings, swapped neural seats, reset/isolated
+per-game oracle processes, native full-search neural policies only, and actual
+mixed-game outcomes. A real two-game/one-optimizer-step local smoke passed with
+all 22 replay records carrying the expected source, rung, engine, opening,
+seat, and stage provenance. The representative 240-game P100 FP32 ordinary and
+10%-sparring smoke arms are packaged and are the next measurement. Disagreement
+starts and the auxiliary head remain disabled. Final test data and final arena
 seeds remain untouched. See
 `experiments/santorini_v4/P1B_SUPERVISED_SCREEN.md` and
 `experiments/santorini_v4/P1B_SCALED_SCREEN.md`, followed by
@@ -63,9 +70,10 @@ trained with the AlphaZero loop using the oracle as a value labeler and
 distribution shaper from iteration 1. Exact search-facing D4 behavior is
 required. It may be supplied by the equivariant architecture or by
 stabilizer-safe canonical inference around an ordinary winner; augmentation or
-sampled root averaging alone is insufficient. Run13 is retired to benchmark
-anchor, placement outcome teacher, and placement-policy control; it is not the
-starting checkpoint.
+sampled root averaging alone is insufficient. G1 establishes that Run13 is
+clearly behind V4, so it is retired to an optional, manually invoked fixed
+anchor plus its historical placement-teacher/control roles; it is neither the
+starting checkpoint nor a P2 gate opponent.
 
 ## 1. Why a fresh network instead of continuing Run 13
 
@@ -73,24 +81,33 @@ The Run13 oracle experiments (RESULTS.md) established that offline policy imitat
 
 A corrected Run13 continuation plan exists (distribution shaping via sparring and seeded starts, plus an auxiliary oracle-value head). It is sound but no longer the best use of constrained GPU, for three reasons:
 
-1. **The search-facing risky lever was deferred anyway.** Blending oracle values into the search-facing value head during AlphaZero training was already scoped to a _later_ run, informed by auxiliary-head calibration. Sparring and seeded starts are lower-risk, independently configurable distribution-shaping components that can be introduced in the fresh run from day 1. The auxiliary head still shares the trunk and is therefore not risk-free; it receives its own ablation and weight schedule.
+1. **The search-facing risky lever was deferred anyway.** Blending oracle values into the search-facing value head during AlphaZero training was already scoped to a _later_ run, informed by auxiliary-head calibration. Calibrated sparring is the lower-risk distribution-shaping component enabled from P2's first block. V4 disagreement starts follow their loader/pool gate, and the auxiliary head follows checkpoint/replay migration plus label-semantic validation. Each remains independently configurable and receives its own ablation.
 2. **Detection power.** Continuation experiments produce small effects that 40-160-game arenas cannot resolve (the most interesting Run13 result was p=0.09). Bootstrap pretraining is cheaper to inspect because corpus generation is CPU-only and supervised pretraining has no MCTS in the loop. Staged corpus pilots and paired arenas can reject a broken transfer pipeline before committing a full self-play run.
 3. **The architecture hypothesis.** V3 is ~1.35M parameters with a minimal 6-plane encoding, playing against an opponent (santorini-ai NNUE + alpha-beta) that Run13 beats ~10% of the time at only 20k nodes. It is not yet proven that parameter capacity, rather than data/search/optimization, is the active ceiling. V4 tests richer features and increased useful capacity per inference cost; exact D4 equivariance is one candidate inductive bias, not the definition of the upgrade. The ordinary-CNN controls and supervised sizing bake-off in §3.2 prevent either capacity or equivariance from being assumed effective.
 
 Condition retained from that analysis: a fresh start is only justified _because_ it is paired with the architecture upgrade. Restarting the same network would re-buy Run13 at full price.
 
-What Run13 remains for: benchmark/anchor opponent, placement continuation
-outcomes and policy control (§5.3), and the source of the position distribution
-used in calibration (§4.2).
+What Run13 remains for: an optional fixed anchor that can be run manually when
+an absolute historical comparison is useful, placement continuation outcomes
+and policy control (§5.3), and the source of the position distribution used in
+calibration (§4.2). It is disabled in routine P2 telemetry and cannot accept,
+reject, roll back, or promote a P2 checkpoint.
 
 ## 2. Goals and non-goals
 
 Goals:
 
-- Clearly exceed Run13 in direct paired arenas at 96/128 sims, without the deep-budget (1024-sim) regression pattern.
+- Preserve the already-established G1 advantage over Run13; use milestone
+  self-matches and oracle/deep-search reviews, rather than repeated Run13 gates,
+  to measure further P2 progress.
 - Materially close the gap against the santorini-ai oracle at 20k nodes.
 - D4 neural policy/value symmetry by construction up to documented floating-point tolerance. An equivariant winner supplies it architecturally. An ordinary winner uses deterministic D4-canonical inference at every neural evaluation, projects its policy over the canonical representative's stabilizer, and maps it back; augmentation remains a training aid, while root orientation averaging is disabled as redundant. Finite MCTS is audited separately: action-index tie breaking and uncoupled stochastic root noise can break whole-search equivariance even with an exact network, so stabilizer projection/coupled-noise handling gates the final self-play integration.
-- Oracle in the loop from iteration 1 in its two trustworthy roles: scalar value labeler (auxiliary head first) and distribution shaper (sparring, seeded starts). After the explicitly declared bootstrap exception in §5.2, policy targets remain 100% native search targets produced by V4's configured MCTS/Gumbel search.
+- Oracle in the loop from iteration 1 as a calibrated sparring opponent. The
+  auxiliary scalar labeler and disagreement-seeded starts join only after their
+  independent §6 integration gates; they are not allowed to delay or alter the
+  ordinary-self-play control. After the explicitly declared bootstrap exception
+  in §5.2, policy targets remain 100% native targets produced by V4's configured
+  MCTS/Gumbel search.
 
 Non-goals:
 
@@ -338,35 +355,126 @@ Report equal-simulation results and an approximately equal wall-clock/neural-eva
 
 ## 6. Phase 2 - self-play loop with the oracle in-loop from day 1
 
-Base config inherits Run13 (latest mode, Gumbel search, playout-cap randomization, 20-iteration replay window, AdamW schedule) with these changes.
+P2 starts from the selected P1c handoff checkpoint (SHA-256
+`374f0b72adbdf009d19abaed87addbdfe89364ecc1e6a7246b423233be51b42e`)
+after the green G1 transfer gate. The base loop inherits Run13's Gumbel search,
+playout-cap randomization, 20-iteration replay window, fresh-data-reuse AdamW
+schedule, tactical shortcuts, inference deduplication, and bounded MCTS
+inference cache. Run13 itself is not a gate opponent: milestone self-matches are
+the primary progress signal and Run13 remains only an optional fixed anchor.
+
+The oracle is present from the first P2 block through calibrated sparring. The
+disagreement-start and auxiliary-label components remain independently gated so
+their integration or ablation cannot delay ordinary self-play or contaminate the
+control branch.
 
 ### 6.1 Search and throughput
 
-- No root orientation averaging, no symmetry refresh, no consistency loss (§3.1).
-- Before self-play, transformed-root tests cover ordinary/equivariant neural outputs and complete deterministic searches. The returned root policy is projected over non-trivial stabilizers, and stochastic root noise is generated in canonical action coordinates, so finite search does not reintroduce orientation dependence after the network removes it.
-- Exported-model FP16 inference for self-play. P100 peak FP16 arithmetic is 2x FP32, but no end-to-end speedup is assumed until measured; if Kaggle offers T4x2, benchmark it before building process-level parallelism.
-- Self-play batch raised until the §4.3 benchmark identifies the end-to-end throughput knee.
-- Candidate reduction of full sims to 48-64: test whether Gumbel target quality and playing strength hold at the smaller budget given the stronger bootstrap; adopt the reduction only if the benchmark supports it.
+- Freeze the initial P2 search contract at 96 full simulations, 32 fast
+  simulations, 25% standard full-search probability, and full search on all
+  placement turns. Keep Gumbel scale 1.0 in standard self-play, placement scale
+  1.5 for 90% of games and 2.25 for 10%, policy-target temperature 1, tactical
+  shortcuts, inference deduplication, and the 4,096-entry per-move inference
+  cache. A later 64-versus-96 full-cap bake-off is explicitly deferred; 96 is a
+  validated starting point, not a claim of optimality. Recalibrate the oracle
+  sparring rung if the live full-search budget changes.
+- Use one neural orientation per leaf: no root orientation averaging, symmetry
+  refresh, training augmentation, or consistency loss. The exact batched
+  canonical wrapper and stabilizer projection are already verified for neural
+  policy/value inference.
+- Do not overstate that inference result as a complete-search result. Before the
+  first live P2 job, add a transformed-root preflight covering a complete
+  deterministic Gumbel-scale-zero search, including symmetric roots and tactical
+  shortcuts. Deterministic analysis and promotion searches must transform their
+  returned policies and, for asymmetric roots, selected actions correctly. On a
+  symmetric root where no single action is fixed by the stabilizer, tied choices
+  are compared by stabilizer orbit rather than demanding an impossible unique
+  equivariant action. Stochastic self-play Gumbels need an
+  equivariant distribution, not identical actions under a reused scalar seed;
+  if pathwise same-seed equivariance is later required, generate the random
+  vector in the D4-canonical root action frame and map it back.
+- Use exported TorchScript **FP32** inference on P100 initially. The optimized
+  canonical 6x192 wrapper measured 3,285 examples/s at batch eight in FP32
+  versus 2,713 with autocast FP16 (FP16 was 17% slower). At batches 32 and 64,
+  FP16 was respectively flat (+0.1%) and only 2.5% faster, despite essentially
+  exact prediction agreement. The measured Run13 self-play workload averaged
+  about 47 executed evaluations per inference batch, so neither peak P100 FP16
+  FLOPS nor the batch-eight result alone predicts end-to-end P2 throughput.
+- Begin with the inherited 128 concurrent self-play games, record the actual V4
+  inference-batch distribution, games/hour, fresh positions/hour, cache reuse,
+  GPU utilization, and complete wall-clock split, then test adjacent concurrency
+  values around the observed knee. The end-to-end smoke is authoritative; the
+  frozen-wrapper microbenchmark is only a diagnostic.
+- Treat T4x2 as an optional throughput experiment, not a P2 dependency. First
+  measure one T4 at FP32 and autocast FP16 on the observed V4 batch distribution
+  and run the same end-to-end smoke contract as P100. A second T4 provides no
+  automatic speedup to the current single-device loop; prototype one independent
+  self-play worker per GPU, deterministic example merging, and resumable worker
+  RNG only if the single-T4 result is promising. Adopt dual T4 only on a measured
+  material games/hour gain after merge and training overhead, with unchanged
+  search/replay semantics.
 
 ### 6.2 Distribution shaping
 
-- **Sparring (~10% of games):** initially start from completed placements; the
-  pretraining joint-to-sequential adapter is validated separately before it is
-  allowed into live mixed-engine games. Play `SantoriniOraclePlayer` at a node
-  budget laddered to keep the net's win rate ~35-50%, with paired seats/openings.
-  Store only the net's own decisions: native MCTS policy + real game outcome.
-  Raise the ladder when the net clears the current rung. Never spar at a budget
-  that produces ~90% losses, where value labels collapse toward -1.
-- **Disagreement-seeded starts (~10% of games):** mine high-margin, score-stable disagreements with the existing adversarial tooling and use them as starting positions only (no teacher labels). Seed pools are stage/value stratified, D4-deduplicated, versioned by source checkpoint, and replay-capped. Run13 disagreements may initialize the pool, but refresh it periodically from the current V4 checkpoint so training follows V4's blind spots rather than Run13's stale ones.
-- Both components have independent configuration switches and telemetry. Run preplanned short matched branches with and without distribution shaping at an early checkpoint, rather than waiting for an ambiguous main-run trajectory to make the control decision.
+- **Sparring (~10% of games):** use `SantoriniOraclePlayer` at frozen ladder
+  version 1, **100k nodes per move**, from symmetry-distinct completed
+  placements. Reset the oracle at every game boundary. Store only the network's
+  own full-search decisions, its native MCTS policy, and the real mixed-game
+  outcome; never store oracle decisions as network policy targets. Record rung,
+  engine digest, opening-pool version, seat, stage, and source on every game and
+  replay record. The joint-to-sequential placement adapter remains outside live
+  mixed-engine games until separately validated there.
+- **P2-start calibration evidence:** the complete local FP32 sweep scored 85.0%,
+  65.0%, 55.0%, 42.5%, 42.5%, and 22.5% at 5k through 250k respectively.
+  The frozen midpoint/upward-tie rule selects **100k nodes per move**. The 50k
+  and 100k aggregate scores match but eight pair outcomes differ; 250k is too
+  punishing. Freeze 100k as sparring ladder version 1. If the live neural search
+  simulation budget changes from 96, recalibrate rather than carrying this rung
+  forward. The separate 250k diagnostic improved V4 from 22.5% at 96 simulations
+  to 45.0% at 1,024, showing useful search elasticity rather than a deep-search
+  collapse; 1,024 remains an evaluation diagnostic, not a self-play budget.
+  Full records are in
+  `experiments/santorini_v4/P2_ORACLE_SWEEP.md`.
+- **Disagreement-seeded starts (target ~10% after activation):** adapt the existing
+  Run13-specific adversarial miner to the canonical V4 checkpoint and use
+  high-margin, score-stable disagreements only as starting positions--never as
+  teacher policy/value labels. The initial pool is mined from the exact P1c
+  handoff, not inherited from Run13. Pools are stage/value stratified,
+  D4-deduplicated, versioned by source checkpoint and oracle settings,
+  age-limited, and replay-capped. Do not enable this arm until the V4 loader,
+  source metadata, start-state legality, and deterministic refresh tests pass.
+- Sparring and seeded starts have independent switches and telemetry. Preserve a
+  short ordinary-self-play control and run predeclared matched on/off branches at
+  an early checkpoint rather than interpreting an uncontrolled main trajectory.
 
 ### 6.3 Value labeling (auxiliary head only, this run)
 
-- Label a subsample (25-50%) of stored post-placement positions via the §4.1
-  cache at the §4.4 budget.
-- Start the auxiliary loss weight at ~0.05-0.10. Ramp toward 0.2-0.3 only if main policy/value validation and strength telemetry remain healthy. Run a short matched auxiliary-off ablation because shared-trunk gradients can affect search even though the auxiliary output is not consumed by MCTS.
+- The selected ordinary 6x192 checkpoint does not yet contain the auxiliary
+  oracle-value head; only the equivariant prototype does. Before enabling this
+  arm, add the parallel invariant head to the selected ordinary model and a
+  versioned P1c checkpoint migration. Loading the migrated checkpoint must leave
+  the main policy/value outputs bitwise or tightly numerically unchanged, while
+  initializing only the new head. Self-play inference/export continues to return
+  only the main policy and value.
+- Extend the compact replay schema before collecting labels. Keep z,
+  `v_oracle`, node budget, raw score, mate-band flag, engine/calibration version,
+  source type, stage, and an oracle-valid mask as separate fields. Old replay
+  remains loadable with the mask false. Blending or auxiliary weighting is a
+  training-time choice and must never require regenerating replay.
+- Do not silently treat the §4.4 stability ladder as a calibrated value ladder.
+  P0b calibrated 20k/50k scores, while the stable middle/early operating points
+  are 100k/250k and were not separately calibrated; early 250k also passed only
+  by comparison with itself. The first safe online arm may label a 25% subsample
+  of stored **late** positions at the calibrated/stable 20k setting. Middle and
+  early labels remain masked or telemetry-only until their chosen budgets receive
+  held-out calibration/adjudication. Any broader 25-50% plan is deferred until
+  that semantic gap and labeler throughput are measured.
+- Start the auxiliary loss weight at 0.05. Increase toward 0.10 only if the main
+  policy/value validation, seam sentinel, and strength telemetry remain healthy;
+  0.2-0.3 is no longer a default ramp target. Run a short matched auxiliary-off
+  ablation because shared-trunk gradients can affect search even though the
+  auxiliary output is not consumed by MCTS.
 - After the supervised-bootstrap handoff, the main value head trains on self-play z only (`lambda_blend = 0`) for this run. If the blended bootstrap won §5.2, record the resulting target-semantics transition explicitly.
-- **Storage:** keep z, v_oracle, node budget, engine/calibration version, source type, and an oracle-valid mask as separate replay fields. Blending is a training-time knob; changing lambda must never require regenerating data.
 - Telemetry: auxiliary prediction versus oracle label, oracle label/main-head/z versus the deeper adjudication suite, main-loss changes with auxiliary gradients, sparring win rate by ladder rung, and seeded-start replay fraction/source age. Auxiliary agreement alone measures learnability, not oracle truth.
 
 ### 6.4 Frozen canonical-seam sentinel
@@ -407,31 +515,55 @@ Folding oracle value into the search-facing target,
 ## 7. Evaluation and promotion
 
 - Rules cross-validation (`validate_santorini_oracle.py`) must pass before any cross-engine result is trusted (existing policy, unchanged).
-- Primary strength: paired arenas versus Run13 and versus the oracle at 96 and 128 simulations. Report equal-simulation results and approximately equal wall-clock/neural-evaluation results where architectures differ materially in inference cost.
+- **Primary longitudinal progress signal:** milestone self-matches, current P2
+  checkpoint versus the checkpoint one milestone interval earlier. Keep the
+  standard-play and placement-inclusive results separate. Each uses 20 fixed
+  paired blocks (40 games), with the standard openings, placement seeds,
+  evaluation search settings, and milestone interval frozen before the run.
+  Report paired score/interval, 2-0/1-1/0-2 block counts, and early/middle/late
+  standard strata. These moving-baseline matches estimate local progress; they
+  are not an absolute rating and do not automatically roll back an update.
+- Run13 is an optional manual fixed anchor only. Leave it disabled in the normal
+  P2 job; invoking it does not constitute a gate or override milestone evidence.
+- Scheduled review strength uses paired arenas versus the calibrated oracle at
+  96 and 128 simulations. Report equal-simulation and approximately equal
+  wall-clock/neural-evaluation results where costs differ materially.
 - Stress test: 1024 sims - retained specifically because it caught the distillation collapse. A V4 candidate that wins at 128 and collapses at 1024 is rejected.
 - Statistics: predeclare the effect and stop/accept regions. Use sequential testing over independent paired-opening blocks or fixed arenas sized for the effect sought. Report paired/block-bootstrap intervals (and ordinary Wilson intervals only as secondary per-game summaries), because the two seat assignments of one opening are correlated. The Run13 experiments showed that unplanned 40-160-game arenas cannot resolve the effects that matter.
 
-## 8. Compute plan
+## 8. Measured compute baseline and accelerator policy
 
-The throughput benchmark itself is a Phase 0 deliverable (§4.3). This section records the reasoning and working expectations it will replace with measurements.
+The representative Run13 P100 loop takes 348.45 seconds per amortized
+iteration; self-play accounts for 322.97 seconds (92.69%). The selected V4
+wrapper benchmark establishes precision and canonicalization costs but is not a
+substitute for a complete V4 iteration: at batch eight, optimized canonical
+FP32 reaches 3,285 examples/s and carries a 24% latency premium over the matched
+uncanonicalized wrapper. FP16 autocast is slower at batch eight and only ties or
+slightly wins at batches 32-64. P100 production therefore starts in FP32.
 
-Working hypothesis: a wider net may be cheaper than FLOP counts suggest because self-play uses small batches of 5x5 inputs and can be CPU/launch-bound between GPU calls. Existing GPU traces suggest this, but the newly instrumented §4.3 wall-clock split is the authority. Extra per-eval compute may fill idle capacity or may simply add latency; the plan assumes neither outcome.
+The first P2 smoke records the actual batch distribution and complete wall-clock
+split with the 6x192 canonical wrapper, 96/32 playout-cap contract, sparring,
+and seam telemetry enabled as applicable. Concurrency, FP16, T4x2, or a lower
+simulation cap receive compute credit only from matched end-to-end measurements.
+Mixed-precision training remains optional and separate from inference precision.
 
-FP16 usage: exported self-play inference wrapped in `torch.autocast('cuda', dtype=torch.float16)`. P100 peak FP16 arithmetic is ~2x FP32, but tiny-convolution end-to-end speedup and strength neutrality are measured rather than inferred. Mixed-precision _training_ (autocast + `GradScaler`) is optional and low-priority. Dual-T4 is not a prerequisite: build process-parallel self-play (one worker per GPU, merged examples, single-GPU training) only if §4.3 shows T4x2+FP16 beating P100+FP16 by enough to repay implementation complexity.
-
-Working expectation to be replaced by measurement: candidate B is ~2.2x V3 dense-convolution FLOPs. Removing root orientation averaging saves only the extra root evaluations, not the single-orientation interior simulations, so it is not counted as a 2-8x whole-loop speedup. FP16, exported inference, batching, and any simulation reduction are credited only after end-to-end smoke iterations. Bootstrap still has the separate compute benefit of skipping the weakest random-initialization region if Gate G1 passes.
+Dual T4 requires explicit process-level parallelism because the two devices do
+not accelerate the existing single-device worker automatically. The evaluation
+order is: one-T4 FP32/FP16 wrapper benchmark at observed batches, one-T4
+end-to-end smoke, then a minimal one-self-play-worker-per-GPU prototype only if
+those measurements justify it. P100 remains the reference path and P2 is not
+blocked on dual-GPU support.
 
 ## 9. Risks and fallbacks
 
 | Risk                                     | Signal                                                                    | Response                                                                                                                                 |
 | ---------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Corpus is invalid                         | action/FEN round trips fail, cross-game score drift, wrong god distribution | Stop before bulk generation; fix versioned Mortal-only schema, reset policy, and conversion tests                                       |
-| Bootstrap transfers poorly               | G1 < 20% vs Run13                                                         | Debug encoding/calibration/action mapping and standard/full-game split; mix more Run13-distribution positions; fallback = Run13 continuation |
-| G-CNN implementation stalls              | equivariance/export tests unstable, BN issues                             | pinned escnn ↔ hand-rolled swap; compare the first-class ordinary + stabilizer-safe canonical-inference candidate                        |
-| Kaggle throughput worse than expected    | benchmark >1.5x per-iteration cost                                        | Drop to candidate A/C width, cut full sims (Gumbel), reduce sparring fraction                                                            |
-| Oracle labeling too expensive            | labeler falls behind self-play                                            | Lower subsample rate; rely on cache hits; per-phase budgets from §4.4                                                                    |
-| Placement regression                     | full-game gate/milestones decline while standard gate improves            | Increase phase-balanced Run13 placement corpus/weight and diagnose each sequential placement; seeded standard starts cannot repair placement |
-| Bootstrap target transition hurts        | winner-only matches blend or blended handoff regresses                    | Prefer winner-only; otherwise reduce `alpha_boot` or add a short winner-only transition before self-play                                 |
+| P2 migration changes the handoff player  | migrated P1c main outputs or 96-sim frozen-suite behavior differ          | Stop before self-play; fix the V4 trainable wrapper/checkpoint adapter and initialize only genuinely new state                           |
+| Complete-search D4 mismatch              | transformed deterministic roots return non-transformed policies or non-orbit-equivalent tied actions | Fix search-frame/tie handling before live replay; do not hide it with root averaging                                                      |
+| Kaggle throughput worse than expected    | measured V4 games/hour makes the iteration materially slower than budgeted | Tune concurrency/cache/precision from end-to-end data; benchmark T4x2; revisit 64 sims only through the declared bake-off                 |
+| Oracle labeling too expensive or ambiguous | labeler falls behind self-play, or stage/budget calibration is missing    | Leave the auxiliary arm disabled or late-only; lower its subsample rate; never fill invalid labels with an unvalidated mapping            |
+| Placement regression                     | placement-inclusive milestones decline while standard milestones improve | Diagnose each sequential placement and the sparring/seeded-start mix; use the optional Run13 placement control only as a targeted diagnostic |
+| Bootstrap-to-z transition hurts          | ordinary-self-play control regresses immediately while migration checks pass | Pause shaping arms and isolate optimization/replay effects in a matched branch; do not reintroduce oracle blend into the main head ad hoc |
 | Auxiliary gradients hurt main heads      | auxiliary-on validation/arena branch regresses                            | Keep auxiliary weight low or disable it; stored labels and telemetry remain useful                                                       |
 | Value-semantics mismatch shows up later  | future main-head blend regresses at deep search                           | `lambda` stays 0; auxiliary head retained only if its shared-trunk ablation is healthy                                                    |
 | Canonical seam emerges during self-play | frozen Q4-minus-Q1 excess-loss contrast rises by >0.02 or its interval clears zero | Keep the frozen suite unchanged; inspect exposure-stratified policy/value losses and run a targeted frame-switch/search diagnostic before promotion |
@@ -445,5 +577,5 @@ Working expectation to be replaced by measurement: candidate B is ~2.2x V3 dense
 5. **P1b.2 - scaled architecture and target selection (complete):** the matched 100k/300k/1M curves select canonical ordinary 6x192 by supervised fit plus the frozen ordinary-family speed tie-break. Exact batched D4 inference reaches 3,285 examples/s at arena-relevant batch eight on P100, with a 24% latency premium over the identical uncanonicalized wrapper. Equivariant E retains a small early-stage advantage but loses the supervised/arena selection overall. The required 1M target ablation rejects winner-only noninferiority: its common handoff objective is +0.01031 worse, with a paired interval of +0.00169 to +0.01868, while the standard/full arenas cancel 40-40. Retain global blend (`alpha_boot=0.5`, `T=261.8`) and explicitly switch the main target to pure self-play `z` at handoff. Final data and arena seeds remain untouched.
 6. **P1c - full corpus and pretraining (complete):** the selected canonical ordinary 6x192/global-blend model completed four epochs over the 10,640,649-draw frozen epoch with the pure T25 oracle placement policy. All input hashes match and no final data were touched. Epoch four wins the standard-only combined objective at 0.73775, improving 9.09% over the selected 1M-screen checkpoint; policy top-1 rises from 38.53% to 43.97%. The final epoch adds only 0.95% objective improvement and held-out value bottoms at epoch three, while the Run13-replay subgroup does not improve. Therefore do not authorize 20M datagen before the transfer gate. Placement fit is healthy (99.9963% legal mass and only 0.00889 policy CE above target entropy), but shared roots make this a pipeline check rather than generalization evidence. Proceed to G1 with checkpoint SHA-256 `374f0b72adbdf009d19abaed87addbdfe89364ecc1e6a7246b423233be51b42e`.
 7. **Gate G1 (complete; green after diagnostic):** P1c beats Run13 28-12/30-10 on standard selection openings and 40-0/39-1 from sampled empty-board starts at equal 96/128 simulations. Equal-cost P1c-128 versus Run13-120 scores 31-9 standard and 40-0 full. The symmetric phase-gap rule correctly paused on the unexpectedly positive +30/+22.5-point full-game gaps. A separate 40-game-per-arm, selection-only decomposition resolves the stop: with shared P1c continuation, P1c placements score 50%/52.5%; with shared Run13, 45%/37.5%; replaying a balanced sample of those exact openings with normal contestants scores 97.5%/87.5%; greedy full placement at 128 remains 40-0. Controller substitution leaves placement boards identical. Thus the gap is natural-opening standard-play distribution/style compatibility, not mapping, seating, or sampling failure. Proceed to P2 while retaining placement-only telemetry. Final data remain untouched.
-8. **P2 - self-play:** sparring + refreshed seeded starts + low-weight auxiliary head, each independently switchable; replay/telemetry schema extended. Evaluate the frozen 3k seam suite after every iteration and track its P1c-relative Q4-minus-Q1 excess-loss contrast before playing-strength effects are allowed to hide the regression.
+8. **P2 - self-play (entry; local gates complete, P100 smoke next):** the exact P1c/V4 handoff sweep selects the 100k-node oracle sparring rung at a 42.5% V4 score. The trainable canonical 6x192 wrapper, checkpoint migration, transformed-search preflight, replay/source metadata, paired reset-per-game sparring loop, frozen seam telemetry, and real local mixed-game optimizer smoke now pass. Run the packaged 240-game P100 FP32 ordinary and 10%-sparring arms, compare end-to-end throughput/telemetry, then start the first P2 block if clean. Disagreement starts and the low-weight auxiliary head remain separately gated as specified in §6.2-6.3. Milestone self-matches are the primary longitudinal progress signal; Run13 is a manual fixed anchor only.
 9. **Review:** after ~20-30 iterations, run the 96/128/1024 battery and component ablations; decide whether to study a nonzero search-facing `lambda` in a following run.

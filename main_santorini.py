@@ -97,7 +97,7 @@ def parse_lr_schedule(value):
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a Santorini AlphaZero model.')
     parser.add_argument('--preset', choices=sorted(PRESETS.keys()), default='full')
-    parser.add_argument('--architecture', choices=['v2', 'v3'], default='v2')
+    parser.add_argument('--architecture', choices=['v2', 'v3', 'v4'], default='v2')
     parser.add_argument('--training-mode', choices=['arena', 'latest'])
     parser.add_argument('--num-iters', type=int)
     parser.add_argument('--num-eps', type=int)
@@ -234,10 +234,11 @@ def parse_args():
     )
     parser.add_argument(
         '--symmetry-augmentation',
-        choices=['expanded', 'on-the-fly'],
+        choices=['expanded', 'on-the-fly', 'none'],
         help=(
-            'Store all eight symmetries during self-play, or store one position and '
-            'sample a random symmetry for every training draw. V3 defaults to on-the-fly.'
+            'Store all eight symmetries, sample one per training draw, or store '
+            'one position with no augmentation. V3 defaults to on-the-fly; V4 '
+            'defaults to none because its trainable wrapper canonicalizes exactly.'
         ),
     )
     parser.add_argument(
@@ -298,6 +299,17 @@ def parse_args():
     )
     parser.add_argument('--self-play-batch-size', type=int, default=1)
     parser.add_argument('--arena-batch-size', type=int)
+    parser.add_argument(
+        '--oracle-sparring-probability',
+        type=float,
+        default=0.0,
+        help='Fraction of P2 games replaced by paired completed-opening oracle sparring.',
+    )
+    parser.add_argument('--oracle-sparring-nodes', type=int, default=100000)
+    parser.add_argument('--oracle-sparring-workers', type=int, default=4)
+    parser.add_argument('--oracle-sparring-opening-seed', type=int, default=20260921)
+    parser.add_argument('--oracle-sparring-ladder-version', type=int, default=1)
+    parser.add_argument('--oracle-binary', type=str)
     parser.add_argument(
         '--opening-source',
         choices=['mixed', 'unique', 'book', 'game'],
@@ -378,13 +390,26 @@ def parse_args():
         type=str,
         help='Exact checkpoint file, or a directory containing one, for fixed-opponent telemetry.',
     )
-    parser.add_argument('--anchor-architecture', choices=['v1', 'v2', 'v3'], default='v1')
+    parser.add_argument('--anchor-architecture', choices=['v1', 'v2', 'v3', 'v4'], default='v1')
     parser.add_argument('--anchor-interval', type=int, default=10)
     parser.add_argument('--anchor-games', type=int, default=40)
     parser.add_argument('--anchor-mcts-sims', type=int)
     args = parser.parse_args()
     if args.opening_mix_unique_probability < 0.0 or args.opening_mix_unique_probability > 1.0:
         parser.error('--opening-mix-unique-probability must be between 0 and 1.')
+    if not 0.0 <= args.oracle_sparring_probability <= 1.0:
+        parser.error('--oracle-sparring-probability must be between 0 and 1.')
+    for option, value in (
+        ('--oracle-sparring-nodes', args.oracle_sparring_nodes),
+        ('--oracle-sparring-workers', args.oracle_sparring_workers),
+        ('--oracle-sparring-ladder-version', args.oracle_sparring_ladder_version),
+    ):
+        if value < 1:
+            parser.error('{} must be at least 1.'.format(option))
+    if args.oracle_sparring_probability > 0 and not args.oracle_binary:
+        parser.error('--oracle-binary is required when oracle sparring is enabled.')
+    if args.oracle_sparring_probability > 0 and args.architecture != 'v4':
+        parser.error('--oracle-sparring-probability is currently supported only for V4.')
     if args.start_iteration is not None and args.start_iteration < 0:
         parser.error('--start-iteration cannot be negative.')
     if args.start_iteration is not None and not args.load_model:
@@ -499,14 +524,17 @@ def build_coach_args(parsed_args):
     load_folder = parsed_args.load_folder or checkpoint
     arena_batch_size = parsed_args.arena_batch_size or parsed_args.self_play_batch_size
 
+    modern_architecture = parsed_args.architecture in ('v3', 'v4')
     training_mode = getattr(parsed_args, 'training_mode', None) or (
-        'latest' if parsed_args.architecture == 'v3' else 'arena'
+        'latest' if modern_architecture else 'arena'
     )
     symmetry_augmentation = getattr(parsed_args, 'symmetry_augmentation', None) or (
-        'on-the-fly' if parsed_args.architecture == 'v3' else 'expanded'
+        'none' if parsed_args.architecture == 'v4'
+        else 'on-the-fly' if parsed_args.architecture == 'v3'
+        else 'expanded'
     )
     policy_target_temperature = getattr(parsed_args, 'policy_target_temperature', None)
-    if policy_target_temperature is None and parsed_args.architecture == 'v3':
+    if policy_target_temperature is None and modern_architecture:
         policy_target_temperature = 1.0
     full_mcts_sims = parsed_args.num_mcts_sims or preset['numMCTSSims']
     playout_cap_fast_sims = (
@@ -579,6 +607,18 @@ def build_coach_args(parsed_args):
         'saveBestTrainExamples': parsed_args.save_best_examples or preset['saveBestTrainExamples'],
         'selfPlayBatchSize': parsed_args.self_play_batch_size,
         'arenaBatchSize': arena_batch_size,
+        'oracleSparringProbability': getattr(
+            parsed_args, 'oracle_sparring_probability', 0.0
+        ),
+        'oracleSparringNodes': getattr(parsed_args, 'oracle_sparring_nodes', 100_000),
+        'oracleSparringWorkers': getattr(parsed_args, 'oracle_sparring_workers', 4),
+        'oracleSparringOpeningSeed': getattr(
+            parsed_args, 'oracle_sparring_opening_seed', 20260921
+        ),
+        'oracleSparringLadderVersion': getattr(
+            parsed_args, 'oracle_sparring_ladder_version', 1
+        ),
+        'oracleBinary': getattr(parsed_args, 'oracle_binary', None),
         'quiet': parsed_args.quiet,
         'trainingMode': training_mode,
         'placementTemperature': getattr(parsed_args, 'placement_temperature', 1.0),
@@ -604,13 +644,13 @@ def build_coach_args(parsed_args):
             and not getattr(parsed_args, 'no_search_symmetry_evaluation', False)
         ),
         'inferenceDeduplication': (
-            parsed_args.architecture == 'v3'
+            modern_architecture
             and not getattr(parsed_args, 'no_inference_deduplication', False)
         ),
         'inferenceCacheSize': (
             parsed_args.inference_cache_size
             if parsed_args.inference_cache_size is not None
-            else (4096 if parsed_args.architecture == 'v3' else 0)
+            else (4096 if modern_architecture else 0)
         ),
         'rootSymmetrySamples': (
             parsed_args.root_symmetry_samples
@@ -635,17 +675,17 @@ def build_coach_args(parsed_args):
         'replayReuse': (
             parsed_args.replay_reuse
             if parsed_args.replay_reuse is not None
-            else (V3_DEFAULT_REPLAY_REUSE if parsed_args.architecture == 'v3' else None)
+            else (V3_DEFAULT_REPLAY_REUSE if modern_architecture else None)
         ),
         'validationFraction': (
             parsed_args.validation_fraction
             if parsed_args.validation_fraction is not None
-            else (V3_DEFAULT_VALIDATION_FRACTION if parsed_args.architecture == 'v3' else 0.0)
+            else (V3_DEFAULT_VALIDATION_FRACTION if modern_architecture else 0.0)
         ),
         'telemetryDir': getattr(parsed_args, 'telemetry_dir', None) or os.path.join(checkpoint, 'telemetry'),
         'milestoneInterval': (
             getattr(parsed_args, 'milestone_interval', None)
-            or (20 if parsed_args.architecture == 'v3' else 10)
+            or (20 if modern_architecture else 10)
         ),
         'referenceSuite': getattr(parsed_args, 'reference_suite', None),
         'telemetryMatchGames': (
@@ -852,26 +892,27 @@ def main():
     nnet_args.epochs = parsed_args.epochs or preset['epochs']
     nnet_args.batch_size = parsed_args.batch_size or preset['batch_size']
     nnet_args.max_train_steps = parsed_args.max_train_steps
+    modern_architecture = parsed_args.architecture in ('v3', 'v4')
     nnet_args.replay_reuse = (
         parsed_args.replay_reuse
         if parsed_args.replay_reuse is not None
-        else (V3_DEFAULT_REPLAY_REUSE if parsed_args.architecture == 'v3' else None)
+        else (V3_DEFAULT_REPLAY_REUSE if modern_architecture else None)
     )
-    nnet_args.optimizer = parsed_args.optimizer or ('adamw' if parsed_args.architecture == 'v3' else 'adam')
+    nnet_args.optimizer = parsed_args.optimizer or ('adamw' if modern_architecture else 'adam')
     nnet_args.lr = (
         parsed_args.learning_rate
         if parsed_args.learning_rate is not None
-        else (V3_DEFAULT_LEARNING_RATE if parsed_args.architecture == 'v3' else 0.001)
+        else (V3_DEFAULT_LEARNING_RATE if modern_architecture else 0.001)
     )
     nnet_args.weight_decay = (
         parsed_args.weight_decay
         if parsed_args.weight_decay is not None
-        else (V3_DEFAULT_WEIGHT_DECAY if parsed_args.architecture == 'v3' else 0.0)
+        else (V3_DEFAULT_WEIGHT_DECAY if modern_architecture else 0.0)
     )
     nnet_args.lr_schedule = (
         parsed_args.lr_schedule
         if parsed_args.lr_schedule is not None
-        else (list(V3_DEFAULT_LR_SCHEDULE) if parsed_args.architecture == 'v3' else [])
+        else (list(V3_DEFAULT_LR_SCHEDULE) if modern_architecture else [])
     )
     nnet_args.symmetry_consistency_fraction = (
         parsed_args.symmetry_consistency_fraction
@@ -900,17 +941,17 @@ def main():
     nnet_args.quiet = parsed_args.quiet
     coach_args = build_coach_args(parsed_args)
     nnet_args.on_the_fly_symmetry = coach_args.symmetryAugmentation == 'on-the-fly'
-    if parsed_args.architecture == 'v3':
+    if modern_architecture:
         opening_sampler = None
-        log.info('V3 learns placement from the empty board; opening samplers are disabled.')
+        log.info('%s learns placement from the empty board; opening samplers are disabled.', parsed_args.architecture.upper())
     else:
         opening_sampler = build_opening_sampler(parsed_args, coach_args)
 
     log.info('Loading %s...', Game.__name__)
     game = Game(
         5,
-        true_random_placement=parsed_args.architecture != 'v3',
-        sequential_placement=parsed_args.architecture == 'v3',
+        true_random_placement=not modern_architecture,
+        sequential_placement=modern_architecture,
     )
 
     log.info('Loading Santorini network architecture %s...', parsed_args.architecture)
@@ -1043,7 +1084,10 @@ def main():
             coach_args.anchorMCTSSims,
         )
     log.info('Starting the Santorini learning process')
-    coach.learn()
+    try:
+        coach.learn()
+    finally:
+        coach.close()
 
 
 if __name__ == "__main__":

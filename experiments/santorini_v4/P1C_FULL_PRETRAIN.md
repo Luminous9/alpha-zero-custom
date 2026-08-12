@@ -400,3 +400,31 @@ NumPy, CPU Torch, and CUDA RNG states, and charges its cost to arena/telemetry.
 An excess contrast above `+0.02` warns; it is confirmed only if the deterministic
 paired-bootstrap 95% interval also clears zero. This remains a diagnostic
 association rather than an automatic strength stop.
+
+### P2 opponent and sparring calibration handoff
+
+G1 is stronger than the minimum transfer gate in every tested configuration:
+P1c wins 28-12 and 30-10 on the standard suites, 40-0 and 39-1 in full games,
+and 31-9/40-0 in the equal-cost diagnostic. Run13 is therefore demoted from a
+gate opponent to an optional fixed historical anchor. Normal P2 jobs leave that
+anchor disabled, and a manually requested Run13 comparison cannot promote,
+reject, or roll back a checkpoint. The primary longitudinal playing-strength
+signal is the existing milestone self-match: current checkpoint versus the
+checkpoint one milestone interval earlier, with separate fixed paired standard
+and placement-inclusive suites.
+
+Run13's old oracle sparring rung must not be inherited. Before sparring replay
+is enabled, calibrate the exact P1c handoff under the frozen P2 search settings
+on the same 20 symmetry-distinct completed openings at each oracle budget, with
+paired seats and an engine reset at every game boundary. Sweep 5k, 10k, 20k,
+50k, 100k, and 250k nodes. Among rungs whose 40-game V4 point estimate lies in
+35-50%, select the one closest to 42.5%, breaking an exact tie upward; extend
+the sweep logarithmically if none qualifies. Freeze the full
+sweep report, engine/checkpoint hashes, openings, seeds, and chosen rung before
+P2 generates any sparring examples.
+
+The local sweep is complete. V4 scored 85.0%, 65.0%, 55.0%, 42.5%, 42.5%,
+and 22.5% against the 5k, 10k, 20k, 50k, 100k, and 250k rungs respectively.
+Both 50k and 100k hit the target midpoint; the frozen upward tie break selects
+**100k nodes per move** as sparring ladder version 1. The complete contract and
+pair records are documented in `experiments/santorini_v4/P2_ORACLE_SWEEP.md`.

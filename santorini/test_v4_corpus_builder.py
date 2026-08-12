@@ -12,7 +12,10 @@ from build_santorini_v4_corpus import (
     validate_converted_corpus,
 )
 from repartition_santorini_v4_corpus import _subset_payload
-from santorini.D4Canonical import canonicalize_board_policy
+from santorini.D4Canonical import (
+    canonicalize_board_policies,
+    canonicalize_board_policy,
+)
 from santorini.SantoriniGame import SantoriniGame
 from santorini.V4BootstrapCorpus import build_sampling_plan
 
@@ -49,6 +52,29 @@ class TestV4CorpusBuilder(unittest.TestCase):
         np.testing.assert_array_equal(canonical_board, other_board)
         np.testing.assert_allclose(canonical_policy, other_policy)
         self.assertAlmostEqual(float(canonical_policy.sum()), 1.0)
+
+    def test_batch_canonicalization_matches_scalar_policy_projection(self):
+        board = self.board()
+        empty = self.game.getInitBoard()
+        rng = np.random.default_rng(41)
+        policies = rng.random((2, self.game.getActionSize()), dtype=np.float32)
+        policies /= policies.sum(axis=1, keepdims=True)
+
+        boards, projected, keys = canonicalize_board_policies(
+            self.game, [board, empty], policies
+        )
+        scalar = [
+            canonicalize_board_policy(self.game, item, policy)
+            for item, policy in zip((board, empty), policies)
+        ]
+
+        np.testing.assert_array_equal(
+            boards, np.asarray([item[0] for item in scalar])
+        )
+        np.testing.assert_allclose(
+            projected, np.asarray([item[1] for item in scalar]), atol=2e-10
+        )
+        self.assertEqual(keys, [item[2] for item in scalar])
 
     def test_union_find_keeps_same_game_positions_in_one_split(self):
         union_find = UnionFind(4)

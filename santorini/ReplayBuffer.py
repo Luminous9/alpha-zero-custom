@@ -1,15 +1,24 @@
 from collections import deque
+import json
 import os
 
 import numpy as np
 
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+SUPPORTED_FORMAT_VERSIONS = (1, FORMAT_VERSION)
+
+
+def replay_metadata(example):
+    """Return explicit source metadata while accepting legacy 3-tuples."""
+    if len(example) >= 4 and example[3] is not None:
+        return dict(example[3])
+    return {"source": "self_play"}
 
 
 def _validate_compact_payload(payload):
     version = int(payload["format_version"][0])
-    if version != FORMAT_VERSION:
+    if version not in SUPPORTED_FORMAT_VERSIONS:
         raise ValueError("Unsupported compact replay format version {}.".format(version))
     lengths = payload["history_lengths"].astype(np.int64)
     offsets = payload["policy_offsets"]
@@ -22,6 +31,8 @@ def _validate_compact_payload(payload):
         raise ValueError("Compact replay policy offsets do not match policy indices.")
     if len(payload["policy_indices"]) != len(payload["policy_values"]):
         raise ValueError("Compact replay policy indices and values have different lengths.")
+    if version >= 2 and len(payload["example_metadata"]) != example_count:
+        raise ValueError("Compact replay metadata count does not match examples.")
     return lengths
 
 
@@ -83,6 +94,8 @@ def trim_compact_replay(path, keep_last_windows, output_path=None):
             "policy_indices": payload["policy_indices"][first_policy:],
             "policy_values": payload["policy_values"][first_policy:],
         }
+        if int(payload["format_version"][0]) >= 2:
+            retained_payload["example_metadata"] = payload["example_metadata"][first_example:]
 
     _write_compact_payload_atomic(destination_path, retained_payload, retained_lengths)
 
@@ -149,6 +162,8 @@ def collapse_compact_replay_symmetries(path, group_size=8):
             "policy_indices": retained_policy_indices,
             "policy_values": retained_policy_values,
         }
+        if int(payload["format_version"][0]) >= 2:
+            retained_payload["example_metadata"] = payload["example_metadata"][selected_examples]
         before_examples = int(lengths.sum())
 
     _write_compact_payload_atomic(destination_path, retained_payload, retained_lengths)
@@ -169,6 +184,10 @@ def save_compact_replay(path, history):
 
     boards = np.asarray([example[0] for example in examples], dtype=np.int8)
     values = np.asarray([example[2] for example in examples], dtype=np.float32)
+    metadata = np.asarray([
+        json.dumps(replay_metadata(example), sort_keys=True, separators=(",", ":"))
+        for example in examples
+    ])
     offsets = np.zeros(len(examples) + 1, dtype=np.int64)
     policy_indices = []
     policy_values = []
@@ -192,13 +211,14 @@ def save_compact_replay(path, history):
             policy_offsets=offsets,
             policy_indices=np.concatenate(policy_indices) if policy_indices else np.array([], dtype=np.uint16),
             policy_values=np.concatenate(policy_values) if policy_values else np.array([], dtype=np.float32),
+            example_metadata=metadata,
         )
 
 
 def load_compact_replay(path):
     with np.load(path, allow_pickle=False) as payload:
         version = int(payload["format_version"][0])
-        if version != FORMAT_VERSION:
+        if version not in SUPPORTED_FORMAT_VERSIONS:
             raise ValueError("Unsupported compact replay format version {}.".format(version))
         action_size = int(payload["action_size"][0])
         lengths = payload["history_lengths"].astype(np.int64)
@@ -207,6 +227,7 @@ def load_compact_replay(path):
         offsets = payload["policy_offsets"]
         indices = payload["policy_indices"]
         probabilities = payload["policy_values"]
+        metadata = payload["example_metadata"] if version >= 2 else None
 
         examples = []
         for example_index in range(len(boards)):
@@ -214,7 +235,14 @@ def load_compact_replay(path):
             end = int(offsets[example_index + 1])
             policy = np.zeros(action_size, dtype=np.float32)
             policy[indices[start:end].astype(np.int64)] = probabilities[start:end]
-            examples.append((boards[example_index].astype(int), policy, float(values[example_index])))
+            fields = (
+                boards[example_index].astype(int),
+                policy,
+                float(values[example_index]),
+            )
+            if metadata is not None:
+                fields += (json.loads(str(metadata[example_index])),)
+            examples.append(fields)
 
     history = []
     start = 0
