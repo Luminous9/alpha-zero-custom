@@ -220,6 +220,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        '--replay-reuse-warmup-iters',
+        type=int,
+        default=0,
+        help=(
+            'Linearly ramp fresh-data replay reuse from 1/N of --replay-reuse '
+            'at absolute iteration 1 to the full value at iteration N.'
+        ),
+    )
+    parser.add_argument(
         '--validation-fraction',
         type=float,
         help='Deterministic held-out fraction of replay positions. V3 defaults to 0.05.',
@@ -305,10 +314,10 @@ def parse_args():
         default=0.0,
         help='Fraction of P2 games replaced by paired completed-opening oracle sparring.',
     )
-    parser.add_argument('--oracle-sparring-nodes', type=int, default=100000)
+    parser.add_argument('--oracle-sparring-nodes', type=int, default=5000)
     parser.add_argument('--oracle-sparring-workers', type=int, default=4)
     parser.add_argument('--oracle-sparring-opening-seed', type=int, default=20260921)
-    parser.add_argument('--oracle-sparring-ladder-version', type=int, default=1)
+    parser.add_argument('--oracle-sparring-ladder-version', type=int, default=2)
     parser.add_argument('--oracle-binary', type=str)
     parser.add_argument(
         '--opening-source',
@@ -440,6 +449,8 @@ def parse_args():
             parser.error('{} must be at least 1.'.format(option))
     if args.v4_seam_telemetry_alert_delta < 0:
         parser.error('--v4-seam-telemetry-alert-delta cannot be negative.')
+    if args.replay_reuse_warmup_iters < 0:
+        parser.error('--replay-reuse-warmup-iters cannot be negative.')
     if args.inference_cache_size is not None and args.inference_cache_size < 0:
         parser.error('--inference-cache-size cannot be negative.')
     if args.policy_target_temperature is not None and args.policy_target_temperature < 0:
@@ -610,13 +621,13 @@ def build_coach_args(parsed_args):
         'oracleSparringProbability': getattr(
             parsed_args, 'oracle_sparring_probability', 0.0
         ),
-        'oracleSparringNodes': getattr(parsed_args, 'oracle_sparring_nodes', 100_000),
+        'oracleSparringNodes': getattr(parsed_args, 'oracle_sparring_nodes', 5_000),
         'oracleSparringWorkers': getattr(parsed_args, 'oracle_sparring_workers', 4),
         'oracleSparringOpeningSeed': getattr(
             parsed_args, 'oracle_sparring_opening_seed', 20260921
         ),
         'oracleSparringLadderVersion': getattr(
-            parsed_args, 'oracle_sparring_ladder_version', 1
+            parsed_args, 'oracle_sparring_ladder_version', 2
         ),
         'oracleBinary': getattr(parsed_args, 'oracle_binary', None),
         'quiet': parsed_args.quiet,
@@ -898,6 +909,7 @@ def main():
         if parsed_args.replay_reuse is not None
         else (V3_DEFAULT_REPLAY_REUSE if modern_architecture else None)
     )
+    nnet_args.replay_reuse_warmup_iters = parsed_args.replay_reuse_warmup_iters
     nnet_args.optimizer = parsed_args.optimizer or ('adamw' if modern_architecture else 'adam')
     nnet_args.lr = (
         parsed_args.learning_rate

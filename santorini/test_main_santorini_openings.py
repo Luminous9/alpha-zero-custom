@@ -148,6 +148,7 @@ class TestMainSantoriniOpenings(unittest.TestCase):
             '--oracle-sparring-probability', '0.10',
             '--oracle-sparring-nodes', '100000',
             '--oracle-sparring-workers', '4',
+            '--oracle-sparring-ladder-version', '2',
             '--oracle-binary', '/tmp/test-oracle',
         ]):
             coach_args = build_coach_args(parse_args())
@@ -155,7 +156,7 @@ class TestMainSantoriniOpenings(unittest.TestCase):
         self.assertEqual(coach_args.oracleSparringProbability, 0.10)
         self.assertEqual(coach_args.oracleSparringNodes, 100000)
         self.assertEqual(coach_args.oracleSparringWorkers, 4)
-        self.assertEqual(coach_args.oracleSparringLadderVersion, 1)
+        self.assertEqual(coach_args.oracleSparringLadderVersion, 2)
         self.assertEqual(coach_args.oracleBinary, '/tmp/test-oracle')
 
     def test_v2_retains_legacy_epoch_schedule_without_validation(self):

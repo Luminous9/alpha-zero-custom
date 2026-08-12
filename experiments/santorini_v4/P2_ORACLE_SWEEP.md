@@ -1,7 +1,11 @@
 # P2-start oracle sparring calibration
 
-This preflight calibrates the first P2 `santorini-ai` sparring rung against the
-exact P1c handoff checkpoint. It does not reuse Run13's old 20k rung.
+The original deterministic ladder-v1 sweep below is retained as an evaluation
+diagnostic. It was superseded for live P2 sparring by the exact-policy
+calibration at the end of this document.
+
+This preflight originally calibrated a deterministic proxy against the exact
+P1c handoff checkpoint. It did not reuse Run13's old 20k rung.
 
 ## Frozen contract
 
@@ -50,11 +54,12 @@ contract fingerprint matches, so the sweep is safe to resume.
 | 100k | 42.5% | 27.5%-57.5% | 3 | 11 | 6 | 189 |
 | 250k | 22.5% | 10.0%-35.0% | 1 | 7 | 12 | 232 |
 
-The curve brackets the intended sparring difficulty cleanly. Although 50k and
+For this deterministic proxy, the curve brackets the intended difficulty.
+Although 50k and
 100k have identical aggregate results, eight of their 20 pair scores differ;
 this is not duplicated output. Both land exactly on the target midpoint, so the
-frozen upward tie break selects **100k nodes per move** as the initial P2 rung.
-The 250k rung is rejected as too punishing.
+frozen upward tie break selected **100k nodes per move** as ladder version 1.
+The live-policy results below supersede that selection for replay generation.
 
 The six arenas took 1,094 seconds (18.2 minutes) locally. The authoritative
 summary is `temp/santorini_v4_p2_oracle_sweep/oracle-sweep-summary.json`,
@@ -74,7 +79,42 @@ and one worsens. Pair outcomes move from 1/7/12 to 3/12/5 for V4
 This is strong evidence against the deep-MCTS collapse seen in the old
 distillation experiments: the P1c network benefits substantially from more
 search and approaches parity with the 250k oracle on this suite. It does not
-change the initial 100k sparring rung, which is calibrated to the live
-96-simulation P2 player and its desired outcome-label balance. The diagnostic
+select the live sparring rung, which must match P2's stochastic 96/32 player
+and is recalibrated below. The diagnostic
 summary is `temp/santorini_v4_p2_oracle_250k_1024/oracle-sweep-summary.json`,
 SHA-256 `6597056cfdfd3b72b9f787306225305149a7ba892555747a90ec51e0c56e6a5e`.
+
+## Exact live-policy recalibration (ladder version 2)
+
+The P100 mixed smoke showed that ladder v1 did not transfer to the actual
+sparring player: V4 scored only 2-22 at 100k. The proxy had used 96 simulations
+on every neural move and Gumbel scale zero, while live P2 uses 96/32
+playout-cap randomization (25% full) and Gumbel scale one. We therefore reran
+the ladder through `Coach.executeOracleSparringEpisodes`, restoring the P2-start
+RNG state and using the exact live search, paired openings/seats, four workers,
+and reset-per-game oracle contract.
+
+The 24-game coarse sweep was:
+
+| Oracle nodes | V4 score | Paired bootstrap 95% | V4 2-0 | Split 1-1 | V4 0-2 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 2.5k | 66.7% | 54.2%-79.2% | 4 | 8 | 0 |
+| 5k | 41.7% | 25.0%-62.5% | 2 | 6 | 4 |
+| 7.5k | 41.7% | 20.8%-62.5% | 2 | 6 | 4 |
+| 10k | 25.0% | 8.3%-45.8% | 1 | 4 | 7 |
+| 20k | 20.8% | 8.3%-33.3% | 0 | 5 | 7 |
+
+Because the two midpoint candidates were broad, a fresh 40-game confirmation
+resolved them:
+
+| Oracle nodes | V4 score | Paired bootstrap 95% | V4 2-0 | Split 1-1 | V4 0-2 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 5k | **42.5%** | 27.5%-57.5% | 3 | 11 | 6 |
+| 7.5k | 27.5% | 12.5%-42.5% | 2 | 7 | 11 |
+| 10k | 30.0% | 17.5%-42.5% | 1 | 10 | 9 |
+
+Freeze **5k nodes per move as live sparring ladder version 2**. The coarse and
+confirmation summaries have SHA-256
+`dc5bcf0daec63c4281f15b4a4eaedbe2ad7e3dce97e9291c390182edc91b7097`
+and `cdc7ac0662f6873f3e4c59b1d7166e80c8b81c2b32750ba6900e1364db71b81a`.
+No final-test data or final arena seeds were touched.

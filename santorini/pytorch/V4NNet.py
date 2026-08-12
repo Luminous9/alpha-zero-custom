@@ -60,7 +60,14 @@ def build_v4_model(game, config):
 
 
 def load_v4_checkpoint(path, game):
-    checkpoint = torch.load(path, map_location="cpu")
+    # V4 resumable checkpoints deliberately include Python/NumPy RNG state and
+    # therefore are not weights-only archives. PyTorch 2.6 changed the default
+    # to weights_only=True, so make the trusted local-checkpoint contract
+    # explicit while retaining compatibility with older PyTorch releases.
+    try:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(path, map_location="cpu")
     if "config" not in checkpoint or "state_dict" not in checkpoint:
         raise ValueError("Not a V4 supervised checkpoint: {}".format(path))
     config = dict(checkpoint["config"])
@@ -558,7 +565,9 @@ class V4TrainableNNet(NNetWrapper):
             if "python_rng_state" in checkpoint:
                 random.setstate(checkpoint["python_rng_state"])
             if "torch_rng_state" in checkpoint:
-                torch.set_rng_state(checkpoint["torch_rng_state"])
+                torch.set_rng_state(
+                    self._cpuByteRNGState(checkpoint["torch_rng_state"])
+                )
             if self.net_args.cuda and "cuda_rng_state_all" in checkpoint:
                 self._restore_cuda_rng_states(checkpoint["cuda_rng_state_all"])
         self._refresh_inference_model()

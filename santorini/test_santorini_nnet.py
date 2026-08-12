@@ -223,6 +223,39 @@ class TestSantoriniNNet(unittest.TestCase):
             nnet_args.replay_reuse = old_replay_reuse
             nnet_args.on_the_fly_symmetry = old_on_the_fly_symmetry
 
+    def test_fresh_data_reuse_warmup_uses_absolute_iteration(self):
+        old_epochs = nnet_args.epochs
+        old_batch_size = nnet_args.batch_size
+        old_max_train_steps = nnet_args.max_train_steps
+        old_replay_reuse = nnet_args.replay_reuse
+        old_warmup = nnet_args.replay_reuse_warmup_iters
+        nnet_args.epochs = 2
+        nnet_args.batch_size = 8
+        nnet_args.max_train_steps = None
+        nnet_args.replay_reuse = 16.0
+        nnet_args.replay_reuse_warmup_iters = 8
+        try:
+            board = self.game.getCanonicalForm(self.game.getInitBoard(), 1)
+            valids = self.game.getValidMoves(board, 1).astype(np.float32)
+            examples = [(board, valids / valids.sum(), 1.0) for _ in range(20)]
+
+            with patch.object(self.nnet.optimizer, 'step', wraps=self.nnet.optimizer.step) as step:
+                metrics = self.nnet.train(
+                    examples, new_example_count=10, iteration=1
+                )
+
+            self.assertEqual(step.call_count, 3)
+            self.assertEqual(metrics['target_replay_reuse'], 2.0)
+            self.assertEqual(metrics['configured_replay_reuse'], 16.0)
+            self.assertEqual(metrics['replay_reuse_warmup_iters'], 8)
+            self.assertAlmostEqual(metrics['actual_replay_reuse'], 2.4)
+        finally:
+            nnet_args.epochs = old_epochs
+            nnet_args.batch_size = old_batch_size
+            nnet_args.max_train_steps = old_max_train_steps
+            nnet_args.replay_reuse = old_replay_reuse
+            nnet_args.replay_reuse_warmup_iters = old_warmup
+
     def test_validation_metrics_report_placement_and_standard_phases(self):
         game = SantoriniGame(5, sequential_placement=True)
         nnet = V3NNetWrapper(game)

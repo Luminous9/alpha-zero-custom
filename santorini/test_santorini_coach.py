@@ -845,6 +845,14 @@ class TestSantoriniCoachBatchedSelfPlay(unittest.TestCase):
         self.assertEqual({example[3]['oracle_nodes'] for example in examples}, {100_000})
         self.assertEqual(coach._oracle_sparring_stats['games'], 2)
         self.assertEqual(coach._oracle_sparring_stats['examples'], 2)
+        telemetry = coach._oracleSparringTelemetry()
+        self.assertEqual(telemetry['oracle_sparring_complete_pairs'], 1)
+        self.assertEqual(
+            telemetry['oracle_sparring_pair_wins_2_0']
+            + telemetry['oracle_sparring_split_pairs_1_1']
+            + telemetry['oracle_sparring_pair_losses_0_2'],
+            1,
+        )
 
     def test_policy_target_remains_soft_when_action_selection_is_greedy(self):
         game = RecordingTinyGame()

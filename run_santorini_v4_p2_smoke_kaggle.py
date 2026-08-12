@@ -1,9 +1,8 @@
-"""Run one extracted P100 P2 smoke arm with an offline-built oracle."""
+"""Run one extracted P100 P2 smoke arm with a bundled Linux oracle."""
 
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -13,12 +12,13 @@ import time
 
 INPUT_ROOT = Path("/kaggle/input")
 WORKING_ROOT = Path("/kaggle/working/santorini_v4_p2_smoke")
-BUILD_ROOT = Path("/kaggle/tmp/santorini_v4_p2_smoke_oracle_build")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--arm", choices=("ordinary", "mixed"), required=True)
+    parser.add_argument(
+        "--arm", choices=("ordinary", "mixed", "transition"), required=True
+    )
     return parser.parse_args()
 
 
@@ -64,42 +64,25 @@ def main():
         if _sha256(path) != expected:
             raise RuntimeError("Input digest changed: {}".format(path))
 
-    oracle_root = manifest_path.parent / "oracle-build"
-    oracle_manifest = oracle_root / "Cargo.toml"
-    oracle_main = oracle_root / "oracle" / "src" / "main.rs"
-    oracle_model = oracle_root / "models" / "batch5_final.bin"
-    oracle_lock = oracle_root / "Cargo.lock"
-    for path in (oracle_manifest, oracle_main, oracle_model, oracle_lock):
-        if not path.is_file():
-            raise FileNotFoundError(path)
-    expected_build = manifest["oracle_build"]
-    for path, expected in (
-        (oracle_main, expected_build["oracle_main_sha256"]),
-        (oracle_model, expected_build["model_sha256"]),
-        (oracle_lock, expected_build["cargo_lock_sha256"]),
-    ):
-        if _sha256(path) != expected:
-            raise RuntimeError("Bundled oracle source digest changed: {}".format(path))
-    if shutil.which("cargo") is None:
-        raise RuntimeError("Kaggle image does not provide cargo for the offline oracle build.")
-
     output_dir = WORKING_ROOT / args.arm
     output_dir.mkdir(parents=True, exist_ok=True)
-    target_root = BUILD_ROOT / "target"
-    build_env = dict(os.environ)
-    build_env["CARGO_TARGET_DIR"] = str(target_root)
-    build_command = [
-        "cargo", "build", "--release", "--offline", "--locked",
-        "--manifest-path", str(oracle_manifest), "-p", "santorini-oracle",
-    ]
-    build_started = time.perf_counter()
-    subprocess.run(build_command, cwd=oracle_root, env=build_env, check=True)
-    build_seconds = time.perf_counter() - build_started
-    oracle_binary = target_root / "release" / "santorini-oracle"
-    if not oracle_binary.is_file():
-        raise RuntimeError("Offline build completed without the oracle binary.")
+    build_seconds = 0.0
+    oracle_binary = None
+    if args.arm != "ordinary":
+        bundled_binary = manifest_path.parent / "oracle-build" / "santorini-oracle-linux-x86_64"
+        expected_binary = manifest.get("oracle_build", {}).get("linux_binary_sha256")
+        if not bundled_binary.is_file():
+            raise FileNotFoundError("Bundled Linux oracle is missing: {}".format(bundled_binary))
+        if not expected_binary or _sha256(bundled_binary) != expected_binary:
+            raise RuntimeError("Bundled Linux oracle digest changed.")
+        oracle_binary = Path("/kaggle/working/santorini-oracle-linux-x86_64")
+        shutil.copy2(bundled_binary, oracle_binary)
+        oracle_binary.chmod(0o755)
 
-    sparring_probability = "0.10" if args.arm == "mixed" else "0"
+    sparring_probability = "0" if args.arm == "ordinary" else "0.10"
+    oracle_nodes = 5_000 if args.arm == "transition" else 100_000
+    oracle_ladder_version = 2 if args.arm == "transition" else 1
+    replay_reuse_warmup_iters = 8 if args.arm == "transition" else 0
     command = [
         sys.executable, str(entry_point),
         "--architecture", "v4",
@@ -119,6 +102,7 @@ def main():
         "--self-play-batch-size", "128",
         "--batch-size", "256",
         "--replay-reuse", "16",
+        "--replay-reuse-warmup-iters", str(replay_reuse_warmup_iters),
         "--validation-fraction", "0.05",
         "--optimizer", "adamw",
         "--learning-rate", "0.0003",
@@ -131,11 +115,10 @@ def main():
         "--load-file", checkpoint.name,
         "--checkpoint", str(output_dir),
         "--oracle-sparring-probability", sparring_probability,
-        "--oracle-sparring-nodes", "100000",
+        "--oracle-sparring-nodes", str(oracle_nodes),
         "--oracle-sparring-workers", "4",
         "--oracle-sparring-opening-seed", "20260921",
-        "--oracle-sparring-ladder-version", "1",
-        "--oracle-binary", str(oracle_binary),
+        "--oracle-sparring-ladder-version", str(oracle_ladder_version),
         "--v4-seam-telemetry-suite", str(seam_suite),
         "--v4-seam-telemetry-interval", "1",
         "--v4-seam-telemetry-batch-size", "256",
@@ -143,6 +126,8 @@ def main():
         "--no-telemetry-matches",
         "--seed", "20260930",
     ]
+    if oracle_binary is not None:
+        command.extend(("--oracle-binary", str(oracle_binary)))
     print("P2 smoke arm:", args.arm, flush=True)
     print("Running:", " ".join(command), flush=True)
     started = time.perf_counter()
@@ -154,11 +139,20 @@ def main():
     if len(rows) != 1:
         raise RuntimeError("Expected one telemetry row, found {}.".format(len(rows)))
     telemetry = rows[0]
-    expected_sparring_games = 24 if args.arm == "mixed" else 0
+    expected_sparring_games = 0 if args.arm == "ordinary" else 24
     if telemetry.get("games") != 240:
         raise RuntimeError("P2 smoke did not complete 240 games.")
     if telemetry.get("oracle_sparring_games") != expected_sparring_games:
         raise RuntimeError("Unexpected completed sparring-game count.")
+    if args.arm != "ordinary" and telemetry.get(
+        "oracle_sparring_complete_pairs"
+    ) != 12:
+        raise RuntimeError("Sparring telemetry is missing complete opening pairs.")
+    if args.arm == "transition":
+        if abs(float(telemetry.get("target_replay_reuse", -1)) - 2.0) > 1e-9:
+            raise RuntimeError("Transition smoke did not apply 2x iteration-one reuse.")
+        if telemetry.get("replay_reuse_warmup_iters") != 8:
+            raise RuntimeError("Transition smoke did not retain the warm-up contract.")
     if telemetry.get("v4_seam_telemetry_due") is not True:
         raise RuntimeError("Frozen V4 seam telemetry did not run.")
     required_outputs = (
@@ -180,13 +174,17 @@ def main():
         for example in replay
         if replay_metadata(example).get("source") == "oracle_sparring"
     ]
-    if args.arm == "mixed":
+    if args.arm != "ordinary":
         if not sparring_metadata:
-            raise RuntimeError("Mixed replay contains no oracle-sparring records.")
+            raise RuntimeError("Sparring replay contains no oracle-sparring records.")
         if {item.get("neural_seat") for item in sparring_metadata} != {-1, 1}:
-            raise RuntimeError("Mixed replay does not contain both neural seats.")
-        if {item.get("oracle_nodes") for item in sparring_metadata} != {100_000}:
-            raise RuntimeError("Mixed replay contains the wrong oracle rung.")
+            raise RuntimeError("Sparring replay does not contain both neural seats.")
+        if {item.get("oracle_nodes") for item in sparring_metadata} != {oracle_nodes}:
+            raise RuntimeError("Sparring replay contains the wrong oracle rung.")
+        if {item.get("oracle_ladder_version") for item in sparring_metadata} != {
+            oracle_ladder_version
+        }:
+            raise RuntimeError("Sparring replay contains the wrong oracle ladder version.")
     elif sparring_metadata:
         raise RuntimeError("Ordinary replay unexpectedly contains sparring records.")
     contract = {
@@ -198,7 +196,7 @@ def main():
         "oracle_build_seconds": build_seconds,
         "checkpoint_sha256": _sha256(checkpoint),
         "seam_suite_sha256": _sha256(seam_suite),
-        "oracle_binary_sha256": _sha256(oracle_binary),
+        "oracle_binary_sha256": _sha256(oracle_binary) if oracle_binary else None,
         "telemetry": telemetry,
         "replay_source_counts": {
             source: sum(

@@ -6,15 +6,6 @@ import os
 from pathlib import Path
 import zipfile
 
-from prepare_santorini_v4_oracle_sweep_bundle import (
-    CARGO_CONFIG,
-    ORACLE_CARGO_TOML,
-    ROOT_CARGO_TOML,
-    _tree_files,
-    _tree_sha256,
-    _vendor_sources,
-    _write_tree,
-)
 from santorini.OracleResearch import file_sha256
 
 
@@ -28,7 +19,14 @@ def parse_args():
         "--seam-suite",
         default="temp/santorini_v4_p2_preparation/v4-seam-telemetry-suite.npz",
     )
-    parser.add_argument("--santorini-ai-root", default="../santorini-ai")
+    parser.add_argument(
+        "--linux-oracle-binary",
+        default=(
+            "temp/santorini_v4_p2_linux_build/target/release/"
+            "santorini-oracle"
+        ),
+    )
+    parser.add_argument("--santorini-ai-license", default="../santorini-ai/LICENSE")
     parser.add_argument(
         "--output", default="temp/santorini_v4_p2_smoke_bundle.zip"
     )
@@ -39,29 +37,14 @@ def build_bundle(args):
     root = Path(__file__).resolve().parent
     checkpoint = Path(args.checkpoint).resolve()
     seam_suite = Path(args.seam_suite).resolve()
-    santorini_ai = Path(args.santorini_ai_root).resolve()
-    oracle_source = root / "tools" / "santorini_oracle"
-    core_source = santorini_ai / "santorini_core"
-    model = santorini_ai / "models" / "batch5_final.bin"
-    license_path = santorini_ai / "LICENSE"
-    lockfile = oracle_source / "Cargo.lock"
-    main_rs = oracle_source / "src" / "main.rs"
-    required = (
-        checkpoint,
-        seam_suite,
-        core_source / "Cargo.toml",
-        model,
-        license_path,
-        lockfile,
-        main_rs,
-    )
+    linux_oracle = Path(args.linux_oracle_binary).resolve()
+    license_path = Path(args.santorini_ai_license).resolve()
+    required = (checkpoint, seam_suite, linux_oracle, license_path)
     for path in required:
         if not path.exists():
             raise FileNotFoundError(path)
 
     sources = sorted(root.glob("*.py")) + sorted((root / "santorini").rglob("*.py"))
-    vendor = _vendor_sources()
-    core_files = _tree_files(core_source)
     manifest = {
         "schema_version": 1,
         "purpose": "santorini_v4_p2_p100_end_to_end_smoke",
@@ -87,10 +70,28 @@ def build_bundle(args):
             "placement_gumbel_scale": 1.5,
             "placement_exploration_probability": 0.10,
             "placement_exploration_gumbel_scale": 2.25,
-            "oracle_sparring_probability": {"ordinary": 0.0, "mixed": 0.10},
-            "oracle_nodes": 100_000,
+            "oracle_sparring_probability": {
+                "ordinary": 0.0,
+                "mixed": 0.10,
+                "transition": 0.10,
+            },
+            "oracle_nodes": {
+                "ordinary": 100_000,
+                "mixed": 100_000,
+                "transition": 5_000,
+            },
             "oracle_workers": 4,
-            "oracle_ladder_version": 1,
+            "oracle_ladder_version": {
+                "ordinary": 1,
+                "mixed": 1,
+                "transition": 2,
+            },
+            "replay_reuse": 16.0,
+            "replay_reuse_warmup_iters": {
+                "ordinary": 0,
+                "mixed": 0,
+                "transition": 8,
+            },
             "opening_seed": 20260921,
             "inference_precision": "fp32",
             "disagreement_starts": False,
@@ -98,11 +99,10 @@ def build_bundle(args):
         },
         "oracle_build": {
             "oracle_version": "0.2.0",
-            "oracle_main_sha256": file_sha256(main_rs),
-            "core_tree_sha256": _tree_sha256(core_source, core_files),
-            "model_sha256": file_sha256(model),
-            "cargo_lock_sha256": file_sha256(lockfile),
-            "offline": True,
+            "platform": "linux-x86_64",
+            "linux_binary_bytes": linux_oracle.stat().st_size,
+            "linux_binary_sha256": file_sha256(linux_oracle),
+            "runtime_cargo_required": False,
         },
         "python_source_files": len(sources),
     }
@@ -124,16 +124,13 @@ def build_bundle(args):
             "inputs/v4-seam-telemetry-suite.npz",
             zipfile.ZIP_DEFLATED,
         )
-        archive.writestr("oracle-build/Cargo.toml", ROOT_CARGO_TOML)
-        archive.writestr("oracle-build/oracle/Cargo.toml", ORACLE_CARGO_TOML)
-        archive.writestr("oracle-build/.cargo/config.toml", CARGO_CONFIG)
-        archive.write(lockfile, "oracle-build/Cargo.lock")
-        archive.write(main_rs, "oracle-build/oracle/src/main.rs")
-        archive.write(model, "oracle-build/models/batch5_final.bin")
+        archive.write(
+            linux_oracle,
+            "oracle-build/santorini-oracle-linux-x86_64",
+            compress_type=zipfile.ZIP_DEFLATED,
+            compresslevel=6,
+        )
         archive.write(license_path, "oracle-build/SANTORINI_AI_LICENSE")
-        _write_tree(archive, core_source, "oracle-build/santorini_core")
-        for name, path in sorted(vendor.items()):
-            _write_tree(archive, path, "oracle-build/vendor/{}".format(name))
         archive.writestr(
             "p2-smoke-manifest.json",
             json.dumps(manifest, indent=2, sort_keys=True),

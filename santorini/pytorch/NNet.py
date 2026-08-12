@@ -33,6 +33,7 @@ args = dotdict({
     'value_hidden_size': 128,
     'max_train_steps': None,
     'replay_reuse': None,
+    'replay_reuse_warmup_iters': 0,
     'on_the_fly_symmetry': False,
     'symmetry_consistency_fraction': 0.0,
     'symmetry_consistency_policy_weight': 0.0,
@@ -102,6 +103,9 @@ class NNetWrapper(NeuralNet):
         self.net_args.batch_size = args.batch_size
         self.net_args.max_train_steps = args.max_train_steps
         self.net_args.replay_reuse = args.replay_reuse
+        self.net_args.replay_reuse_warmup_iters = getattr(
+            args, 'replay_reuse_warmup_iters', 0
+        )
         self.net_args.on_the_fly_symmetry = args.on_the_fly_symmetry
         self.net_args.symmetry_consistency_fraction = args.symmetry_consistency_fraction
         self.net_args.symmetry_consistency_policy_weight = (
@@ -155,7 +159,18 @@ class NNetWrapper(NeuralNet):
 
         symmetry_multiplier = 8 if runtime_args.on_the_fly_symmetry else 1
         virtual_example_count = len(examples) * symmetry_multiplier
-        if runtime_args.replay_reuse is not None:
+        configured_replay_reuse = runtime_args.replay_reuse
+        effective_replay_reuse = configured_replay_reuse
+        replay_reuse_warmup_iters = int(runtime_args.replay_reuse_warmup_iters)
+        if configured_replay_reuse is not None and replay_reuse_warmup_iters:
+            if iteration is None or int(iteration) < 1:
+                raise ValueError(
+                    'Replay-reuse warm-up requires a positive absolute iteration.'
+                )
+            effective_replay_reuse = float(configured_replay_reuse) * min(
+                1.0, float(iteration) / replay_reuse_warmup_iters
+            )
+        if effective_replay_reuse is not None:
             if new_example_count is None or int(new_example_count) < 1:
                 raise ValueError(
                     'Replay-reuse scheduling requires at least one newly generated training example.'
@@ -163,7 +178,7 @@ class NNetWrapper(NeuralNet):
             new_example_count = int(new_example_count)
             uncapped_training_steps = max(
                 1,
-                int(np.ceil(new_example_count * runtime_args.replay_reuse / runtime_args.batch_size)),
+                int(np.ceil(new_example_count * effective_replay_reuse / runtime_args.batch_size)),
             )
             training_schedule = 'fresh-data-reuse'
         else:
@@ -444,7 +459,7 @@ class NNetWrapper(NeuralNet):
                 'symmetry_augmentation_multiplier': int(symmetry_multiplier),
                 'effective_replay_epochs': float(
                     completed_steps * runtime_args.batch_size /
-                    (len(examples) if runtime_args.replay_reuse is not None else virtual_example_count)
+                    (len(examples) if effective_replay_reuse is not None else virtual_example_count)
                 ),
                 'average_draws_per_stored_position': float(
                     completed_steps * runtime_args.batch_size / len(examples)
@@ -456,9 +471,14 @@ class NNetWrapper(NeuralNet):
                     int(new_example_count) if new_example_count is not None else None
                 ),
                 'target_replay_reuse': (
-                    float(runtime_args.replay_reuse)
-                    if runtime_args.replay_reuse is not None else None
+                    float(effective_replay_reuse)
+                    if effective_replay_reuse is not None else None
                 ),
+                'configured_replay_reuse': (
+                    float(configured_replay_reuse)
+                    if configured_replay_reuse is not None else None
+                ),
+                'replay_reuse_warmup_iters': replay_reuse_warmup_iters,
                 'actual_replay_reuse': (
                     float(completed_steps * runtime_args.batch_size / new_example_count)
                     if new_example_count else None
@@ -868,10 +888,21 @@ class NNetWrapper(NeuralNet):
             if 'python_rng_state' in checkpoint:
                 random.setstate(checkpoint['python_rng_state'])
             if 'torch_rng_state' in checkpoint:
-                torch.set_rng_state(checkpoint['torch_rng_state'])
+                torch.set_rng_state(self._cpuByteRNGState(checkpoint['torch_rng_state']))
             if self.net_args.cuda and 'cuda_rng_state_all' in checkpoint:
                 self._restore_cuda_rng_states(checkpoint['cuda_rng_state_all'])
         return checkpoint.get('training_metadata', {})
+
+    @staticmethod
+    def _cpuByteRNGState(state):
+        """Normalize RNG state after checkpoint map-location/device changes."""
+        if torch.is_tensor(state):
+            return state.detach().to(device='cpu', dtype=torch.uint8).contiguous()
+        return torch.as_tensor(
+            np.asarray(state),
+            dtype=torch.uint8,
+            device='cpu',
+        ).contiguous()
 
     @staticmethod
     def _restore_cuda_rng_states(saved_states):
@@ -886,7 +917,10 @@ class NNetWrapper(NeuralNet):
                 min(len(saved_states), available_devices),
             )
         for device_index, state in enumerate(saved_states[:available_devices]):
-            torch.cuda.set_rng_state(state, device=device_index)
+            torch.cuda.set_rng_state(
+                NNetWrapper._cpuByteRNGState(state),
+                device=device_index,
+            )
 
 
 class V3NNetWrapper(NNetWrapper):

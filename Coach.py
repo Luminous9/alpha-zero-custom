@@ -170,6 +170,7 @@ class Coach():
             'oracle_wins': 0,
             'draws': 0,
             'examples': 0,
+            'game_records': [],
         }
 
     def close(self):
@@ -196,7 +197,7 @@ class Coach():
         binary = self._arg('oracleBinary', None)
         if not binary:
             raise ValueError('oracleBinary is required when oracle sparring is enabled.')
-        nodes = int(self._arg('oracleSparringNodes', 100_000))
+        nodes = int(self._arg('oracleSparringNodes', 5_000))
         self._oracle_sparring_processes = [
             SantoriniOracleProcess(binary) for _ in range(count)
         ]
@@ -851,9 +852,9 @@ class Coach():
         board = np.asarray(episode['canonicalBoard'])
         return {
             'source': 'oracle_sparring',
-            'oracle_nodes': int(self._arg('oracleSparringNodes', 100_000)),
+            'oracle_nodes': int(self._arg('oracleSparringNodes', 5_000)),
             'oracle_ladder_version': int(
-                self._arg('oracleSparringLadderVersion', 1)
+                self._arg('oracleSparringLadderVersion', 2)
             ),
             'oracle_binary_sha256': self._oracleSparringBinaryDigest(),
             'opening_pool': 'symmetry_distinct_completed_placements',
@@ -896,6 +897,18 @@ class Coach():
             for item in episode['trainExamples']
         ]
         self._oracle_sparring_stats['examples'] += len(examples)
+        self._oracle_sparring_stats['game_records'].append({
+            'pair_index': int(episode['pair_index']),
+            'opening_hash': episode['opening_hash'],
+            'neural_seat': int(episode['neural_seat']),
+            'neural_result': (
+                0 if player_one_result == 0
+                else 1 if player_one_result == episode['neural_seat']
+                else -1
+            ),
+            'plies': int(episode['episodeStep']),
+            'stored_examples': int(len(examples)),
+        })
         return examples
 
     def executeOracleSparringEpisodes(self, numEpisodes, iteration):
@@ -1088,14 +1101,26 @@ class Coach():
         games = int(stats['games'])
         total_examples = int(stats['examples'])
         fresh_examples = int(stats.get('fresh_examples', 0))
+        pairs = {}
+        for record in stats.get('game_records', []):
+            pairs.setdefault(int(record['pair_index']), []).append(record)
+        complete_pairs = [records for records in pairs.values() if len(records) == 2]
+        pair_scores = [
+            sum(
+                1.0 if record['neural_result'] == 1
+                else 0.5 if record['neural_result'] == 0 else 0.0
+                for record in records
+            )
+            for records in complete_pairs
+        ]
         return {
             'oracle_sparring_probability': float(
                 self._arg('oracleSparringProbability', 0.0)
             ),
-            'oracle_sparring_nodes': int(self._arg('oracleSparringNodes', 100_000)),
+            'oracle_sparring_nodes': int(self._arg('oracleSparringNodes', 5_000)),
             'oracle_sparring_workers': int(self._arg('oracleSparringWorkers', 4)),
             'oracle_sparring_ladder_version': int(
-                self._arg('oracleSparringLadderVersion', 1)
+                self._arg('oracleSparringLadderVersion', 2)
             ),
             'oracle_sparring_games': games,
             'oracle_sparring_neural_wins': int(stats['neural_wins']),
@@ -1108,6 +1133,10 @@ class Coach():
             'oracle_sparring_fresh_replay_fraction': (
                 float(total_examples / fresh_examples) if fresh_examples else None
             ),
+            'oracle_sparring_complete_pairs': int(len(complete_pairs)),
+            'oracle_sparring_pair_wins_2_0': int(sum(score == 2 for score in pair_scores)),
+            'oracle_sparring_split_pairs_1_1': int(sum(score == 1 for score in pair_scores)),
+            'oracle_sparring_pair_losses_0_2': int(sum(score == 0 for score in pair_scores)),
         }
 
     def learn(self):
@@ -1272,6 +1301,13 @@ class Coach():
                         'evaluationPlacementRootSymmetrySamples', 1
                     ),
                     'replay_reuse': self._arg('replayReuse', None),
+                    'replay_reuse_warmup_iters': int(
+                        getattr(
+                            getattr(self.nnet, 'net_args', None),
+                            'replay_reuse_warmup_iters',
+                            0,
+                        )
+                    ),
                     'validation_fraction': self._arg('validationFraction', 0.0),
                     'optimizer': getattr(getattr(self.nnet, 'net_args', None), 'optimizer', None),
                     'learning_rate': metrics.get('learning_rate'),
@@ -1286,10 +1322,10 @@ class Coach():
                         'oracleSparringProbability', 0.0
                     ),
                     'oracle_sparring_nodes': self._arg(
-                        'oracleSparringNodes', 100_000
+                        'oracleSparringNodes', 5_000
                     ),
                     'oracle_sparring_ladder_version': self._arg(
-                        'oracleSparringLadderVersion', 1
+                        'oracleSparringLadderVersion', 2
                     ),
                     'oracle_sparring_opening_seed': self._arg(
                         'oracleSparringOpeningSeed', 20260921

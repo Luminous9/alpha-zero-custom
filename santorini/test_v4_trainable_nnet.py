@@ -123,6 +123,32 @@ class V4TrainableNNetTests(unittest.TestCase):
         np.testing.assert_array_equal(second_policy, first_policy)
         self.assertEqual(second_value, first_value)
 
+    def test_v4_checkpoint_normalizes_cross_version_rng_state(self):
+        first = build_nnet(self.game, "v4")
+        with tempfile.TemporaryDirectory() as folder:
+            first.save_checkpoint(
+                folder,
+                "latest-training.pth.tar",
+                include_optimizer=True,
+                metadata={"iteration": 4},
+            )
+            path = os.path.join(folder, "latest-training.pth.tar")
+            checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+            expected_state = checkpoint["torch_rng_state"].clone()
+            checkpoint["torch_rng_state"] = expected_state.numpy().astype(np.int64)
+            torch.save(checkpoint, path)
+
+            torch.manual_seed(99)
+            second = build_nnet(self.game, "v4")
+            metadata = second.load_checkpoint(
+                folder, "latest-training.pth.tar", load_optimizer=True
+            )
+
+        self.assertEqual(metadata["iteration"], 4)
+        self.assertEqual(torch.get_rng_state().dtype, torch.uint8)
+        self.assertEqual(torch.get_rng_state().device.type, "cpu")
+        torch.testing.assert_close(torch.get_rng_state(), expected_state)
+
 
 if __name__ == "__main__":
     unittest.main()
