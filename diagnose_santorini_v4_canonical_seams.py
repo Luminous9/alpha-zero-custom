@@ -13,7 +13,6 @@ tactical complexity, so stage/source composition is retained in the report.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import time
@@ -21,10 +20,14 @@ import time
 import numpy as np
 import torch
 
-from santorini.D4Canonical import canonicalize_board
 from santorini.SantoriniGame import SantoriniGame
-from santorini.SantoriniOracle import anonymous_board_key
 from santorini.V4BootstrapCorpus import SOURCE_NAMES, STAGE_NAMES
+from santorini.V4SeamTelemetry import (
+    file_sha256,
+    quartile_buckets,
+    raw_selection_boards,
+    seam_profile,
+)
 from santorini.V4Supervised import (
     DEFAULT_ALPHA_BOOT,
     DEFAULT_STAGE_RELIABILITY,
@@ -32,9 +35,6 @@ from santorini.V4Supervised import (
     StreamingPreparedV4Corpus,
 )
 from santorini.pytorch.V4NNet import load_v4_checkpoint
-
-
-IDENTITY_TRANSFORM = (0, False)
 
 
 def parse_args():
@@ -89,70 +89,6 @@ def _checkpoint_specs(values):
     if len(specs) < 2:
         raise ValueError("The seam diagnostic requires at least two checkpoints.")
     return specs
-
-
-def _file_sha256(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _raw_selection_boards(engine_path, run13_path, plan_path):
-    with np.load(plan_path, allow_pickle=False) as plan, np.load(
-        engine_path, allow_pickle=False
-    ) as engine, np.load(run13_path, allow_pickle=False) as run13:
-        if np.any(plan["split_ids"] != 1):
-            raise ValueError("Seam diagnostic requires a selection-only plan.")
-        boards = []
-        for corpus_id, position_index in zip(
-            plan["corpus_ids"], plan["position_indices"]
-        ):
-            payload = engine if int(corpus_id) == 0 else run13
-            position_index = int(position_index)
-            if int(payload["split_ids"][position_index]) != 1:
-                raise ValueError("Selection plan points outside the selection split.")
-            boards.append(payload["boards"][position_index].astype(np.int8))
-    return boards
-
-
-def seam_profile(game, board):
-    """Return unique-successor frame-switch exposure for one canonical board."""
-    _, current_transforms, _ = canonicalize_board(board)
-    if IDENTITY_TRANSFORM not in current_transforms:
-        raise ValueError("Seam input board is not in its D4 canonical frame.")
-    successors = {}
-    valid_actions = np.flatnonzero(game.getValidMoves(board, 1))
-    for action in valid_actions:
-        next_board, next_player = game.getNextState(board, 1, int(action))
-        next_canonical = game.getCanonicalForm(next_board, next_player)
-        successor_key = anonymous_board_key(next_canonical)
-        if successor_key in successors:
-            continue
-        _, transforms, _ = canonicalize_board(next_canonical)
-        successors[successor_key] = IDENTITY_TRANSFORM not in transforms
-    if not successors:
-        raise ValueError("Selection seam input has no legal successors.")
-    switches = int(sum(successors.values()))
-    return {
-        "legal_actions": int(len(valid_actions)),
-        "unique_successors": int(len(successors)),
-        "frame_switch_successors": switches,
-        "frame_switch_exposure": switches / float(len(successors)),
-        "current_stabilizer_size": int(len(current_transforms)),
-    }
-
-
-def quartile_buckets(exposures):
-    """Assign stable equal-count quartiles without choosing data-driven cutoffs."""
-    exposures = np.asarray(exposures, dtype=np.float64)
-    if exposures.ndim != 1 or not len(exposures):
-        raise ValueError("Exposure values must be a nonempty vector.")
-    order = np.argsort(exposures, kind="stable")
-    buckets = np.empty(len(exposures), dtype=np.int8)
-    buckets[order] = np.minimum(3, 4 * np.arange(len(exposures)) // len(exposures))
-    return buckets
 
 
 def _evaluate_model(model, corpus, planes, batch_size, device):
@@ -229,7 +165,7 @@ def diagnose(args):
     device = _device(args.device)
     specs = _checkpoint_specs(args.checkpoints)
     game = SantoriniGame(5, sequential_placement=True)
-    boards = _raw_selection_boards(
+    boards = raw_selection_boards(
         args.engine_corpus, args.run13_component, args.selection_plan
     )
     profiles = []
@@ -268,7 +204,7 @@ def diagnose(args):
         model_metrics[name] = metrics
         model_reports[name] = {
             "checkpoint": path,
-            "checkpoint_sha256": _file_sha256(path),
+            "checkpoint_sha256": file_sha256(path),
             "checkpoint_epoch": checkpoint.get("epoch"),
             "config": config,
             "overall": _mean_metrics(metrics, np.ones(len(corpus), dtype=bool)),

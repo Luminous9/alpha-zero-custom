@@ -161,6 +161,27 @@ class TestMainSantoriniOpenings(unittest.TestCase):
         self.assertEqual(v3_args.symmetryTelemetrySampleSize, 64)
         self.assertEqual(v2_args.symmetryTelemetrySampleSize, 0)
 
+    def test_v4_seam_telemetry_configuration_is_forwarded(self):
+        with patch(
+            'sys.argv',
+            [
+                'main_santorini.py',
+                '--v4-seam-telemetry-suite', 'seam-suite.npz',
+                '--v4-seam-telemetry-interval', '3',
+                '--v4-seam-telemetry-batch-size', '128',
+                '--v4-seam-telemetry-bootstrap-samples', '500',
+                '--v4-seam-telemetry-seed', '42',
+                '--v4-seam-telemetry-alert-delta', '0.04',
+            ],
+        ):
+            coach_args = build_coach_args(parse_args())
+        self.assertEqual(coach_args.v4SeamTelemetrySuite, 'seam-suite.npz')
+        self.assertEqual(coach_args.v4SeamTelemetryInterval, 3)
+        self.assertEqual(coach_args.v4SeamTelemetryBatchSize, 128)
+        self.assertEqual(coach_args.v4SeamTelemetryBootstrapSamples, 500)
+        self.assertEqual(coach_args.v4SeamTelemetrySeed, 42)
+        self.assertEqual(coach_args.v4SeamTelemetryAlertDelta, 0.04)
+
     def test_exact_inference_reuse_defaults_to_v3_only(self):
         with patch('sys.argv', ['main_santorini.py', '--architecture', 'v3']):
             v3_args = build_coach_args(parse_args())

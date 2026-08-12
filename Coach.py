@@ -47,6 +47,14 @@ except ImportError:
     flatten_aggregate = suite_fingerprint = None
 
 try:
+    from santorini.V4SeamTelemetry import (
+        evaluate_seam_telemetry,
+        load_seam_telemetry_suite,
+    )
+except ImportError:
+    evaluate_seam_telemetry = load_seam_telemetry_suite = None
+
+try:
     from santorini.SantoriniOpeningBook import SantoriniRandomOpeningSampler
 except ImportError:
     SantoriniRandomOpeningSampler = None
@@ -113,6 +121,19 @@ class Coach():
         self._playout_cap_stats = self._newPlayoutCapStats()
         self._tactical_stats = self._newTacticalStats()
         self._symmetry_telemetry_suite = None
+        self._v4_seam_telemetry_suite = None
+        seam_suite_path = self._arg('v4SeamTelemetrySuite', None)
+        if seam_suite_path:
+            if load_seam_telemetry_suite is None:
+                raise RuntimeError('V4 seam telemetry support is unavailable.')
+            self._v4_seam_telemetry_suite = load_seam_telemetry_suite(
+                seam_suite_path
+            )
+            log.info(
+                'Loaded frozen V4 seam telemetry suite (%s positions): %s',
+                len(self._v4_seam_telemetry_suite['boards']),
+                seam_suite_path,
+            )
         self._reference_suite = None
         reference_suite_path = self._arg('referenceSuite', None)
         if reference_suite_path:
@@ -1304,6 +1325,7 @@ class Coach():
         payload.update(self._searchSymmetryTelemetry())
         symmetry_metrics = self._symmetryTelemetry()
         payload.update(symmetry_metrics)
+        payload.update(self._v4SeamTelemetry(iteration))
         payload.update(self._policyTelemetry())
         if self._reference_suite is not None:
             payload.update(self._reference_suite.evaluate(self.game, self.nnet))
@@ -1482,6 +1504,41 @@ class Coach():
                 suite['buckets'],
             ),
         })
+        return metrics
+
+    def _v4SeamTelemetry(self, iteration):
+        suite = getattr(self, '_v4_seam_telemetry_suite', None)
+        if suite is None:
+            return {}
+        interval = int(self._arg('v4SeamTelemetryInterval', 1))
+        if interval < 1:
+            raise ValueError('V4 seam telemetry interval must be positive.')
+        if int(iteration) % interval:
+            return {
+                'v4_seam_telemetry_due': False,
+                'v4_seam_suite_fingerprint': suite['fingerprint'],
+            }
+        if evaluate_seam_telemetry is None:
+            raise RuntimeError('V4 seam telemetry support is unavailable.')
+        with preserve_rng_state():
+            metrics = evaluate_seam_telemetry(
+                self.nnet,
+                suite,
+                batch_size=int(self._arg('v4SeamTelemetryBatchSize', 256)),
+                bootstrap_samples=int(self._arg(
+                    'v4SeamTelemetryBootstrapSamples', 2000
+                )),
+                seed=int(self._arg('v4SeamTelemetrySeed', 20260818)),
+                alert_delta=float(self._arg('v4SeamTelemetryAlertDelta', 0.02)),
+            )
+        if metrics['v4_seam_warning']:
+            log.warning(
+                'V4 seam sentinel increased by %.4f (95%% %.4f to %.4f) '
+                'relative to the frozen P1c high-minus-low contrast.',
+                metrics['v4_seam_contrast_delta_from_baseline'],
+                metrics['v4_seam_contrast_delta_bootstrap_95_low'],
+                metrics['v4_seam_contrast_delta_bootstrap_95_high'],
+            )
         return metrics
 
     def _recordPlacementChoice(self, ply, action):

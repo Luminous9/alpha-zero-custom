@@ -353,6 +353,27 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        '--v4-seam-telemetry-suite',
+        type=str,
+        help=(
+            'Frozen P1c seam-suite .npz. When set, report exposure-quartile '
+            'losses and their high-minus-low regression during P2.'
+        ),
+    )
+    parser.add_argument('--v4-seam-telemetry-interval', type=int, default=1)
+    parser.add_argument('--v4-seam-telemetry-batch-size', type=int, default=256)
+    parser.add_argument('--v4-seam-telemetry-bootstrap-samples', type=int, default=2000)
+    parser.add_argument('--v4-seam-telemetry-seed', type=int, default=20260818)
+    parser.add_argument(
+        '--v4-seam-telemetry-alert-delta',
+        type=float,
+        default=0.02,
+        help=(
+            'Warn when the Q4-minus-Q1 objective contrast has increased this '
+            'much from the frozen P1c baseline.'
+        ),
+    )
+    parser.add_argument(
         '--anchor-checkpoint',
         type=str,
         help='Exact checkpoint file, or a directory containing one, for fixed-opponent telemetry.',
@@ -382,6 +403,18 @@ def parse_args():
         and args.symmetry_telemetry_sample_size < 0
     ):
         parser.error('--symmetry-telemetry-sample-size cannot be negative.')
+    for option, value in (
+        ('--v4-seam-telemetry-interval', args.v4_seam_telemetry_interval),
+        ('--v4-seam-telemetry-batch-size', args.v4_seam_telemetry_batch_size),
+        (
+            '--v4-seam-telemetry-bootstrap-samples',
+            args.v4_seam_telemetry_bootstrap_samples,
+        ),
+    ):
+        if value < 1:
+            parser.error('{} must be at least 1.'.format(option))
+    if args.v4_seam_telemetry_alert_delta < 0:
+        parser.error('--v4-seam-telemetry-alert-delta cannot be negative.')
     if args.inference_cache_size is not None and args.inference_cache_size < 0:
         parser.error('--inference-cache-size cannot be negative.')
     if args.policy_target_temperature is not None and args.policy_target_temperature < 0:
@@ -647,6 +680,22 @@ def build_coach_args(parsed_args):
             parsed_args.symmetry_telemetry_sample_size
             if parsed_args.symmetry_telemetry_sample_size is not None
             else (64 if parsed_args.architecture == 'v3' else 0)
+        ),
+        'v4SeamTelemetrySuite': getattr(parsed_args, 'v4_seam_telemetry_suite', None),
+        'v4SeamTelemetryInterval': getattr(
+            parsed_args, 'v4_seam_telemetry_interval', 1
+        ),
+        'v4SeamTelemetryBatchSize': getattr(
+            parsed_args, 'v4_seam_telemetry_batch_size', 256
+        ),
+        'v4SeamTelemetryBootstrapSamples': getattr(
+            parsed_args, 'v4_seam_telemetry_bootstrap_samples', 2000
+        ),
+        'v4SeamTelemetrySeed': getattr(
+            parsed_args, 'v4_seam_telemetry_seed', 20260818
+        ),
+        'v4SeamTelemetryAlertDelta': getattr(
+            parsed_args, 'v4_seam_telemetry_alert_delta', 0.02
         ),
     })
 

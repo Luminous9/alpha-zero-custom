@@ -369,7 +369,37 @@ Base config inherits Run13 (latest mode, Gumbel search, playout-cap randomizatio
 - **Storage:** keep z, v_oracle, node budget, engine/calibration version, source type, and an oracle-valid mask as separate replay fields. Blending is a training-time knob; changing lambda must never require regenerating data.
 - Telemetry: auxiliary prediction versus oracle label, oracle label/main-head/z versus the deeper adjudication suite, main-loss changes with auxiliary gradients, sparring win rate by ladder rung, and seeded-start replay fraction/source age. Auxiliary agreement alone measures learnability, not oracle truth.
 
-### 6.4 Deferred to a following run
+### 6.4 Frozen canonical-seam sentinel
+
+Carry the P1b seam diagnostic through P2 as a fixed regression sentinel. The
+suite is the same 3,000 canonical selection positions, the same stable
+750-position exposure quartiles, and the same global-blend teacher policy/value
+targets. It also freezes the P1c handoff checkpoint's per-position losses. P2's
+main value target still switches to pure self-play `z`; changing that training
+semantic must not change this diagnostic's semantic.
+
+Evaluate the suite after every completed training iteration through the exact
+canonical inference wrapper. Record overall and Q1-Q4 policy CE, value MSE,
+combined objective (`0.25 * policy_ce + value_mse`), and policy top-1. The
+primary sentinel is the change from P1c in the Q4-minus-Q1 objective contrast,
+computed from paired per-position excess losses. Report a deterministic paired
+bootstrap interval. A contrast increase above `+0.02` is an early warning; call
+it confirmed only when the 95% interval also clears zero. This is telemetry, not
+an automatic strength gate: one warning prompts inspection, while a confirmed
+warning or a persistent upward trend pauses promotion for a targeted
+frame-switch/search diagnostic and exposure-stratified arena. Do not silently
+change the suite, targets, quartiles, baseline, or threshold during P2.
+
+The frozen P1c baseline objective is `0.737597`; Q1 is `0.699188`, Q4 is
+`0.760605`, and the baseline high-minus-low contrast is `+0.061416`. The suite
+artifact is `temp/santorini_v4_p2_preparation/v4-seam-telemetry-suite.npz`
+(SHA-256 `a25633021d8cef71e87b307c9b2369e8df5d8599de52848a443046b37a5fcd7e`).
+It is generated reproducibly by `prepare_santorini_v4_seam_telemetry.py` and
+enabled with `--v4-seam-telemetry-suite`; its runtime is charged to the existing
+arena/telemetry wall-clock bucket and its evaluation preserves all training RNG
+states.
+
+### 6.5 Deferred to a following run
 
 Folding oracle value into the search-facing target,
 `(1-lambda)*z + lambda*v_oracle`, with lambda chosen from the oracle label's measured accuracy against deeper adjudication plus a direct playing-strength ablation - not from auxiliary-head agreement and not by guess. Apart from the explicitly declared coherent-teacher bootstrap exception in §5.2, this search-facing blend stays out of V4's first AlphaZero run.
@@ -404,6 +434,7 @@ Working expectation to be replaced by measurement: candidate B is ~2.2x V3 dense
 | Bootstrap target transition hurts        | winner-only matches blend or blended handoff regresses                    | Prefer winner-only; otherwise reduce `alpha_boot` or add a short winner-only transition before self-play                                 |
 | Auxiliary gradients hurt main heads      | auxiliary-on validation/arena branch regresses                            | Keep auxiliary weight low or disable it; stored labels and telemetry remain useful                                                       |
 | Value-semantics mismatch shows up later  | future main-head blend regresses at deep search                           | `lambda` stays 0; auxiliary head retained only if its shared-trunk ablation is healthy                                                    |
+| Canonical seam emerges during self-play | frozen Q4-minus-Q1 excess-loss contrast rises by >0.02 or its interval clears zero | Keep the frozen suite unchanged; inspect exposure-stratified policy/value losses and run a targeted frame-switch/search diagnostic before promotion |
 
 ## 10. Milestones
 
@@ -414,5 +445,5 @@ Working expectation to be replaced by measurement: candidate B is ~2.2x V3 dense
 5. **P1b.2 - scaled architecture and target selection (complete):** the matched 100k/300k/1M curves select canonical ordinary 6x192 by supervised fit plus the frozen ordinary-family speed tie-break. Exact batched D4 inference reaches 3,285 examples/s at arena-relevant batch eight on P100, with a 24% latency premium over the identical uncanonicalized wrapper. Equivariant E retains a small early-stage advantage but loses the supervised/arena selection overall. The required 1M target ablation rejects winner-only noninferiority: its common handoff objective is +0.01031 worse, with a paired interval of +0.00169 to +0.01868, while the standard/full arenas cancel 40-40. Retain global blend (`alpha_boot=0.5`, `T=261.8`) and explicitly switch the main target to pure self-play `z` at handoff. Final data and arena seeds remain untouched.
 6. **P1c - full corpus and pretraining (complete):** the selected canonical ordinary 6x192/global-blend model completed four epochs over the 10,640,649-draw frozen epoch with the pure T25 oracle placement policy. All input hashes match and no final data were touched. Epoch four wins the standard-only combined objective at 0.73775, improving 9.09% over the selected 1M-screen checkpoint; policy top-1 rises from 38.53% to 43.97%. The final epoch adds only 0.95% objective improvement and held-out value bottoms at epoch three, while the Run13-replay subgroup does not improve. Therefore do not authorize 20M datagen before the transfer gate. Placement fit is healthy (99.9963% legal mass and only 0.00889 policy CE above target entropy), but shared roots make this a pipeline check rather than generalization evidence. Proceed to G1 with checkpoint SHA-256 `374f0b72adbdf009d19abaed87addbdfe89364ecc1e6a7246b423233be51b42e`.
 7. **Gate G1 (complete; green after diagnostic):** P1c beats Run13 28-12/30-10 on standard selection openings and 40-0/39-1 from sampled empty-board starts at equal 96/128 simulations. Equal-cost P1c-128 versus Run13-120 scores 31-9 standard and 40-0 full. The symmetric phase-gap rule correctly paused on the unexpectedly positive +30/+22.5-point full-game gaps. A separate 40-game-per-arm, selection-only decomposition resolves the stop: with shared P1c continuation, P1c placements score 50%/52.5%; with shared Run13, 45%/37.5%; replaying a balanced sample of those exact openings with normal contestants scores 97.5%/87.5%; greedy full placement at 128 remains 40-0. Controller substitution leaves placement boards identical. Thus the gap is natural-opening standard-play distribution/style compatibility, not mapping, seating, or sampling failure. Proceed to P2 while retaining placement-only telemetry. Final data remain untouched.
-8. **P2 - self-play:** sparring + refreshed seeded starts + low-weight auxiliary head, each independently switchable; replay/telemetry schema extended.
+8. **P2 - self-play:** sparring + refreshed seeded starts + low-weight auxiliary head, each independently switchable; replay/telemetry schema extended. Evaluate the frozen 3k seam suite after every iteration and track its P1c-relative Q4-minus-Q1 excess-loss contrast before playing-strength effects are allowed to hide the regression.
 9. **Review:** after ~20-30 iterations, run the 96/128/1024 battery and component ablations; decide whether to study a nonzero search-facing `lambda` in a following run.

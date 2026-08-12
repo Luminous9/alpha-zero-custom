@@ -381,3 +381,22 @@ The decomposition is resumable via
 `diagnose_santorini_v4_g1_phase_gap.py`; its summary is
 `temp/santorini_v4_g1_phase_gap/summary.json`. Neither diagnostic nor G1 touched
 the final test set or final arena seeds.
+
+### P2 canonical-seam telemetry handoff
+
+The earlier frozen seam diagnostic is now a first-class P2 regression sentinel.
+`prepare_santorini_v4_seam_telemetry.py` materializes the unchanged 3,000
+selection positions, sparse teacher-policy targets, global-blend value targets,
+stable exposure-quartile assignments, and P1c per-position baseline losses into
+`temp/santorini_v4_p2_preparation/v4-seam-telemetry-suite.npz`. Its SHA-256 is
+`a25633021d8cef71e87b307c9b2369e8df5d8599de52848a443046b37a5fcd7e`; the
+embedded P1c checkpoint SHA matches the G1 checkpoint exactly.
+
+Through exact canonical inference, the frozen P1c objective is `0.737597`, with
+Q1 `0.699188`, Q4 `0.760605`, and an inherent Q4-minus-Q1 contrast of
+`+0.061416`. P2 telemetry therefore tracks the *change from that contrast*, not
+the raw contrast. It runs after each completed iteration, preserves Python,
+NumPy, CPU Torch, and CUDA RNG states, and charges its cost to arena/telemetry.
+An excess contrast above `+0.02` warns; it is confirmed only if the deterministic
+paired-bootstrap 95% interval also clears zero. This remains a diagnostic
+association rather than an automatic strength stop.

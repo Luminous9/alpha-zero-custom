@@ -230,6 +230,37 @@ class TestSantoriniCoachExamples(unittest.TestCase):
             reloaded._prepareSymmetryTelemetrySuite([])
             self.assertEqual(len(reloaded._symmetry_telemetry_suite['boards']), 1)
 
+    def test_v4_seam_telemetry_obeys_cadence(self):
+        coach = object.__new__(Coach)
+        coach.nnet = BatchCountingNNet(TinyGame())
+        coach.args = dotdict({
+            'v4SeamTelemetryInterval': 2,
+            'v4SeamTelemetryBatchSize': 17,
+            'v4SeamTelemetryBootstrapSamples': 25,
+            'v4SeamTelemetrySeed': 9,
+            'v4SeamTelemetryAlertDelta': 0.03,
+        })
+        coach._v4_seam_telemetry_suite = {
+            'fingerprint': 'suite-sha',
+            'boards': np.zeros((4, 2, 5, 5), dtype=np.int8),
+        }
+        skipped = coach._v4SeamTelemetry(1)
+        self.assertFalse(skipped['v4_seam_telemetry_due'])
+        with patch('Coach.evaluate_seam_telemetry', return_value={
+            'v4_seam_telemetry_due': True,
+            'v4_seam_warning': False,
+        }) as evaluate:
+            due = coach._v4SeamTelemetry(2)
+        self.assertTrue(due['v4_seam_telemetry_due'])
+        evaluate.assert_called_once_with(
+            coach.nnet,
+            coach._v4_seam_telemetry_suite,
+            batch_size=17,
+            bootstrap_samples=25,
+            seed=9,
+            alert_delta=0.03,
+        )
+
     def test_search_symmetry_stats_are_drained_into_scalar_telemetry(self):
         coach = object.__new__(Coach)
         coach.args = dotdict({'searchSymmetryEvaluation': True})
