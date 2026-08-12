@@ -329,3 +329,55 @@ handoff is `g1-summary.json`; it also contains the pre-game calibration, every
 arena record, and both job contracts. The runner validates every embedded hash
 and safely reuses only complete reports with the exact frozen parameters if a
 notebook is resumed. Final-test data and final arena seeds remain untouched.
+
+## Gate G1 result and phase-gap resolution
+
+All returned hashes and contracts match, and recomputing the summary produces
+the returned JSON byte-for-byte. P1c clears the strength requirement by a wide
+margin:
+
+| Comparison | 96 simulations | 128 simulations |
+| --- | ---: | ---: |
+| Standard selection openings | 28-12, 70.0% (60.0%-80.0%) | 30-10, 75.0% (65.0%-85.0%) |
+| Full game, sampled placement | 40-0, 100% (100%-100%) | 39-1, 97.5% (92.5%-100%) |
+
+Parentheses are paired-block bootstrap 95% intervals. Both standard gates are
+green. The predeclared symmetric phase-gap rule nevertheless emitted
+`stop_and_debug`: full-minus-standard was +30.0 points at 96 simulations
+(20.0%-40.0%) and +22.5 at 128 (12.5%-32.5%). No primary score entered the stop
+region. The supplementary equal-cost comparison, P1c 128 versus Run13 120,
+was likewise strong: 77.5% standard and 100% full. Batch-eight model cost was
+effectively equal before counting Run13's extra root frames (ratio 0.996), and
+the predicted per-move cost mismatch was 0.42%.
+
+The stop was honored with a separate selection-only decomposition using seed
+`20260911`, 40 paired games per arm, exact canonical 1/1 P1c evaluation, and
+Run13's 8/8 evaluation roots. Each network first selected sampled placements;
+both sides then used either shared P1c or shared Run13 standard play. Changing
+the shared controller left every completed placement identical. A balanced
+alternation of the exact seat-generated openings was then replayed with the
+original two contestants, and a greedy-placement control tested sampling:
+
+| Diagnostic | 96 simulations | 128 simulations |
+| --- | ---: | ---: |
+| P1c placements, shared P1c continuation | 50.0% (37.5%-62.5%) | 52.5% (37.5%-67.5%) |
+| P1c placements, shared Run13 continuation | 45.0% (27.5%-62.5%) | 37.5% (25.0%-50.0%) |
+| Exact balanced sampled openings, normal contestants | 97.5% (92.5%-100%) | 87.5% (77.5%-97.5%) |
+| Normal full game, greedy placement | - | 100% (100%-100%) |
+
+The shared-controller arms show that P1c does not obtain universally dominant
+placements; in particular, its choices lean toward its own continuation style.
+But exact-opening replay reproduces most of the full-game advantage after
+placement ownership is erased, and greedy placement retains the sweep. Combined
+with the standard-suite strata—the 128-simulation score is 87.5% early, 92.9%
+middle, but 55.6% late—the positive phase gap is explained by standard-play
+distribution/style compatibility from natural zero-height openings. It is not
+a placement action mapping, seat coupling, or stochastic sampling defect.
+
+Preserve the original `stop_and_debug` result, but resolve it as
+`green_after_diagnostic` and proceed to P2. Retain placement-only telemetry in
+P2 because the policy is not universally better under a foreign continuation.
+The decomposition is resumable via
+`diagnose_santorini_v4_g1_phase_gap.py`; its summary is
+`temp/santorini_v4_g1_phase_gap/summary.json`. Neither diagnostic nor G1 touched
+the final test set or final arena seeds.
