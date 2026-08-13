@@ -1,6 +1,7 @@
 """Inference and AlphaZero-training adapters for V4 checkpoints."""
 
 from collections import OrderedDict
+import hashlib
 import logging
 import os
 import random
@@ -338,7 +339,7 @@ class V4TrainableNNet(NNetWrapper):
             optim.AdamW if self.net_args.optimizer == "adamw" else optim.Adam
         )
         self.optimizer = optimizer_class(
-            self.nnet.parameters(),
+            self._optimizer_parameter_groups(),
             lr=self.net_args.lr,
             weight_decay=self.net_args.weight_decay,
         )
@@ -352,7 +353,75 @@ class V4TrainableNNet(NNetWrapper):
             permutations, dtype=torch.long, device=self.device
         )
         self._inference_nnet = None
+        self._value_target_anchor = None
+        self._value_target_anchor_path = None
+        self._value_target_anchor_sha256 = None
         self._refresh_inference_model()
+
+    def _optimizer_parameter_groups(self):
+        policy_lr = self.net_args.policy_head_lr
+        value_lr = self.net_args.value_head_lr
+        if policy_lr is None and value_lr is None:
+            return self.nnet.parameters()
+
+        groups = {'trunk': [], 'policy_head': [], 'value_head': []}
+        for name, parameter in self.nnet.named_parameters():
+            if name.startswith('policy_conv.'):
+                groups['policy_head'].append(parameter)
+            elif name.startswith(('value_conv.', 'value_bn.', 'value_fc1.', 'value_fc2.')):
+                groups['value_head'].append(parameter)
+            else:
+                groups['trunk'].append(parameter)
+        if any(not parameters for parameters in groups.values()):
+            raise ValueError('V4 differential optimizer produced an empty parameter group.')
+        flattened = [parameter for group in groups.values() for parameter in group]
+        if len(flattened) != len(list(self.nnet.parameters())) or len(set(flattened)) != len(flattened):
+            raise ValueError('V4 differential optimizer did not partition model parameters.')
+        return [
+            {
+                'params': groups['trunk'],
+                'group_name': 'trunk',
+                'lr': float(self.net_args.lr),
+            },
+            {
+                'params': groups['policy_head'],
+                'group_name': 'policy_head',
+                'lr': float(policy_lr if policy_lr is not None else self.net_args.lr),
+            },
+            {
+                'params': groups['value_head'],
+                'group_name': 'value_head',
+                'lr': float(value_lr if value_lr is not None else self.net_args.lr),
+            },
+        ]
+
+    def _configure_optimizer_for_iteration(self, learning_rate, runtime_args):
+        configured = {
+            'trunk': float(learning_rate),
+            'policy_head': float(
+                runtime_args.policy_head_lr
+                if runtime_args.policy_head_lr is not None else learning_rate
+            ),
+            'value_head': float(
+                runtime_args.value_head_lr
+                if runtime_args.value_head_lr is not None else learning_rate
+            ),
+        }
+        if len(self.optimizer.param_groups) == 1:
+            if runtime_args.policy_head_lr is not None or runtime_args.value_head_lr is not None:
+                raise ValueError(
+                    'Differential V4 learning rates require named optimizer groups.'
+                )
+            self.optimizer.param_groups[0]['lr'] = float(learning_rate)
+            self.optimizer.param_groups[0]['weight_decay'] = runtime_args.weight_decay
+            return configured
+        names = {group.get('group_name') for group in self.optimizer.param_groups}
+        if names != set(configured):
+            raise ValueError('V4 optimizer groups do not match trunk/policy/value contract.')
+        for group in self.optimizer.param_groups:
+            group['lr'] = configured[group['group_name']]
+            group['weight_decay'] = runtime_args.weight_decay
+        return configured
 
     @staticmethod
     def encode_board(board):
@@ -443,7 +512,76 @@ class V4TrainableNNet(NNetWrapper):
             )
         return restored
 
-    def _encode_training_examples(self, examples):
+    @staticmethod
+    def _file_sha256(path):
+        digest = hashlib.sha256()
+        with open(path, 'rb') as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _value_target_beta(self, iteration):
+        start_iteration = int(self.net_args.value_target_beta_start_iteration)
+        end_iteration = int(self.net_args.value_target_beta_end_iteration)
+        if iteration is None:
+            raise ValueError('Anchored value targets require an absolute iteration.')
+        if end_iteration < start_iteration:
+            raise ValueError('Value-target beta end iteration precedes its start.')
+        start = float(self.net_args.value_target_beta_start)
+        end = float(self.net_args.value_target_beta_end)
+        if end_iteration == start_iteration:
+            return end if int(iteration) >= end_iteration else start
+        progress = np.clip(
+            (int(iteration) - start_iteration) / (end_iteration - start_iteration),
+            0.0,
+            1.0,
+        )
+        return float(start + progress * (end - start))
+
+    def _ensure_value_target_anchor(self):
+        path = self.net_args.value_target_anchor_checkpoint
+        if not path:
+            return None
+        path = os.path.abspath(path)
+        if self._value_target_anchor is not None:
+            if path != self._value_target_anchor_path:
+                raise ValueError('Value-target anchor checkpoint changed during training.')
+            return self._value_target_anchor
+        python_state = random.getstate()
+        numpy_state = np.random.get_state()
+        torch_state = torch.get_rng_state()
+        cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        try:
+            self._value_target_anchor = V4InferenceWrapper(
+                self.game,
+                path,
+                device=self.device,
+                autocast_fp16=False,
+                freeze_torchscript=True,
+                canonicalize_d4=True,
+            )
+        finally:
+            random.setstate(python_state)
+            np.random.set_state(numpy_state)
+            torch.set_rng_state(torch_state)
+            if cuda_states is not None:
+                torch.cuda.set_rng_state_all(cuda_states)
+        self._value_target_anchor_path = path
+        self._value_target_anchor_sha256 = self._file_sha256(path)
+        return self._value_target_anchor
+
+    def _anchored_values(self, boards):
+        anchor = self._ensure_value_target_anchor()
+        batch_size = int(self.net_args.value_target_anchor_batch_size)
+        if batch_size < 1:
+            raise ValueError('Value-target anchor batch size must be positive.')
+        values = []
+        for start in range(0, len(boards), batch_size):
+            _, batch_values = anchor.predict_batch(boards[start:start + batch_size])
+            values.append(batch_values)
+        return np.concatenate(values).astype(np.float32, copy=False)
+
+    def _encode_training_examples(self, examples, iteration=None):
         boards = [example[0] for example in examples]
         policies = [example[1] for example in examples]
         values = [example[2] for example in examples]
@@ -452,10 +590,35 @@ class V4TrainableNNet(NNetWrapper):
             np.asarray(boards),
             np.asarray(policies, dtype=np.float32),
         )
+        target_values = np.asarray(values, dtype=np.float32)
+        anchor_path = self.net_args.value_target_anchor_checkpoint
+        if anchor_path:
+            beta = self._value_target_beta(iteration)
+            anchor_values = self._anchored_values(np.asarray(boards))
+            target_values = (
+                (1.0 - beta) * anchor_values + beta * target_values
+            ).astype(np.float32, copy=False)
+            self._last_value_target_metrics = {
+                'value_target_mode': 'p1c_anchor_to_outcome_z',
+                'value_target_beta': float(beta),
+                'value_target_anchor_checkpoint_sha256': self._value_target_anchor_sha256,
+                'value_target_anchor_prediction_mean': float(np.mean(anchor_values)),
+                'value_target_outcome_mean': float(np.mean(values)),
+                'value_target_blended_mean': float(np.mean(target_values)),
+                'value_target_anchor_outcome_mse': float(np.mean(
+                    (anchor_values - np.asarray(values, dtype=np.float32)) ** 2
+                )),
+            }
+        else:
+            self._last_value_target_metrics = {
+                'value_target_mode': 'outcome_z',
+                'value_target_beta': 1.0,
+                'value_target_anchor_checkpoint_sha256': None,
+            }
         return (
             encode_v4_boards(canonical_boards),
             canonical_policies.astype(np.float32, copy=False),
-            np.asarray(values, dtype=np.float32),
+            target_values,
         )
 
     def predict_batch(self, boards):
@@ -559,7 +722,10 @@ class V4TrainableNNet(NNetWrapper):
                     filepath,
                 )
             else:
-                self.optimizer.load_state_dict(optimizer_state)
+                try:
+                    self.optimizer.load_state_dict(optimizer_state)
+                except ValueError as error:
+                    self._load_single_group_optimizer_state(optimizer_state, error)
             if "numpy_rng_state" in checkpoint:
                 np.random.set_state(checkpoint["numpy_rng_state"])
             if "python_rng_state" in checkpoint:
@@ -572,3 +738,60 @@ class V4TrainableNNet(NNetWrapper):
                 self._restore_cuda_rng_states(checkpoint["cuda_rng_state_all"])
         self._refresh_inference_model()
         return checkpoint.get("training_metadata", {})
+
+    def _load_single_group_optimizer_state(self, saved_state, original_error):
+        """Migrate the accepted one-group AdamW state into V4 named groups.
+
+        The accepted iteration-one checkpoint predates differential head rates.
+        Parameter order in its sole group is model order. V4's named groups are
+        deliberately concatenated in that same trunk/policy/value order, so the
+        moment tensors can be transferred without resetting the optimizer.
+        """
+        saved_groups = saved_state.get('param_groups', [])
+        if len(saved_groups) != 1 or len(self.optimizer.param_groups) == 1:
+            raise original_error
+        saved_ids = list(saved_groups[0].get('params', []))
+        current_state = self.optimizer.state_dict()
+        current_ids = [
+            parameter_id
+            for group in current_state['param_groups']
+            for parameter_id in group['params']
+        ]
+        model_parameters = list(self.nnet.parameters())
+        current_parameters = [
+            parameter
+            for group in self.optimizer.param_groups
+            for parameter in group['params']
+        ]
+        if (
+            len(saved_ids) != len(current_ids)
+            or len(current_parameters) != len(model_parameters)
+            or not all(
+                current is expected
+                for current, expected in zip(current_parameters, model_parameters)
+            )
+        ):
+            raise ValueError(
+                'Cannot safely migrate one-group optimizer state into V4 named groups.'
+            ) from original_error
+        migrated_state = {
+            current_id: saved_state.get('state', {}).get(saved_id, {})
+            for saved_id, current_id in zip(saved_ids, current_ids)
+        }
+        shared_options = {
+            key: value
+            for key, value in saved_groups[0].items()
+            if key not in ('params', 'lr')
+        }
+        migrated_groups = current_state['param_groups']
+        for group in migrated_groups:
+            for key, value in shared_options.items():
+                if key != 'group_name':
+                    group[key] = value
+        self.optimizer.load_state_dict({
+            'state': migrated_state,
+            'param_groups': migrated_groups,
+        })
+        log.info(
+            'Migrated accepted single-group optimizer state into V4 differential groups.'
+        )

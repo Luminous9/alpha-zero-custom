@@ -21,6 +21,12 @@ class V4TrainableNNetTests(unittest.TestCase):
             for key in (
                 "cuda", "optimizer", "lr", "weight_decay",
                 "v4_freeze_torchscript", "v4_autocast_fp16",
+                "policy_head_lr", "value_head_lr",
+                "value_target_anchor_checkpoint",
+                "value_target_beta_start", "value_target_beta_end",
+                "value_target_beta_start_iteration",
+                "value_target_beta_end_iteration",
+                "value_target_anchor_batch_size",
             )
         }
         nnet_args.cuda = False
@@ -29,6 +35,14 @@ class V4TrainableNNetTests(unittest.TestCase):
         nnet_args.weight_decay = 1e-4
         nnet_args.v4_freeze_torchscript = False
         nnet_args.v4_autocast_fp16 = False
+        nnet_args.policy_head_lr = None
+        nnet_args.value_head_lr = None
+        nnet_args.value_target_anchor_checkpoint = None
+        nnet_args.value_target_beta_start = 1.0
+        nnet_args.value_target_beta_end = 1.0
+        nnet_args.value_target_beta_start_iteration = 1
+        nnet_args.value_target_beta_end_iteration = 1
+        nnet_args.value_target_anchor_batch_size = 8
         self.game = SantoriniGame(5, sequential_placement=True)
 
     def tearDown(self):
@@ -148,6 +162,63 @@ class V4TrainableNNetTests(unittest.TestCase):
         self.assertEqual(torch.get_rng_state().dtype, torch.uint8)
         self.assertEqual(torch.get_rng_state().device.type, "cpu")
         torch.testing.assert_close(torch.get_rng_state(), expected_state)
+
+    def test_differential_groups_migrate_single_group_optimizer_state(self):
+        first = build_nnet(self.game, "v4")
+        with tempfile.TemporaryDirectory() as folder:
+            first.save_checkpoint(
+                folder,
+                "single-group.pth.tar",
+                include_optimizer=True,
+                metadata={"iteration": 1},
+            )
+            nnet_args.policy_head_lr = 3e-4
+            nnet_args.value_head_lr = 3e-5
+            second = build_nnet(self.game, "v4")
+            metadata = second.load_checkpoint(
+                folder, "single-group.pth.tar", load_optimizer=True
+            )
+            rates = second._configure_optimizer_for_iteration(
+                1e-4, second._sync_runtime_args()
+            )
+
+        self.assertEqual(metadata["iteration"], 1)
+        self.assertEqual([group["group_name"] for group in second.optimizer.param_groups], [
+            "trunk", "policy_head", "value_head"
+        ])
+        self.assertEqual(rates, {
+            "trunk": 1e-4,
+            "policy_head": 3e-4,
+            "value_head": 3e-5,
+        })
+
+    def test_value_target_bridge_uses_frozen_anchor_and_iteration_beta(self):
+        board = self.board()
+        valids = np.flatnonzero(self.game.getValidMoves(board, 1))
+        policy = np.zeros(self.game.getActionSize(), dtype=np.float32)
+        policy[valids[0]] = 1.0
+        with tempfile.TemporaryDirectory() as folder:
+            anchor_path = os.path.join(folder, "anchor.pth.tar")
+            anchor = build_nnet(self.game, "v4")
+            anchor.save_checkpoint(folder, "anchor.pth.tar")
+            _, anchor_value = anchor.predict(board)
+
+            nnet_args.value_target_anchor_checkpoint = anchor_path
+            nnet_args.value_target_beta_start = 0.25
+            nnet_args.value_target_beta_end = 1.0
+            nnet_args.value_target_beta_start_iteration = 2
+            nnet_args.value_target_beta_end_iteration = 11
+            bridged = build_nnet(self.game, "v4")
+            _, _, values = bridged._encode_training_examples(
+                [(board, policy, 1.0)], iteration=2
+            )
+
+        self.assertAlmostEqual(values[0], 0.75 * anchor_value + 0.25, places=6)
+        self.assertEqual(
+            bridged._last_value_target_metrics["value_target_mode"],
+            "p1c_anchor_to_outcome_z",
+        )
+        self.assertEqual(bridged._last_value_target_metrics["value_target_beta"], 0.25)
 
 
 if __name__ == "__main__":

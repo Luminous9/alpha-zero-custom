@@ -105,13 +105,11 @@ to 9-31. The one-step teacher gate therefore caught a real, predominantly
 standard/value regression that neither the seam nor ladder controls should be
 expected to catch.
 
-The next proposed diagnostic restarts from iteration 1, fixes reuse at 2x, and
-runs only iterations 2-4 with per-iteration resumable snapshots. Promotion
-requires equal-96 standard and placement-inclusive comparisons of iteration 4
-against iteration 1. If healthy, repeat fixed 2x through iteration 7 before
-testing 3x or a lower learning rate. Add a cumulative +0.10 teacher-review
-threshold from iteration 1 to request an early strength check while retaining
-the existing +0.05 one-step automatic pause.
+The subsequent local diagnostic supersedes fixed 2x at the inherited 3e-4 LR as
+the expected fix. Search96 beats the same P1c raw policy 38-2 and exact replay
+KL is substantial, while repeated-state outcomes and cached deep labels support
+a value-target variance/semantic-switch mechanism. Fixed 2x at 3e-4 remains a
+control beside lower-LR and value-bridge arms. See `P2_SIGNAL_DIAGNOSTIC.md`.
 
 ## Artifact integrity
 

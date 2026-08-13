@@ -143,7 +143,17 @@ and `8c8617926a5efcdd177441dc741e1e2befd1199ee98aa0869999f8e844f63e8d`.
 The checkpoint is technically resumable, but **must not continue the production
 lineage**.
 
-## Proposed next diagnostic
+## Search-signal/value-semantics diagnostic
+
+The local replay and arena diagnostic is complete. Exact generating-prior KL is
+substantial for both retained windows, and P1c search96 beats its own raw legal
+prior 38-2. The policy teacher is therefore not thin. Conversely, iteration 8
+fits realized `z` much better while drifting sharply away from the cached
+250K-node value proxy, and repeated replay positions expose high outcome-label
+variance. Full methods, limitations, results, and the corrected multi-arm
+design are in `P2_SIGNAL_DIAGNOSTIC.md`.
+
+## Superseded proposed diagnostic
 
 Restart again from the accepted iteration-one checkpoint and replay. Hold reuse
 at **2x** instead of ramping, and initially run only iterations 2-4. Save a
@@ -158,9 +168,18 @@ teacher-review threshold near +0.10 from iteration 1: crossing it should save
 state and require a paired strength check, but should not by itself reject a
 checkpoint. The existing +0.05 one-step automatic pause remains in force.
 
-This is a proposed diagnostic sequence, not yet a built or authorized bundle.
-The iteration-one checkpoint remains the only accepted P2 production ancestor.
-Neither continuation attempt touched final-test data or final arena seeds.
+This fixed-2x-at-3e-4 sequence is superseded as an expected fix. It remained
+only the high-LR control in the completed multi-arm diagnostic. Arm D won the
+diagnostic: at iteration 4 it scored 26-14 standard and 31-9
+placement-inclusive against iteration 1 while moving the frozen objective only
++0.00654. The B-versus-D comparison at identical global 1e-4 LR isolates a
+large benefit from the temporary P1c-value bridge.
+
+Arm D iteration 4 is promoted as the current P2 production head. Iteration 1
+remains the immutable rollback and longitudinal anchor. The next authorized job
+continues D at fixed 2x/global 1e-4 through the beta=1 boundary at iteration 11,
+then pauses for milestone review. See `P2_D_CONTINUATION.md`. No diagnostic or
+continuation job touches final-test data or final arena seeds.
 
 Production runners use compact console logging because Kaggle's captured
 subprocess output commits terminal carriage-return redraws as separate records.

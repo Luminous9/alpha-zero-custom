@@ -459,11 +459,16 @@ control branch.
   iteration. It paused at iteration 8 (+0.06012), where equal-96 standard
   strength had collapsed 9-31 against iteration 1. The final objective step was
   primarily value loss, while seam and oracle-ratchet telemetry stayed clean.
-  Therefore no reuse ramp is currently authorized. The next diagnostic holds
-  2x through iterations 2-4, checks strength, then--only if healthy--through
-  iteration 7 before testing 3x or a lower learning rate. This is an
-  optimizer-dose transition, not retention of blended teacher labels; the P2
-  main value target remains pure self-play `z`.
+  Therefore no reuse ramp is currently authorized. A subsequent local
+  diagnostic finds substantial exact target/prior KL and a 38-2 search96 win
+  over the same P1c raw prior, ruling out a thin 96-simulation policy teacher.
+  Repeated-state outcome variance is high, while iteration 8 fits `z` better
+  but drifts sharply away from cached 250K-node values. The next step is a
+  multi-arm fine-tuning diagnostic: retain fixed 2x at 3e-4 only as control;
+  compare global 1e-4, a conservative-trunk/differential-head arm, and global
+  1e-4 with an explicit temporary P1c-value-to-`z` bridge. Details and
+  limitations are in
+  `experiments/santorini_v4/P2_SIGNAL_DIAGNOSTIC.md`.
 - **Sparring-rung ratchet:** retain the most recent 40 complete seat-swapped
   pair scores (80 games) in resumable checkpoint metadata. At 50%-55% V4 score,
   emit a watch signal. At **55% or higher**, finish and save the current
@@ -510,7 +515,15 @@ control branch.
   0.2-0.3 is no longer a default ramp target. Run a short matched auxiliary-off
   ablation because shared-trunk gradients can affect search even though the
   auxiliary output is not consumed by MCTS.
-- After the supervised-bootstrap handoff, the main value head trains on self-play z only (`lambda_blend = 0`) for this run. If the blended bootstrap won §5.2, record the resulting target-semantics transition explicitly.
+- The initial abrupt transition to self-play `z` was rejected by the controlled
+  P2 fine-tuning diagnostic. At identical global 1e-4 LR, pure-`z` Arm B scored
+  20.0% placement-inclusive against iteration 1, while Arm D's explicit frozen
+  P1c-value bridge scored 77.5%; D also led standard play 65.0% to 52.5% and had
+  less frozen-objective drift. The selected main-head exception therefore uses
+  `v_target = (1-beta) * v_P1c(s) + beta * z`, with beta 0.25 at iteration 2
+  and a linear absolute-iteration ramp to 1.0 at iteration 11. Preserve the
+  frozen anchor digest and target-mode/beta telemetry. Iteration 11 is a
+  mandatory review boundary before any post-bridge pure-`z` block.
 - Telemetry: auxiliary prediction versus oracle label, oracle label/main-head/z versus the deeper adjudication suite, main-loss changes with auxiliary gradients, sparring win rate by ladder rung, and seeded-start replay fraction/source age. Auxiliary agreement alone measures learnability, not oracle truth.
 
 ### 6.4 Frozen canonical-seam sentinel
@@ -635,5 +648,5 @@ blocked on dual-GPU support.
 5. **P1b.2 - scaled architecture and target selection (complete):** the matched 100k/300k/1M curves select canonical ordinary 6x192 by supervised fit plus the frozen ordinary-family speed tie-break. Exact batched D4 inference reaches 3,285 examples/s at arena-relevant batch eight on P100, with a 24% latency premium over the identical uncanonicalized wrapper. Equivariant E retains a small early-stage advantage but loses the supervised/arena selection overall. The required 1M target ablation rejects winner-only noninferiority: its common handoff objective is +0.01031 worse, with a paired interval of +0.00169 to +0.01868, while the standard/full arenas cancel 40-40. Retain global blend (`alpha_boot=0.5`, `T=261.8`) and explicitly switch the main target to pure self-play `z` at handoff. Final data and arena seeds remain untouched.
 6. **P1c - full corpus and pretraining (complete):** the selected canonical ordinary 6x192/global-blend model completed four epochs over the 10,640,649-draw frozen epoch with the pure T25 oracle placement policy. All input hashes match and no final data were touched. Epoch four wins the standard-only combined objective at 0.73775, improving 9.09% over the selected 1M-screen checkpoint; policy top-1 rises from 38.53% to 43.97%. The final epoch adds only 0.95% objective improvement and held-out value bottoms at epoch three, while the Run13-replay subgroup does not improve. Therefore do not authorize 20M datagen before the transfer gate. Placement fit is healthy (99.9963% legal mass and only 0.00889 policy CE above target entropy), but shared roots make this a pipeline check rather than generalization evidence. Proceed to G1 with checkpoint SHA-256 `374f0b72adbdf009d19abaed87addbdfe89364ecc1e6a7246b423233be51b42e`.
 7. **Gate G1 (complete; green after diagnostic):** P1c beats Run13 28-12/30-10 on standard selection openings and 40-0/39-1 from sampled empty-board starts at equal 96/128 simulations. Equal-cost P1c-128 versus Run13-120 scores 31-9 standard and 40-0 full. The symmetric phase-gap rule correctly paused on the unexpectedly positive +30/+22.5-point full-game gaps. A separate 40-game-per-arm, selection-only decomposition resolves the stop: with shared P1c continuation, P1c placements score 50%/52.5%; with shared Run13, 45%/37.5%; replaying a balanced sample of those exact openings with normal contestants scores 97.5%/87.5%; greedy full placement at 128 remains 40-0. Controller substitution leaves placement boards identical. Thus the gap is natural-opening standard-play distribution/style compatibility, not mapping, seating, or sampling failure. Proceed to P2 while retaining placement-only telemetry. Final data remain untouched.
-8. **P2 - self-play (two continuations discarded; fixed-2x diagnostic next):** the trainable canonical 6x192 wrapper, checkpoint migration, transformed-search preflight, replay/source metadata, paired reset-per-game sparring loop, frozen seam telemetry, and P100 throughput smoke pass. Exact live-policy calibration selects 5k ladder v2, and the corrected transition remains the only accepted production checkpoint at iteration 1. Attempt 1 used 4x/6x and paused at iteration 3; its strength was unresolved, so the branch was discarded conservatively. Attempt 2 restarted from iteration 1 at 2x and added 1x per iteration. Iteration 7 actually passed at +0.04365; iteration 8 paused at +0.06012. Frozen objective had accumulated from 0.75174 to 0.97853, validation worsened after iterations 3-4, and iteration 8 lost 9-31 standard and 17-23 placement-inclusive to iteration 1. The step was predominantly value loss; seam delta (-0.00277) and rolling oracle score (31.25%) were clean. Do not resume iteration 8. Next run a fixed-2x iterations 2-4 diagnostic from iteration 1 with per-iteration snapshots and paired standard/placement-inclusive checks, followed by a second fixed-2x block to iteration 7 only if healthy. Add a cumulative +0.10 teacher-review trigger alongside the +0.05 one-step gate. Disagreement starts and the low-weight auxiliary head remain separately gated as specified in §6.2-6.3; Run13 remains a manual anchor only.
+8. **P2 - self-play (Arm D selected; continue through iteration 11):** the trainable canonical 6x192 wrapper, checkpoint migration, transformed-search preflight, replay/source metadata, paired reset-per-game sparring loop, frozen seam telemetry, and P100 throughput smoke pass. Exact live-policy calibration selects 5k ladder v2. Two reuse-ramp continuations from the accepted iteration-1 transition were discarded; the second reached iteration 8 but accumulated frozen objective from 0.75174 to 0.97853 and lost 9-31 standard to iteration 1. Local diagnostics then showed that 96-search retains strong policy teaching signal (38-2 over the same raw P1c prior), while single-game `z` is high variance and the failed iteration 8 moved away from the cached deep-value proxy while fitting `z`. The controlled fixed-2x fine-tuning arms select D: global 1e-4 plus a frozen P1c-value-to-`z` bridge. D iteration 4 moved the teacher objective only +0.00654 and beat iteration 1 by 26-14 standard and 31-9 placement-inclusive, with paired intervals above 50% in both. C (differential LR, pure `z`) remains the fallback. Promote D iteration 4 as the production head, retain iteration 1 as the immutable rollback anchor, and continue D at fixed 2x through beta=1 at iteration 11 before mandatory review. Preserve per-iteration snapshots and the +0.05 step/+0.10 cumulative controls. Disagreement starts and the low-weight auxiliary head remain separately gated as specified in §6.2-6.3; Run13 remains a manual anchor only.
 9. **Review:** after ~20-30 iterations, run the 96/128/1024 battery and component ablations; decide whether to study a nonzero search-facing `lambda` in a following run.

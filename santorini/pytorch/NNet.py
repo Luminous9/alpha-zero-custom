@@ -21,6 +21,14 @@ log = logging.getLogger(__name__)
 args = dotdict({
     'lr': 0.001,
     'lr_schedule': [],
+    'policy_head_lr': None,
+    'value_head_lr': None,
+    'value_target_anchor_checkpoint': None,
+    'value_target_beta_start': 1.0,
+    'value_target_beta_end': 1.0,
+    'value_target_beta_start_iteration': 1,
+    'value_target_beta_end_iteration': 1,
+    'value_target_anchor_batch_size': 512,
     'optimizer': 'adam',
     'weight_decay': 0.0,
     'dropout': 0.2,
@@ -96,6 +104,26 @@ class NNetWrapper(NeuralNet):
     def _sync_runtime_args(self):
         self.net_args.lr = args.lr
         self.net_args.lr_schedule = list(args.lr_schedule)
+        self.net_args.policy_head_lr = getattr(args, 'policy_head_lr', None)
+        self.net_args.value_head_lr = getattr(args, 'value_head_lr', None)
+        self.net_args.value_target_anchor_checkpoint = getattr(
+            args, 'value_target_anchor_checkpoint', None
+        )
+        self.net_args.value_target_beta_start = getattr(
+            args, 'value_target_beta_start', 1.0
+        )
+        self.net_args.value_target_beta_end = getattr(
+            args, 'value_target_beta_end', 1.0
+        )
+        self.net_args.value_target_beta_start_iteration = getattr(
+            args, 'value_target_beta_start_iteration', 1
+        )
+        self.net_args.value_target_beta_end_iteration = getattr(
+            args, 'value_target_beta_end_iteration', 1
+        )
+        self.net_args.value_target_anchor_batch_size = getattr(
+            args, 'value_target_anchor_batch_size', 512
+        )
         self.net_args.optimizer = args.optimizer
         self.net_args.weight_decay = args.weight_decay
         self.net_args.dropout = args.dropout
@@ -145,10 +173,12 @@ class NNetWrapper(NeuralNet):
         if not examples:
             raise ValueError('Cannot train without training examples.')
         learning_rate = self._learning_rate_for_iteration(iteration, runtime_args)
-        for parameter_group in self.optimizer.param_groups:
-            parameter_group['lr'] = learning_rate
-            parameter_group['weight_decay'] = runtime_args.weight_decay
-        encoded_boards, target_pis, target_vs = self._encode_training_examples(examples)
+        optimizer_lrs = self._configure_optimizer_for_iteration(
+            learning_rate, runtime_args
+        )
+        encoded_boards, target_pis, target_vs = self._encode_training_examples(
+            examples, iteration=iteration
+        )
         placement_examples = np.asarray([
             bool(
                 hasattr(self.game, 'isPlacementPhase')
@@ -467,9 +497,14 @@ class NNetWrapper(NeuralNet):
                 ),
                 'training_schedule': training_schedule,
                 'learning_rate': float(learning_rate),
+                'optimizer_group_learning_rates': dict(optimizer_lrs),
+                'trunk_learning_rate': optimizer_lrs.get('trunk'),
+                'policy_head_learning_rate': optimizer_lrs.get('policy_head'),
+                'value_head_learning_rate': optimizer_lrs.get('value_head'),
                 'weight_decay': float(runtime_args.weight_decay),
                 'optimizer': str(runtime_args.optimizer),
             }
+            metrics.update(getattr(self, '_last_value_target_metrics', {}))
             for phase in ('placement', 'standard'):
                 phase_policy = phase_consistency[phase]['policy']
                 phase_value = phase_consistency[phase]['value']
@@ -524,6 +559,12 @@ class NNetWrapper(NeuralNet):
             if int(iteration) >= int(start_iteration):
                 learning_rate = float(scheduled_rate)
         return learning_rate
+
+    def _configure_optimizer_for_iteration(self, learning_rate, runtime_args):
+        for parameter_group in self.optimizer.param_groups:
+            parameter_group['lr'] = learning_rate
+            parameter_group['weight_decay'] = runtime_args.weight_decay
+        return {'global': float(learning_rate)}
 
     def _validation_metrics(self, examples):
         metrics = {'validation_examples': int(len(examples))}
@@ -723,10 +764,15 @@ class NNetWrapper(NeuralNet):
             ]
         return transformed_boards, transformed_pis
 
-    def _encode_training_examples(self, examples):
+    def _encode_training_examples(self, examples, iteration=None):
         boards = [example[0] for example in examples]
         pis = [example[1] for example in examples]
         vs = [example[2] for example in examples]
+        self._last_value_target_metrics = {
+            'value_target_mode': 'outcome_z',
+            'value_target_beta': 1.0,
+            'value_target_anchor_checkpoint_sha256': None,
+        }
         return (
             self.encode_boards(boards),
             np.array(pis, dtype=np.float32),

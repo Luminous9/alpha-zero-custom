@@ -151,6 +151,7 @@ class Coach():
             )
         resume_metadata = dict(self._arg('resumeMetadata', {}) or {})
         self._v4_teacher_previous_objective = None
+        self._v4_teacher_reference_objective = None
         if self._v4_seam_telemetry_suite is not None:
             self._v4_teacher_previous_objective = float(np.mean(
                 self._v4_seam_telemetry_suite['baseline_objective']
@@ -163,6 +164,12 @@ class Coach():
                 self._v4_teacher_previous_objective = float(
                     resume_metadata['v4_teacher_objective_current']
                 )
+            self._v4_teacher_reference_objective = float(
+                resume_metadata.get(
+                    'v4_teacher_objective_reference',
+                    self._v4_teacher_previous_objective,
+                )
+            )
         same_oracle_rung = (
             int(resume_metadata.get('oracle_sparring_nodes', -1))
             == int(self._arg('oracleSparringNodes', 5_000))
@@ -1175,6 +1182,10 @@ class Coach():
                 self._arg('v4TeacherObjectiveStepThreshold', 0.05)
             ),
             'v4_teacher_objective_gate_triggered': False,
+            'v4_teacher_objective_cumulative_threshold': self._arg(
+                'v4TeacherObjectiveCumulativeThreshold', None
+            ),
+            'v4_teacher_objective_cumulative_triggered': False,
             'oracle_sparring_ratchet_enabled': bool(
                 self._arg('oracleSparringRatchetEnabled', True)
             ),
@@ -1203,6 +1214,30 @@ class Coach():
                     > controls['v4_teacher_objective_step_threshold']
                 ),
             })
+            reference = getattr(
+                self, '_v4_teacher_reference_objective', previous_objective
+            )
+            cumulative_threshold = controls[
+                'v4_teacher_objective_cumulative_threshold'
+            ]
+            if reference is not None:
+                cumulative_delta = float(current_objective) - float(reference)
+                controls.update({
+                    'v4_teacher_objective_reference': float(reference),
+                    'v4_teacher_objective_cumulative_delta': cumulative_delta,
+                    'v4_teacher_objective_cumulative_triggered': bool(
+                        cumulative_threshold is not None
+                        and cumulative_delta > float(cumulative_threshold)
+                    ),
+                })
+                if controls['v4_teacher_objective_cumulative_triggered']:
+                    log.error(
+                        'Frozen teacher-objective cumulative review triggered at '
+                        'iteration %s: delta %+.4f exceeds +%.4f.',
+                        iteration,
+                        cumulative_delta,
+                        float(cumulative_threshold),
+                    )
             self._v4_teacher_previous_objective = float(current_objective)
             if controls['v4_teacher_objective_gate_triggered']:
                 log.error(
@@ -1280,6 +1315,8 @@ class Coach():
         reasons = []
         if payload.get('v4_teacher_objective_gate_triggered'):
             reasons.append('frozen teacher-objective step gate')
+        if payload.get('v4_teacher_objective_cumulative_triggered'):
+            reasons.append('frozen teacher-objective cumulative review')
         if payload.get('oracle_sparring_ratchet_triggered'):
             reasons.append('oracle sparring ladder ratchet')
         if reasons:
@@ -1481,6 +1518,21 @@ class Coach():
                     'validation_fraction': self._arg('validationFraction', 0.0),
                     'optimizer': getattr(getattr(self.nnet, 'net_args', None), 'optimizer', None),
                     'learning_rate': metrics.get('learning_rate'),
+                    'optimizer_group_learning_rates': metrics.get(
+                        'optimizer_group_learning_rates'
+                    ),
+                    'trunk_learning_rate': metrics.get('trunk_learning_rate'),
+                    'policy_head_learning_rate': metrics.get(
+                        'policy_head_learning_rate'
+                    ),
+                    'value_head_learning_rate': metrics.get(
+                        'value_head_learning_rate'
+                    ),
+                    'value_target_mode': metrics.get('value_target_mode'),
+                    'value_target_beta': metrics.get('value_target_beta'),
+                    'value_target_anchor_checkpoint_sha256': metrics.get(
+                        'value_target_anchor_checkpoint_sha256'
+                    ),
                     'weight_decay': getattr(getattr(self.nnet, 'net_args', None), 'weight_decay', None),
                     'lr_schedule': getattr(getattr(self.nnet, 'net_args', None), 'lr_schedule', None),
                     'playout_cap_randomization': self._arg('playoutCapRandomization', False),
@@ -1518,11 +1570,17 @@ class Coach():
                     'v4_teacher_objective_current': metrics.get(
                         'v4_teacher_objective_current'
                     ),
+                    'v4_teacher_objective_reference': metrics.get(
+                        'v4_teacher_objective_reference'
+                    ),
                     'v4_teacher_objective_gate_enabled': metrics.get(
                         'v4_teacher_objective_gate_enabled'
                     ),
                     'v4_teacher_objective_step_threshold': metrics.get(
                         'v4_teacher_objective_step_threshold'
+                    ),
+                    'v4_teacher_objective_cumulative_threshold': metrics.get(
+                        'v4_teacher_objective_cumulative_threshold'
                     ),
                 }
                 with accumulate_wall_time(phase_timings, 'serialization'):
@@ -2789,32 +2847,74 @@ class Coach():
 
     def _runAnchorMatch(self, iteration):
         game_count = int(self._arg('anchorGames', 40))
-        if self.anchor_nnet is None or game_count <= 0:
+        placement_game_count = int(self._arg('anchorPlacementGames', 0))
+        if self.anchor_nnet is None or (game_count <= 0 and placement_game_count <= 0):
             return {}
-        opening_count = game_count // 2
         architecture = str(self._arg('anchorArchitecture', 'v1'))
         simulations = int(self._arg('anchorMCTSSims', self.args.numMCTSSims))
-        log.info(
-            'Running fixed %s anchor telemetry at checkpoint %s '
-            '(%s games, %s fixed symmetry-distinct openings, %s simulations)',
-            architecture,
-            iteration,
-            game_count,
-            opening_count,
-            simulations,
-        )
-        result = self._runPairedMatch(
-            self.anchor_nnet,
-            game_count,
-            opening_boards=self._telemetry_opening_boards[:opening_count],
-            simulations=simulations,
-            opponent_search_symmetry_evaluation=(architecture == 'v3'),
-        )
-        self._logMatchResult('{} anchor'.format(architecture.upper()), iteration, architecture, result)
-        metrics = self._matchMetrics('anchor', *result)
-        metrics.update({
+        metrics = {
             'anchor_architecture': architecture,
-            'anchor_opening_count': opening_count,
             'anchor_mcts_simulations': simulations,
-        })
+        }
+        if game_count > 0:
+            opening_count = game_count // 2
+            log.info(
+                'Running fixed %s anchor telemetry at checkpoint %s '
+                '(%s games, %s fixed symmetry-distinct openings, %s simulations)',
+                architecture,
+                iteration,
+                game_count,
+                opening_count,
+                simulations,
+            )
+            result = self._runPairedMatch(
+                self.anchor_nnet,
+                game_count,
+                opening_boards=self._telemetry_opening_boards[:opening_count],
+                simulations=simulations,
+                opponent_search_symmetry_evaluation=(architecture == 'v3'),
+            )
+            self._logMatchResult(
+                '{} anchor'.format(architecture.upper()),
+                iteration,
+                architecture,
+                result,
+            )
+            metrics.update(self._matchMetrics('anchor', *result))
+            metrics['anchor_opening_count'] = opening_count
+
+        if placement_game_count > 0 and getattr(self.game, 'sequential_placement', False):
+            seed_count = placement_game_count // 2
+            placement_temperature = float(
+                self._arg('telemetryPlacementTemperature', 1.0)
+            )
+            log.info(
+                'Running placement-inclusive fixed %s anchor telemetry at '
+                'checkpoint %s (%s games, %s paired seeds)',
+                architecture,
+                iteration,
+                placement_game_count,
+                seed_count,
+            )
+            placement_result, diagnostics = self._runPairedMatch(
+                self.anchor_nnet,
+                placement_game_count,
+                placement_temperature=placement_temperature,
+                game_seeds=self._telemetry_placement_seeds[:seed_count],
+                simulations=simulations,
+                include_placement_diagnostics=True,
+                opponent_search_symmetry_evaluation=(architecture == 'v3'),
+            )
+            self._logMatchResult(
+                'Placement-inclusive {} anchor'.format(architecture.upper()),
+                iteration,
+                architecture,
+                placement_result,
+            )
+            metrics.update(self._matchMetrics('placement_anchor', *placement_result))
+            metrics.update(self._placementDiagnosticMetrics(
+                'placement_anchor', diagnostics
+            ))
+            metrics['placement_anchor_seed_count'] = seed_count
+            metrics['placement_anchor_temperature'] = placement_temperature
         return metrics

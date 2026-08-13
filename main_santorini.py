@@ -235,12 +235,32 @@ def parse_args():
     )
     parser.add_argument('--optimizer', choices=['adam', 'adamw'])
     parser.add_argument('--learning-rate', type=float)
+    parser.add_argument(
+        '--policy-head-learning-rate',
+        type=float,
+        help='V4 policy-head LR override; the shared trunk retains --learning-rate.',
+    )
+    parser.add_argument(
+        '--value-head-learning-rate',
+        type=float,
+        help='V4 value-head LR override; the shared trunk retains --learning-rate.',
+    )
     parser.add_argument('--weight-decay', type=float)
     parser.add_argument(
         '--lr-schedule',
         type=parse_lr_schedule,
         help='Absolute-iteration learning-rate changes as ITERATION:RATE pairs; use none to disable.',
     )
+    parser.add_argument(
+        '--value-target-anchor-checkpoint',
+        type=str,
+        help='Frozen V4 checkpoint used to bridge value targets toward outcome z.',
+    )
+    parser.add_argument('--value-target-beta-start', type=float, default=1.0)
+    parser.add_argument('--value-target-beta-end', type=float, default=1.0)
+    parser.add_argument('--value-target-beta-start-iteration', type=int, default=1)
+    parser.add_argument('--value-target-beta-end-iteration', type=int, default=1)
+    parser.add_argument('--value-target-anchor-batch-size', type=int, default=512)
     parser.add_argument(
         '--symmetry-augmentation',
         choices=['expanded', 'on-the-fly', 'none'],
@@ -422,6 +442,14 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        '--v4-teacher-objective-cumulative-threshold',
+        type=float,
+        help=(
+            'Pause for review when the frozen teacher objective rises this much '
+            'from the branch-start reference. Disabled when omitted.'
+        ),
+    )
+    parser.add_argument(
         '--no-v4-teacher-objective-gate',
         action='store_true',
         help='Report but do not pause on frozen teacher-objective step increases.',
@@ -434,6 +462,7 @@ def parse_args():
     parser.add_argument('--anchor-architecture', choices=['v1', 'v2', 'v3', 'v4'], default='v1')
     parser.add_argument('--anchor-interval', type=int, default=10)
     parser.add_argument('--anchor-games', type=int, default=40)
+    parser.add_argument('--anchor-placement-games', type=int, default=0)
     parser.add_argument('--anchor-mcts-sims', type=int)
     args = parser.parse_args()
     if args.opening_mix_unique_probability < 0.0 or args.opening_mix_unique_probability > 1.0:
@@ -463,6 +492,10 @@ def parse_args():
         ('--telemetry-match-games', args.telemetry_match_games),
         ('--telemetry-placement-games', args.telemetry_placement_games),
         ('--anchor-games', args.anchor_games if args.anchor_checkpoint else None),
+        (
+            '--anchor-placement-games',
+            args.anchor_placement_games if args.anchor_checkpoint else None,
+        ),
     ):
         if value is not None and (value < 0 or value % 2):
             parser.error('{} must be a non-negative even number.'.format(option))
@@ -488,6 +521,11 @@ def parse_args():
     if args.v4_teacher_objective_step_threshold < 0:
         parser.error('--v4-teacher-objective-step-threshold cannot be negative.')
     if (
+        args.v4_teacher_objective_cumulative_threshold is not None
+        and args.v4_teacher_objective_cumulative_threshold < 0
+    ):
+        parser.error('--v4-teacher-objective-cumulative-threshold cannot be negative.')
+    if (
         args.v4_seam_telemetry_suite
         and not args.no_v4_teacher_objective_gate
         and args.v4_seam_telemetry_interval != 1
@@ -498,6 +536,36 @@ def parse_args():
         )
     if args.replay_reuse_warmup_iters < 0:
         parser.error('--replay-reuse-warmup-iters cannot be negative.')
+    for option, value in (
+        ('--learning-rate', args.learning_rate),
+        ('--policy-head-learning-rate', args.policy_head_learning_rate),
+        ('--value-head-learning-rate', args.value_head_learning_rate),
+    ):
+        if value is not None and value <= 0:
+            parser.error('{} must be positive.'.format(option))
+    if (
+        args.policy_head_learning_rate is not None
+        or args.value_head_learning_rate is not None
+    ) and args.architecture != 'v4':
+        parser.error('Differential head learning rates are supported only for V4.')
+    if args.value_target_anchor_checkpoint and args.architecture != 'v4':
+        parser.error('--value-target-anchor-checkpoint is supported only for V4.')
+    for option, value in (
+        ('--value-target-beta-start', args.value_target_beta_start),
+        ('--value-target-beta-end', args.value_target_beta_end),
+    ):
+        if not 0.0 <= value <= 1.0:
+            parser.error('{} must be between zero and one.'.format(option))
+    if args.value_target_beta_start_iteration < 1:
+        parser.error('--value-target-beta-start-iteration must be positive.')
+    if args.value_target_beta_end_iteration < args.value_target_beta_start_iteration:
+        parser.error('--value-target-beta-end-iteration cannot precede its start.')
+    if args.value_target_anchor_batch_size < 1:
+        parser.error('--value-target-anchor-batch-size must be positive.')
+    if not args.value_target_anchor_checkpoint and (
+        args.value_target_beta_start != 1.0 or args.value_target_beta_end != 1.0
+    ):
+        parser.error('A beta bridge requires --value-target-anchor-checkpoint.')
     if args.inference_cache_size is not None and args.inference_cache_size < 0:
         parser.error('--inference-cache-size cannot be negative.')
     if args.policy_target_temperature is not None and args.policy_target_temperature < 0:
@@ -775,6 +843,7 @@ def build_coach_args(parsed_args):
         'telemetryOpeningSeed': getattr(parsed_args, 'telemetry_opening_seed', 20260715),
         'anchorInterval': getattr(parsed_args, 'anchor_interval', 10),
         'anchorGames': getattr(parsed_args, 'anchor_games', 40),
+        'anchorPlacementGames': getattr(parsed_args, 'anchor_placement_games', 0),
         'anchorMCTSSims': (
             getattr(parsed_args, 'anchor_mcts_sims', None)
             or parsed_args.num_mcts_sims
@@ -806,6 +875,9 @@ def build_coach_args(parsed_args):
         ),
         'v4TeacherObjectiveStepThreshold': getattr(
             parsed_args, 'v4_teacher_objective_step_threshold', 0.05
+        ),
+        'v4TeacherObjectiveCumulativeThreshold': getattr(
+            parsed_args, 'v4_teacher_objective_cumulative_threshold', None
         ),
         'v4TeacherObjectiveGateEnabled': not getattr(
             parsed_args, 'no_v4_teacher_objective_gate', False
@@ -978,6 +1050,16 @@ def main():
         if parsed_args.learning_rate is not None
         else (V3_DEFAULT_LEARNING_RATE if modern_architecture else 0.001)
     )
+    nnet_args.policy_head_lr = parsed_args.policy_head_learning_rate
+    nnet_args.value_head_lr = parsed_args.value_head_learning_rate
+    nnet_args.value_target_anchor_checkpoint = parsed_args.value_target_anchor_checkpoint
+    nnet_args.value_target_beta_start = parsed_args.value_target_beta_start
+    nnet_args.value_target_beta_end = parsed_args.value_target_beta_end
+    nnet_args.value_target_beta_start_iteration = (
+        parsed_args.value_target_beta_start_iteration
+    )
+    nnet_args.value_target_beta_end_iteration = parsed_args.value_target_beta_end_iteration
+    nnet_args.value_target_anchor_batch_size = parsed_args.value_target_anchor_batch_size
     nnet_args.weight_decay = (
         parsed_args.weight_decay
         if parsed_args.weight_decay is not None

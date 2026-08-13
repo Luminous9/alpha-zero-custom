@@ -24,6 +24,22 @@ class V4SelectionArenaTests(unittest.TestCase):
         self.assertEqual(player2.rootSymmetrySamples, 8)
         self.assertEqual(player2.placementRootSymmetrySamples, 8)
 
+    def test_raw_prior_contract_is_one_deterministic_eval_without_tactics(self):
+        args = SimpleNamespace(
+            simulations=96,
+            search_mode="gumbel",
+            gumbel_scale=0.0,
+            placement_gumbel_scale=1.5,
+            inference_cache_size=4096,
+        )
+        raw = _search_args(args, 1, 1, 1, raw_prior=True)
+
+        self.assertEqual(raw.numMCTSSims, 1)
+        self.assertEqual(raw.gumbelScale, 0.0)
+        self.assertEqual(raw.gumbelPlacementScale, 0.0)
+        self.assertFalse(raw.tacticalShortcuts)
+        self.assertFalse(raw.searchSymmetryEvaluation)
+
 
 if __name__ == "__main__":
     unittest.main()

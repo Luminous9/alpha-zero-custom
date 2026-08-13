@@ -39,6 +39,16 @@ def parse_args():
         "--player2-simulations", type=int,
         help="Optional player-two override used by equal-cost arenas.",
     )
+    parser.add_argument(
+        "--player1-raw-prior",
+        action="store_true",
+        help="Use legal-masked prior argmax (one root evaluation, no tactical shortcuts).",
+    )
+    parser.add_argument(
+        "--player2-raw-prior",
+        action="store_true",
+        help="Use legal-masked prior argmax (one root evaluation, no tactical shortcuts).",
+    )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--search-mode", choices=("puct", "gumbel"), default="gumbel")
     parser.add_argument("--gumbel-scale", type=float, default=0.0)
@@ -106,7 +116,11 @@ def _load_player(game, kind, path, device, fp16, canonical_d4=False):
 
 
 def _search_args(
-    args, root_symmetries, simulations=None, placement_root_symmetries=None
+    args,
+    root_symmetries,
+    simulations=None,
+    placement_root_symmetries=None,
+    raw_prior=False,
 ):
     placement_root_symmetries = (
         root_symmetries
@@ -120,8 +134,10 @@ def _search_args(
         "searchMode": args.search_mode,
         "gumbelMaxConsideredActions": 16,
         "gumbelScale": float(args.gumbel_scale),
-        "gumbelPlacementScale": float(args.placement_gumbel_scale),
-        "tacticalShortcuts": True,
+        "gumbelPlacementScale": (
+            0.0 if raw_prior else float(args.placement_gumbel_scale)
+        ),
+        "tacticalShortcuts": not raw_prior,
         "searchSymmetryEvaluation": int(root_symmetries) > 1,
         "rootSymmetrySamples": int(root_symmetries),
         "placementRootSymmetrySamples": int(placement_root_symmetries),
@@ -277,6 +293,10 @@ def main():
         args.simulations
         if args.player2_simulations is None else args.player2_simulations
     )
+    if args.player1_raw_prior:
+        player1_simulations = 1
+    if args.player2_raw_prior:
+        player2_simulations = 1
     player1_placement_root_symmetries = (
         args.player1_root_symmetries
         if args.player1_placement_root_symmetries is None
@@ -289,6 +309,16 @@ def main():
     )
     if min(args.simulations, player1_simulations, player2_simulations) < 1 or args.batch_size < 1:
         raise ValueError("Simulation and batch sizes must be positive.")
+    if (args.player1_raw_prior or args.player2_raw_prior) and (
+        args.search_mode != "gumbel" or float(args.gumbel_scale) != 0.0
+    ):
+        raise ValueError(
+            "Raw-prior mode requires deterministic Gumbel search with --gumbel-scale 0."
+        )
+    if args.player1_raw_prior and args.player1_root_symmetries != 1:
+        raise ValueError("Player-one raw prior requires one root symmetry.")
+    if args.player2_raw_prior and args.player2_root_symmetries != 1:
+        raise ValueError("Player-two raw prior requires one root symmetry.")
     if args.placement_temperature < 0:
         raise ValueError("Placement temperature cannot be negative.")
     for value in (
@@ -346,6 +376,7 @@ def main():
             args.player1_root_symmetries,
             player1_simulations,
             player1_placement_root_symmetries,
+            args.player1_raw_prior,
         ),
         player_args={
             1: _search_args(
@@ -353,12 +384,14 @@ def main():
                 args.player1_root_symmetries,
                 player1_simulations,
                 player1_placement_root_symmetries,
+                args.player1_raw_prior,
             ),
             -1: _search_args(
                 args,
                 args.player2_root_symmetries,
                 player2_simulations,
                 player2_placement_root_symmetries,
+                args.player2_raw_prior,
             ),
         },
         batch_size=args.batch_size,
@@ -395,6 +428,10 @@ def main():
             "root_symmetries": args.player1_root_symmetries,
             "placement_root_symmetries": int(player1_placement_root_symmetries),
             "simulations": int(player1_simulations),
+            "raw_prior": bool(args.player1_raw_prior),
+            "effective_placement_gumbel_scale": (
+                0.0 if args.player1_raw_prior else float(args.placement_gumbel_scale)
+            ),
             "canonical_d4": bool(args.player1_canonical_d4),
             "wins": player1_wins,
         },
@@ -405,6 +442,10 @@ def main():
             "root_symmetries": args.player2_root_symmetries,
             "placement_root_symmetries": int(player2_placement_root_symmetries),
             "simulations": int(player2_simulations),
+            "raw_prior": bool(args.player2_raw_prior),
+            "effective_placement_gumbel_scale": (
+                0.0 if args.player2_raw_prior else float(args.placement_gumbel_scale)
+            ),
             "canonical_d4": bool(args.player2_canonical_d4),
             "wins": player2_wins,
         },
