@@ -72,6 +72,47 @@ improve, nine tie, one worsens). Its -7.5-point difference from the ordinary 2x
 isolate is unresolved (paired 95% -22.5 to +10.0), so there is no evidence that
 the corrected 5k mixture itself creates a regression.
 
+## Production continuation attempts
+
+The accepted 2x transition remains the fixed iteration-one ancestor. Two
+continuation schedules have since been tested and discarded.
+
+| Attempt | Schedule after iteration 1 | Pause | Teacher evidence | Equal-96 standard vs iteration 1 | Decision |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 4x at iteration 2; 6x at iteration 3 | iteration 3 | +0.02522, then +0.05651 | 19-21 (47.5%), 35%-60%, pairs 3/13/4 | discard iterations 2-3 conservatively |
+| 2 | 2x at iteration 2; then +1x/iteration | iteration 8 | objective 0.75174 to 0.97853; final step +0.06012 | 9-31 (22.5%), 12.5%-32.5%, pairs 0/9/11 | confirmed standard collapse; discard iterations 2-8 |
+
+Attempt 1 did not show a resolved strength regression: iteration 3 also scored
+17-23 against P1c and 20-20 against iteration 1 in the placement-inclusive
+arena. It was discarded to avoid carrying an uncertain checkpoint forward.
+
+Attempt 2 provides the stronger diagnosis. Its per-iteration frozen-objective
+steps for iterations 2-8 were +0.01184, +0.01532, +0.02602, +0.02257,
++0.04726, +0.04365, and +0.06012. Iteration 7 therefore passed; iteration 8
+triggered the gate. The slower ramp delayed rather than eliminated the failure.
+Replay validation total loss bottomed at 2.48112 on iteration 3 and rose to
+2.72688 by iteration 8. The final +0.06012 teacher step decomposes into
++0.00696 weighted policy and +0.05316 value loss, pointing primarily to the
+value head.
+
+The independent sentinels correctly separate this regression from other
+failure modes. Iteration 8's seam contrast delta is -0.00277 (paired interval
+-0.06168 to +0.05478), so no seam warning is present. Its rolling 5k oracle
+score is 31.25% over 40 pairs, below both the 50% watch band and 55% ratchet.
+Placement-inclusive iteration-8 strength is only mildly lower at 17-23 (42.5%,
+paired interval 27.5%-57.5%, pairs 4/9/7), while the standard result collapses
+to 9-31. The one-step teacher gate therefore caught a real, predominantly
+standard/value regression that neither the seam nor ladder controls should be
+expected to catch.
+
+The next proposed diagnostic restarts from iteration 1, fixes reuse at 2x, and
+runs only iterations 2-4 with per-iteration resumable snapshots. Promotion
+requires equal-96 standard and placement-inclusive comparisons of iteration 4
+against iteration 1. If healthy, repeat fixed 2x through iteration 7 before
+testing 3x or a lower learning rate. Add a cumulative +0.10 teacher-review
+threshold from iteration 1 to request an early strength check while retaining
+the existing +0.05 one-step automatic pause.
+
 ## Artifact integrity
 
 The downloaded `.zip` suffixes are browser renames of native PyTorch/NPZ zip
@@ -82,7 +123,9 @@ containers, not outer archives. Their payload hashes match the Kaggle contracts.
 | Ordinary | `452955e401d404c90a08e5d36cee4f61f2c74a59122cd07dda30a96cc6c9bc4b` | `ac67674749c7facc55348f4f151e7593bfb7f09bcec675b6f8396825fc71337c` | `199dbabd250d6bed081c0cf5dc09556522b022e3ec3b26c12a1c94930fe7a338` |
 | Mixed | `bdcab6937ac457677f04dda8041b8e554f00613e0a1a14908174a86ddf5024fe` | `d05ec359531411213092f18d2675e08207cc81b4fc9b8fa59b12f32dd1c9a781` | `78410d8cab0a382921d853099ea9c0ebe878a25766705fc1f60d0a536ab681bc` |
 | Transition | `42b61409ec5ac6a3fd15d93ec6a700b87623e840e468fb8f80e857c1c8df1f78` | `ffb947a7af216f1c77cc4a1369e407e97dbe2d6b2a51587e3df6b58d3f834f10` | `d18f76903a7d17b1fdd35537cbaf424f62c688bb191e32ff75fe6da6c378b2c3` |
+| Attempt 1, iteration 3 (discarded) | `5b8a3490df4d2593aeb6bc3ea087ac22deb3f191c7dbdb76c6562d03d979b197` | `c21c20f8b906947b85bf22a29b94ce4b0cb8f4d18d940e7d26c2b6c72df86e12` | `85bd067438636f646538c338bbb9f05d5f76691e2727a42c83eedb700682380e` |
+| Attempt 2, iteration 8 (discarded) | `721d6c0df41a64b7f8e291b5bce29df9b9bcec7a35358789c3f96adaff3f50c9` | `9e31b150ee99cd78a1caed8ded94d66a980f321ff0f548150fc001fc91e0a3ca` | `8c8617926a5efcdd177441dc741e1e2befd1199ee98aa0869999f8e844f63e8d` |
 
-Neither first-smoke checkpoint is part of the production P2 lineage. The
-corrected transition is iteration 1. Final-test data and final arena seeds
-remain untouched.
+Neither first-smoke checkpoint nor either discarded continuation is part of the
+production P2 lineage. The corrected transition remains the sole accepted
+iteration-one ancestor. Final-test data and final arena seeds remain untouched.

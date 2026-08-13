@@ -30,8 +30,9 @@ The smoke also found two blockers before a production lineage was created:
    objectives moved by +0.346/+0.349, and their equal-96 standard scores against
    P1c were 35.0% and 22.5%. An isolated retrain of the exact ordinary replay at
    2x reuse scored 22-18 (55.0%, paired interval 45-65%) and moved the frozen
-   objective only +0.0106. P2 now ramps reuse over absolute iterations 1-8 as
-   2x, 4x, 6x, 8x, 10x, 12x, 14x, 16x.
+   objective only +0.0106. The initial continuation plan therefore ramped reuse
+   over absolute iterations 1-8 as 2x, 4x, 6x, 8x, 10x, 12x, 14x, 16x; the
+   continuation evidence below supersedes that schedule.
 
 Do not continue from either first-smoke checkpoint. They are measurements only;
 the corrected lineage starts again from `p2-start.pth.tar`.
@@ -64,7 +65,7 @@ checkpoint SHA-256 is
 `42b61409ec5ac6a3fd15d93ec6a700b87623e840e468fb8f80e857c1c8df1f78`;
 compact replay is
 `ffb947a7af216f1c77cc4a1369e407e97dbe2d6b2a51587e3df6b58d3f834f10`.
-Keep it as the fixed restart ancestor for the slower continuation below.
+Keep it as the fixed restart ancestor for the next diagnostic below.
 Neither final-test data nor final arena seeds were used.
 
 ## First production continuation: superseded
@@ -102,40 +103,66 @@ from the lineage and restart from the accepted iteration-one checkpoint and
 replay with the slower schedule below. The stopped artifacts and strength
 checks remain useful diagnostic evidence, not production ancestors.
 
-## Production restart from iteration 1
+## Second continuation: 16-iteration warm-up, discarded
 
-Upload `temp/santorini_v4_p2_iterations_2_20_warmup16_bundle.zip` (SHA-256
+The second continuation used
+`temp/santorini_v4_p2_iterations_2_20_warmup16_bundle.zip` (SHA-256
 `93bff6de4217b5be3e7be2b680d2e0ca1bc169a4e4c9cdbf495a727fe95cede4`)
-as a fresh Kaggle dataset and select a P100. Run:
+and the exact accepted iteration-one checkpoint and replay. It used 2x at
+iteration 2, 3x at iteration 3, then added one reuse unit per iteration. The
+standing teacher gate saved and paused the run after iteration **8**, not
+iteration 7: iteration 7 passed at +0.04365, while iteration 8 rose +0.06012
+above the +0.05 threshold.
 
-```python
-from pathlib import Path
-import subprocess
-import sys
+The slower schedule delayed the first gate from iteration 3 to iteration 8 but
+did not remove cumulative degradation. Frozen teacher objective rose from
+0.75174 at iteration 1 to 0.97853 at iteration 8. Main replay validation was
+best around iterations 2-3 and then worsened: total loss moved from 2.48112 at
+iteration 3 to 2.72688 at iteration 8, while value loss moved from 0.98089 to
+1.12254. The final teacher step was almost entirely a value-head event:
++0.00696 from weighted policy loss and +0.05316 from value loss.
 
-matches = list(Path("/kaggle/input").rglob("run_santorini_v4_p2_production_kaggle.py"))
-assert len(matches) == 1, matches
-subprocess.run([sys.executable, str(matches[0])], check=True)
-```
+This was not a canonical-seam pathology. Iteration 8's Q4-minus-Q1 contrast
+delta was -0.00277, with paired interval -0.06168 to +0.05478, so neither seam
+warning fired. Nor was it an oracle-ratchet event: the rolling 40-pair V4 score
+was 31.25%, below the 50% watch band and 55% ratchet threshold.
 
-This package uses the exact accepted iteration-one checkpoint and replay, not
-the paused iteration-three artifacts. Its input checkpoint/replay SHA-256 values
-are respectively
-`42b61409ec5ac6a3fd15d93ec6a700b87623e840e468fb8f80e857c1c8df1f78`
-and `ffb947a7af216f1c77cc4a1369e407e97dbe2d6b2a51587e3df6b58d3f834f10`.
-Iteration 1 remains the accepted 2x bootstrap transition. The restarted branch
-uses 2x at iteration 2, 3x at iteration 3, then one additional reuse unit per
-absolute iteration until reaching 16x at iteration 16. All standing controls
-remain active and can save and pause the job early.
+The equal-96 comparisons resolve the teacher warning as a real standard-play
+collapse:
 
-The runner uses compact console logging because Kaggle's captured subprocess
-output commits terminal carriage-return redraws as separate records. Self-play,
-oracle, optimizer, and milestone progress bars are therefore disabled. Each
-iteration instead logs its phase plan/completion, optimizer schedule/final
-losses, held-out validation, and one summary containing reuse, teacher step,
-seam delta, sparring result, ratchet state, and wall time. Full telemetry remains
-unchanged in `telemetry/telemetry.jsonl` and TensorBoard events.
+- iteration 8 versus iteration 1, standard: 9-31 (22.5%), paired interval
+  12.5%-32.5%, pairs 0/9/11; and
+- iteration 8 versus iteration 1, placement-inclusive: 17-23 (42.5%), paired
+  interval 27.5%-57.5%, pairs 4/9/7.
 
-Download the complete
-`/kaggle/working/santorini_v4_p2/iterations_2_20/` directory. Only outputs from
-this warmup-16 branch may continue the production lineage.
+All downloaded artifacts match the paused contract. The iteration-eight
+resumable checkpoint, replay, and inference hashes are respectively
+`721d6c0df41a64b7f8e291b5bce29df9b9bcec7a35358789c3f96adaff3f50c9`,
+`9e31b150ee99cd78a1caed8ded94d66a980f321ff0f548150fc001fc91e0a3ca`,
+and `8c8617926a5efcdd177441dc741e1e2befd1199ee98aa0869999f8e844f63e8d`.
+The checkpoint is technically resumable, but **must not continue the production
+lineage**.
+
+## Proposed next diagnostic
+
+Restart again from the accepted iteration-one checkpoint and replay. Hold reuse
+at **2x** instead of ramping, and initially run only iterations 2-4. Save a
+resumable checkpoint and replay for every completed iteration. Then compare
+iteration 4 with iteration 1 in the fixed equal-96 standard and
+placement-inclusive arenas.
+
+If iteration 4 remains healthy, run a second fixed-2x block through iteration 7
+and inspect the same teacher, seam, validation, oracle, and strength signals
+before considering either 3x reuse or a lower learning rate. Add a cumulative
+teacher-review threshold near +0.10 from iteration 1: crossing it should save
+state and require a paired strength check, but should not by itself reject a
+checkpoint. The existing +0.05 one-step automatic pause remains in force.
+
+This is a proposed diagnostic sequence, not yet a built or authorized bundle.
+The iteration-one checkpoint remains the only accepted P2 production ancestor.
+Neither continuation attempt touched final-test data or final arena seeds.
+
+Production runners use compact console logging because Kaggle's captured
+subprocess output commits terminal carriage-return redraws as separate records.
+Progress bars are disabled, while full JSONL and TensorBoard telemetry remain
+unchanged.
