@@ -14,6 +14,7 @@ from santorini.OracleResearch import file_sha256
 ITERATION1_CHECKPOINT_NAME = 'p2-iteration1-training.pth.tar'
 VALUE_ANCHOR_NAME = 'p1c-value-anchor.pth.tar'
 SEAM_SUITE_NAME = 'v4-seam-telemetry-suite.npz'
+DEEP_VALUE_SUITE_NAME = 'v4-deep-value-telemetry-suite.npz'
 
 
 def parse_args():
@@ -34,6 +35,10 @@ def parse_args():
         default='temp/santorini_v4_p2_preparation/v4-seam-telemetry-suite.npz',
     )
     parser.add_argument(
+        '--deep-value-suite',
+        default='temp/santorini_v4_p2_deep_value_telemetry.npz',
+    )
+    parser.add_argument(
         '--linux-oracle-binary',
         default=(
             'temp/santorini_v4_p2_linux_build/target/release/'
@@ -52,9 +57,13 @@ def build_bundle(args):
     iteration1 = Path(args.iteration1_checkpoint).resolve()
     value_anchor = Path(args.value_anchor).resolve()
     seam_suite = Path(args.seam_suite).resolve()
+    deep_value_suite = Path(args.deep_value_suite).resolve()
     linux_oracle = Path(args.linux_oracle_binary).resolve()
     license_path = Path(args.santorini_ai_license).resolve()
-    for path in (iteration1, value_anchor, seam_suite, linux_oracle, license_path):
+    for path in (
+        iteration1, value_anchor, seam_suite, deep_value_suite,
+        linux_oracle, license_path,
+    ):
         if not path.is_file():
             raise FileNotFoundError(path)
 
@@ -82,6 +91,7 @@ def build_bundle(args):
         ITERATION1_CHECKPOINT_NAME: iteration1,
         VALUE_ANCHOR_NAME: value_anchor,
         SEAM_SUITE_NAME: seam_suite,
+        DEEP_VALUE_SUITE_NAME: deep_value_suite,
     }
     manifest = {
         'schema_version': 1,
@@ -92,6 +102,7 @@ def build_bundle(args):
                 metadata['v4_teacher_objective_current']
             ),
             'seam_suite_sha256': seam_hash,
+            'deep_value_suite_sha256': file_sha256(deep_value_suite),
         },
         'inputs': {
             name: {

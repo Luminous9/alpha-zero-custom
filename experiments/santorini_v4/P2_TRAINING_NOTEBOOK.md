@@ -9,8 +9,9 @@ the previous run's output dataset, requests a number of new iterations, and
 produces the next resumable output.
 
 The runtime bundle is `temp/santorini_v4_p2_runtime_bundle.zip`. It contains the
-frozen Python sources, Linux oracle, seam suite, P1c value anchor, and iteration-1
-longitudinal arena anchor. It intentionally contains no mutable resume state.
+frozen Python sources, Linux oracle, seam suite, frozen deep-value suite, P1c
+value anchor, and iteration-1 longitudinal arena anchor. It intentionally
+contains no mutable resume state.
 
 ## Routine workflow
 
@@ -52,6 +53,18 @@ branch, set `RESUME_CHECKPOINT` and `RESUME_REPLAY` explicitly so the notebook
 cannot silently choose the non-promoted iteration-14 state. The evidence and
 next gate are in `P2_PURE_Z_12_14.md`.
 
+## Current dose-branch contract
+
+The notebook is currently pinned to the iteration-11-to-17 4x dose experiment,
+including exact start/end checks. It is not a generic continuation of the
+iteration-14 diagnostic branch. The full rationale and gate definitions are in
+`P2_DOSE4_ITER12_17.md`.
+
+The runner remains parameterized so it can support a later reviewed branch,
+but changes in reuse require an explicit expected ancestor dose. The current
+notebook supplies `REPLAY_REUSE=4`, `EXPECTED_RESUME_REPLAY_REUSE=2`,
+`EXPECTED_START_ITERATION=11`, and `EXPECTED_END_ITERATION=17`.
+
 ## Frozen normal-training contract
 
 The reusable runner keeps the selected P2 baseline fixed:
@@ -59,7 +72,8 @@ The reusable runner keeps the selected P2 baseline fixed:
 - ordinary 6x192 V4 with canonical-D4 inference;
 - 240 games per iteration;
 - 96 full / 32 fast Gumbel search with 25% full-search probability;
-- fixed 2x fresh-data reuse, global AdamW LR 1e-4, and no LR schedule;
+- global AdamW LR 1e-4 and no LR schedule (the selected experiment changes
+  fresh-data reuse from the 2x ancestor to a fixed 4x);
 - a rolling 20-iteration replay window;
 - 10% 5k-node ladder-v2 oracle sparring;
 - the frozen seam suite;
@@ -94,9 +108,9 @@ telemetry chain, save state, and honor safety pauses. The replay window naturall
 fills to 20 iterations and then rolls forward; fixed fresh-data reuse keeps the
 optimizer dose tied to new data rather than growing with replay size.
 
-This is the ready normal P2 baseline, not authorization for every deferred plan
-feature. Disagreement-seeded starts, an auxiliary oracle-value head, higher
-reuse, a different learning rate, and T4x2 remain separate experiments. A
+This is not authorization for every deferred plan feature. Disagreement-seeded
+starts, an auxiliary oracle-value head, reuse above the declared 4x branch, a
+different learning rate, and T4x2 remain separate experiments. A
 declared safety pause still requires review even if `NUM_ITERATIONS` requested a
 longer run.
 
@@ -126,7 +140,7 @@ is the primary block-progress signal; the latter is the longitudinal anchor.
 ## Runtime identity
 
 <!-- RUNTIME_IDENTITY_START -->
-The current runtime bundle is 65,731,236 bytes with SHA-256
-`1be4056bac21ecdbc4f9bc25693eff7fe373879e8ee2af9da6f7776a00e405f4`.
+The current runtime bundle is 65,788,910 bytes with SHA-256
+`3612a2f51da5aeca1c86c82e49a6aebdc9db98116ffd43b2f76f1a9757b052da`.
 <!-- RUNTIME_IDENTITY_END -->
 The adjacent `.report.json` records every bundled source and fixed-input digest.

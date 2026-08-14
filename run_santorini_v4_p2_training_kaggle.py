@@ -16,12 +16,13 @@ RESULT_CONTRACT = 'santorini_v4_p2_training_result'
 ITERATION1_CHECKPOINT_NAME = 'p2-iteration1-training.pth.tar'
 VALUE_ANCHOR_NAME = 'p1c-value-anchor.pth.tar'
 SEAM_SUITE_NAME = 'v4-seam-telemetry-suite.npz'
+DEEP_VALUE_SUITE_NAME = 'v4-deep-value-telemetry-suite.npz'
 ORACLE_RELATIVE_PATH = Path('oracle-build/santorini-oracle-linux-x86_64')
 
 TRUNK_LR = 1e-4
 POLICY_LR = 1e-4
 VALUE_LR = 1e-4
-REPLAY_REUSE = 2.0
+DEFAULT_REPLAY_REUSE = 2.0
 BRIDGE_START_ITERATION = 2
 BRIDGE_END_ITERATION = 11
 BRIDGE_START_BETA = 0.25
@@ -43,6 +44,13 @@ def parse_args():
     parser.add_argument('--resume-replay', required=True)
     parser.add_argument('--output-dir', required=True)
     parser.add_argument('--num-iterations', type=int, required=True)
+    parser.add_argument('--replay-reuse', type=float, default=DEFAULT_REPLAY_REUSE)
+    parser.add_argument(
+        '--expected-resume-replay-reuse', type=float,
+        help='Require the ancestor checkpoint to use this replay dose.',
+    )
+    parser.add_argument('--expected-start-iteration', type=int)
+    parser.add_argument('--expected-end-iteration', type=int)
     parser.add_argument('--snapshot-interval', type=int, default=1)
     parser.add_argument('--arena-games', type=int, default=40)
     parser.add_argument('--no-end-arenas', action='store_true')
@@ -78,7 +86,10 @@ def _telemetry_rows(path):
     )
 
 
-def _load_resume_state(checkpoint_path, replay_path, seam_hash, value_anchor_hash):
+def _load_resume_state(
+    checkpoint_path, replay_path, seam_hash, value_anchor_hash,
+    expected_resume_reuse=DEFAULT_REPLAY_REUSE,
+):
     import torch
     from santorini.ReplayBuffer import load_compact_replay
 
@@ -104,8 +115,12 @@ def _load_resume_state(checkpoint_path, replay_path, seam_hash, value_anchor_has
         raise ValueError('Resume checkpoint does not use 5k oracle sparring.')
     if int(metadata.get('oracle_sparring_ladder_version', -1)) != 2:
         raise ValueError('Resume checkpoint does not use ladder version 2.')
-    if not _close(metadata.get('replay_reuse'), REPLAY_REUSE):
-        raise ValueError('Resume checkpoint does not use fixed 2x replay reuse.')
+    if not _close(metadata.get('replay_reuse'), expected_resume_reuse):
+        raise ValueError(
+            'Resume checkpoint replay reuse is {}, expected {}.'.format(
+                metadata.get('replay_reuse'), expected_resume_reuse
+            )
+        )
     if int(metadata.get('replay_reuse_warmup_iters', -1)) != 0:
         raise ValueError('Resume checkpoint unexpectedly uses a replay warm-up.')
     rates = metadata.get('optimizer_group_learning_rates', {})
@@ -162,7 +177,10 @@ def _validate_runtime(manifest_path):
     return manifest, root, inputs, oracle
 
 
-def _validate_row(row, manifest, expected_iteration, previous_objective):
+def _validate_row(
+    row, manifest, expected_iteration, previous_objective,
+    replay_reuse=DEFAULT_REPLAY_REUSE,
+):
     reference = float(manifest['lineage']['teacher_objective_reference'])
     if int(row.get('iteration', -1)) != expected_iteration:
         raise RuntimeError('Trainer wrote the wrong iteration.')
@@ -170,7 +188,7 @@ def _validate_row(row, manifest, expected_iteration, previous_objective):
         raise RuntimeError('Iteration did not complete 240 games.')
     if int(row.get('oracle_sparring_games', -1)) != 24:
         raise RuntimeError('Iteration did not complete 24 sparring games.')
-    if not _close(row.get('target_replay_reuse'), REPLAY_REUSE):
+    if not _close(row.get('target_replay_reuse'), replay_reuse):
         raise RuntimeError('Iteration changed fixed replay reuse.')
     if int(row.get('replay_reuse_warmup_iters', -1)) != 0:
         raise RuntimeError('Iteration enabled replay warm-up.')
@@ -184,6 +202,12 @@ def _validate_row(row, manifest, expected_iteration, previous_objective):
         raise RuntimeError('Iteration changed the prior-to-target KL watch persistence.')
     if row.get('v4_seam_suite_fingerprint') != manifest['inputs'][SEAM_SUITE_NAME]['sha256']:
         raise RuntimeError('Iteration used the wrong seam suite.')
+    if row.get('v4_deep_value_suite_fingerprint') != manifest['inputs'][DEEP_VALUE_SUITE_NAME]['sha256']:
+        raise RuntimeError('Iteration used the wrong deep-value suite.')
+    if int(row.get('v4_deep_value_suite_positions', -1)) != 480:
+        raise RuntimeError('Iteration did not evaluate the complete deep-value suite.')
+    if int(row.get('v4_deep_value_warning_iterations', -1)) != 2:
+        raise RuntimeError('Iteration changed the deep-value warning persistence.')
     if not _close(row.get('v4_teacher_objective_previous'), previous_objective):
         raise RuntimeError('Iteration broke the teacher-objective chain.')
     if not _close(row.get('v4_teacher_objective_reference'), reference):
@@ -297,6 +321,8 @@ def main():
     args = parse_args()
     if args.num_iterations < 1:
         raise ValueError('--num-iterations must be positive.')
+    if args.replay_reuse <= 0:
+        raise ValueError('--replay-reuse must be positive.')
     if args.snapshot_interval < 1:
         raise ValueError('--snapshot-interval must be positive.')
     if args.arena_games < 0 or args.arena_games % 2:
@@ -339,6 +365,11 @@ def main():
         resume_replay,
         runtime['inputs'][SEAM_SUITE_NAME]['sha256'],
         runtime['inputs'][VALUE_ANCHOR_NAME]['sha256'],
+        expected_resume_reuse=(
+            args.expected_resume_replay_reuse
+            if args.expected_resume_replay_reuse is not None
+            else args.replay_reuse
+        ),
     )
     if not _close(
         metadata['v4_teacher_objective_reference'],
@@ -356,6 +387,24 @@ def main():
 
     start_iteration = int(metadata['iteration'])
     requested_end_iteration = start_iteration + args.num_iterations
+    if (
+        args.expected_start_iteration is not None
+        and start_iteration != args.expected_start_iteration
+    ):
+        raise ValueError(
+            'Resume iteration is {}, expected {}.'.format(
+                start_iteration, args.expected_start_iteration
+            )
+        )
+    if (
+        args.expected_end_iteration is not None
+        and requested_end_iteration != args.expected_end_iteration
+    ):
+        raise ValueError(
+            'Requested end iteration is {}, expected {}.'.format(
+                requested_end_iteration, args.expected_end_iteration
+            )
+        )
     previous_objective = float(metadata['v4_teacher_objective_current'])
     start_checkpoint = resume_checkpoint
     completed = []
@@ -384,7 +433,7 @@ def main():
             '--playout-cap-fast-sims', '32',
             '--self-play-batch-size', '128',
             '--batch-size', '256',
-            '--replay-reuse', '2',
+            '--replay-reuse', str(args.replay_reuse),
             '--replay-reuse-warmup-iters', '0',
             '--validation-fraction', '0.05',
             '--optimizer', 'adamw',
@@ -412,6 +461,14 @@ def main():
             '--v4-seam-telemetry-suite', str(inputs[SEAM_SUITE_NAME]),
             '--v4-seam-telemetry-interval', '1',
             '--v4-seam-telemetry-batch-size', '256',
+            '--v4-deep-value-telemetry-suite', str(inputs[DEEP_VALUE_SUITE_NAME]),
+            '--v4-deep-value-telemetry-batch-size', '256',
+            '--v4-deep-value-telemetry-bootstrap-samples', '2000',
+            '--v4-deep-value-overall-pearson-drop', '0.02',
+            '--v4-deep-value-overall-mse-rise', '0.015',
+            '--v4-deep-value-recent-pearson-drop', '0.04',
+            '--v4-deep-value-recent-mse-rise', '0.02',
+            '--v4-deep-value-warning-iterations', '2',
             '--v4-teacher-objective-step-threshold', '0.05',
             '--v4-teacher-objective-cumulative-threshold', '0.10',
             '--prior-target-kl-warning-threshold', '0.15',
@@ -449,13 +506,14 @@ def main():
                 )
             raise RuntimeError('Expected one telemetry row from iteration {}.'.format(iteration))
         previous_objective = _validate_row(
-            rows[-1], runtime, iteration, previous_objective
+            rows[-1], runtime, iteration, previous_objective, args.replay_reuse
         )
         completed.append(iteration)
         paused = bool(
             rows[-1].get('v4_teacher_objective_gate_triggered')
             or rows[-1].get('v4_teacher_objective_cumulative_triggered')
             or rows[-1].get('oracle_sparring_ratchet_triggered')
+            or rows[-1].get('v4_deep_value_gate_triggered')
         )
         should_snapshot = (
             iteration % args.snapshot_interval == 0
@@ -535,7 +593,10 @@ def main():
             for path in required_outputs
         },
         'training_contract': {
-            'replay_reuse': REPLAY_REUSE,
+            'replay_reuse': args.replay_reuse,
+            'resume_replay_reuse': metadata.get('replay_reuse'),
+            'deep_value_reference_iteration': 11,
+            'deep_value_warning_iterations': 2,
             'learning_rate': TRUNK_LR,
             'bridge_end_iteration': BRIDGE_END_ITERATION,
             'post_bridge_value_target_mode': 'outcome_z',

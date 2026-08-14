@@ -17,6 +17,7 @@ class V4P2TrainingRunnerTests(unittest.TestCase):
             'lineage': {'teacher_objective_reference': 0.75},
             'inputs': {
                 'v4-seam-telemetry-suite.npz': {'sha256': 'seam'},
+                'v4-deep-value-telemetry-suite.npz': {'sha256': 'deep'},
                 'p1c-value-anchor.pth.tar': {'sha256': 'anchor'},
             },
         }
@@ -35,6 +36,9 @@ class V4P2TrainingRunnerTests(unittest.TestCase):
             'prior_target_kl_warning_threshold': 0.15,
             'prior_target_kl_warning_iterations': 3,
             'v4_seam_suite_fingerprint': 'seam',
+            'v4_deep_value_suite_fingerprint': 'deep',
+            'v4_deep_value_suite_positions': 480,
+            'v4_deep_value_warning_iterations': 2,
             'v4_teacher_objective_previous': previous,
             'v4_teacher_objective_current': current,
             'v4_teacher_objective_reference': 0.75,

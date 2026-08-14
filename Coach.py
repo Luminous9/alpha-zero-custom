@@ -58,6 +58,14 @@ except ImportError:
     evaluate_seam_telemetry = load_seam_telemetry_suite = None
 
 try:
+    from santorini.V4DeepValueTelemetry import (
+        evaluate_deep_value_telemetry,
+        load_deep_value_telemetry_suite,
+    )
+except ImportError:
+    evaluate_deep_value_telemetry = load_deep_value_telemetry_suite = None
+
+try:
     from santorini.SantoriniOpeningBook import SantoriniRandomOpeningSampler
 except ImportError:
     SantoriniRandomOpeningSampler = None
@@ -138,6 +146,7 @@ class Coach():
         self._tactical_stats = self._newTacticalStats()
         self._symmetry_telemetry_suite = None
         self._v4_seam_telemetry_suite = None
+        self._v4_deep_value_telemetry_suite = None
         seam_suite_path = self._arg('v4SeamTelemetrySuite', None)
         if seam_suite_path:
             if load_seam_telemetry_suite is None:
@@ -151,6 +160,27 @@ class Coach():
                 seam_suite_path,
             )
         resume_metadata = dict(self._arg('resumeMetadata', {}) or {})
+        deep_value_suite_path = self._arg('v4DeepValueTelemetrySuite', None)
+        if deep_value_suite_path:
+            if load_deep_value_telemetry_suite is None:
+                raise RuntimeError('V4 deep-value telemetry support is unavailable.')
+            self._v4_deep_value_telemetry_suite = (
+                load_deep_value_telemetry_suite(deep_value_suite_path)
+            )
+            log.info(
+                'Loaded frozen V4 deep-value telemetry suite (%s positions): %s',
+                len(self._v4_deep_value_telemetry_suite['boards']),
+                deep_value_suite_path,
+            )
+        same_deep_value_suite = bool(
+            self._v4_deep_value_telemetry_suite is not None
+            and resume_metadata.get('v4_deep_value_suite_fingerprint')
+            == self._v4_deep_value_telemetry_suite['fingerprint']
+        )
+        self._v4_deep_value_warning_streak = (
+            int(resume_metadata.get('v4_deep_value_warning_streak', 0))
+            if same_deep_value_suite else 0
+        )
         self._prior_target_kl_warning_streak = int(
             resume_metadata.get('prior_target_kl_warning_streak', 0)
         )
@@ -1208,7 +1238,9 @@ class Coach():
             'oracle_sparring_pair_losses_0_2': int(sum(score == 0 for score in pair_scores)),
         }
 
-    def _iterationControlMetrics(self, iteration, seam_metrics):
+    def _iterationControlMetrics(
+        self, iteration, seam_metrics, deep_value_metrics=None
+    ):
         """Update resumable P2 safety controls after one completed iteration."""
         controls = {
             'v4_teacher_objective_gate_enabled': bool(
@@ -1288,6 +1320,43 @@ class Coach():
                 standard_mean,
                 threshold,
                 self._prior_target_kl_warning_streak,
+            )
+
+        deep_value_metrics = dict(deep_value_metrics or {})
+        deep_warning = bool(deep_value_metrics.get('v4_deep_value_warning', False))
+        self._v4_deep_value_warning_streak = (
+            int(getattr(self, '_v4_deep_value_warning_streak', 0)) + 1
+            if deep_warning else 0
+        )
+        deep_confirmation = int(self._arg('v4DeepValueWarningIterations', 2))
+        controls.update({
+            'v4_deep_value_gate_enabled': bool(
+                self._arg('v4DeepValueGateEnabled', True)
+            ),
+            'v4_deep_value_warning_iterations': deep_confirmation,
+            'v4_deep_value_warning_streak': int(
+                self._v4_deep_value_warning_streak
+            ),
+            'v4_deep_value_gate_triggered': bool(
+                deep_warning
+                and self._v4_deep_value_warning_streak >= deep_confirmation
+                and self._arg('v4DeepValueGateEnabled', True)
+            ),
+        })
+        if deep_warning:
+            log.warning(
+                'Frozen deep-value watch at iteration %s: overall '
+                'Pearson/MSE deltas %+.4f/%+.4f; windows 9-11 '
+                'deltas %+.4f/%+.4f (warning streak %s/%s).',
+                iteration,
+                deep_value_metrics.get('v4_deep_value_overall_pearson_delta', 0.0),
+                deep_value_metrics.get('v4_deep_value_overall_mse_delta', 0.0),
+                deep_value_metrics.get(
+                    'v4_deep_value_windows_9_11_pearson_delta', 0.0
+                ),
+                deep_value_metrics.get('v4_deep_value_windows_9_11_mse_delta', 0.0),
+                self._v4_deep_value_warning_streak,
+                deep_confirmation,
             )
 
         current_objective = seam_metrics.get('v4_seam_objective')
@@ -1409,6 +1478,8 @@ class Coach():
             reasons.append('frozen teacher-objective cumulative review')
         if payload.get('oracle_sparring_ratchet_triggered'):
             reasons.append('oracle sparring ladder ratchet')
+        if payload.get('v4_deep_value_gate_triggered'):
+            reasons.append('frozen deep-value paired-drift gate')
         if reasons:
             raise RuntimeError(
                 'P2 paused after writing its resumable checkpoint, replay, and '
@@ -1532,8 +1603,12 @@ class Coach():
                     )
                 with accumulate_wall_time(phase_timings, 'arena_telemetry'):
                     seam_metrics = self._v4SeamTelemetry(i)
+                    deep_value_metrics = self._v4DeepValueTelemetry(i)
                 metrics.update(seam_metrics)
-                metrics.update(self._iterationControlMetrics(i, seam_metrics))
+                metrics.update(deep_value_metrics)
+                metrics.update(self._iterationControlMetrics(
+                    i, seam_metrics, deep_value_metrics
+                ))
                 metadata = {
                     'iteration': i,
                     'training_mode': self.training_mode,
@@ -1673,6 +1748,18 @@ class Coach():
                     'v4_teacher_objective_cumulative_threshold': metrics.get(
                         'v4_teacher_objective_cumulative_threshold'
                     ),
+                    'v4_deep_value_suite_fingerprint': metrics.get(
+                        'v4_deep_value_suite_fingerprint'
+                    ),
+                    'v4_deep_value_warning_streak': metrics.get(
+                        'v4_deep_value_warning_streak', 0
+                    ),
+                    'v4_deep_value_warning_iterations': metrics.get(
+                        'v4_deep_value_warning_iterations'
+                    ),
+                    'v4_deep_value_gate_enabled': metrics.get(
+                        'v4_deep_value_gate_enabled'
+                    ),
                     'prior_target_kl_warning_streak': metrics.get(
                         'prior_target_kl_warning_streak', 0
                     ),
@@ -1716,6 +1803,7 @@ class Coach():
                         'Iteration %s summary: replay=%s target/actual reuse=%s/%s; '
                         'steps=%s; teacher step=%s; seam delta=%s; oracle=%s/%s; '
                         'ratchet pairs=%s rolling=%s; search KL=%s watch=%s; '
+                        'deep value d(r/MSE)=%s/%s recent=%s/%s streak=%s; '
                         'wall=%.1fs.',
                         i,
                         telemetry_payload.get('replay_examples'),
@@ -1746,6 +1834,25 @@ class Coach():
                             telemetry_payload.get('standard_prior_target_kl_mean')
                         ),
                         telemetry_payload.get('prior_target_kl_warning', False),
+                        self._formatTelemetryMetric(
+                            telemetry_payload.get(
+                                'v4_deep_value_overall_pearson_delta'
+                            )
+                        ),
+                        self._formatTelemetryMetric(
+                            telemetry_payload.get('v4_deep_value_overall_mse_delta')
+                        ),
+                        self._formatTelemetryMetric(
+                            telemetry_payload.get(
+                                'v4_deep_value_windows_9_11_pearson_delta'
+                            )
+                        ),
+                        self._formatTelemetryMetric(
+                            telemetry_payload.get(
+                                'v4_deep_value_windows_9_11_mse_delta'
+                            )
+                        ),
+                        telemetry_payload.get('v4_deep_value_warning_streak', 0),
                         telemetry_payload.get('wall_total_seconds', 0.0),
                     )
                 if local_iteration == 1 and self._arg('deleteLoadedExamplesAfterFirstIteration', False):
@@ -2346,6 +2453,35 @@ class Coach():
                 metrics['v4_seam_contrast_delta_bootstrap_95_high'],
             )
         return metrics
+
+    def _v4DeepValueTelemetry(self, iteration):
+        suite = getattr(self, '_v4_deep_value_telemetry_suite', None)
+        if suite is None:
+            return {}
+        if evaluate_deep_value_telemetry is None:
+            raise RuntimeError('V4 deep-value telemetry support is unavailable.')
+        with preserve_rng_state():
+            return evaluate_deep_value_telemetry(
+                self.nnet,
+                suite,
+                batch_size=int(self._arg('v4DeepValueTelemetryBatchSize', 256)),
+                bootstrap_samples=int(self._arg(
+                    'v4DeepValueTelemetryBootstrapSamples', 2000
+                )),
+                seed=int(self._arg('v4DeepValueTelemetrySeed', 20260814)),
+                overall_pearson_drop=float(self._arg(
+                    'v4DeepValueOverallPearsonDrop', 0.02
+                )),
+                overall_mse_rise=float(self._arg(
+                    'v4DeepValueOverallMseRise', 0.015
+                )),
+                recent_pearson_drop=float(self._arg(
+                    'v4DeepValueRecentPearsonDrop', 0.04
+                )),
+                recent_mse_rise=float(self._arg(
+                    'v4DeepValueRecentMseRise', 0.02
+                )),
+            )
 
     def _recordPlacementChoice(self, ply, action):
         square = int(action) // self.game.local_action_size

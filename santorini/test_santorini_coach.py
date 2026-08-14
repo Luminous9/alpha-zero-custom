@@ -878,6 +878,41 @@ class TestSantoriniCoachBatchedSelfPlay(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'teacher-objective.*ratchet'):
             coach._haltForIterationControls(metrics)
 
+    def test_deep_value_gate_requires_two_consecutive_warning_iterations(self):
+        coach = object.__new__(Coach)
+        coach.args = dotdict({
+            'v4DeepValueGateEnabled': True,
+            'v4DeepValueWarningIterations': 2,
+            'oracleSparringRatchetEnabled': False,
+            'oracleSparringRatchetGames': 8,
+            'oracleSparringRatchetScore': 0.55,
+            'oracleSparringOpeningSeed': 37,
+        })
+        coach._prior_target_stats = coach._newPriorTargetStats()
+        coach._prior_target_kl_warning_streak = 0
+        coach._prior_target_kl_reference = None
+        coach._v4_deep_value_warning_streak = 0
+        coach._v4_teacher_previous_objective = None
+        coach._oracle_sparring_pair_score_history = []
+        coach._oracle_sparring_stats = coach._newOracleSparringStats()
+        deep = {
+            'v4_deep_value_warning': True,
+            'v4_deep_value_overall_pearson_delta': -0.03,
+            'v4_deep_value_overall_mse_delta': 0.01,
+            'v4_deep_value_windows_9_11_pearson_delta': -0.05,
+            'v4_deep_value_windows_9_11_mse_delta': 0.01,
+        }
+
+        first = coach._iterationControlMetrics(12, {}, deep)
+        second = coach._iterationControlMetrics(13, {}, deep)
+
+        self.assertEqual(first['v4_deep_value_warning_streak'], 1)
+        self.assertFalse(first['v4_deep_value_gate_triggered'])
+        self.assertEqual(second['v4_deep_value_warning_streak'], 2)
+        self.assertTrue(second['v4_deep_value_gate_triggered'])
+        with self.assertRaises(RuntimeError):
+            coach._haltForIterationControls(second)
+
     def test_ratchet_waits_for_full_window_and_new_pairs(self):
         coach = object.__new__(Coach)
         coach.args = dotdict({

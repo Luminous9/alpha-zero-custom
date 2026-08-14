@@ -486,6 +486,27 @@ def parse_args():
         help='Report but do not pause on frozen teacher-objective step increases.',
     )
     parser.add_argument(
+        '--v4-deep-value-telemetry-suite',
+        help=(
+            'Frozen deep-oracle value suite with iteration-11 reference '
+            'predictions. Evaluated after every V4 latest-mode iteration.'
+        ),
+    )
+    parser.add_argument('--v4-deep-value-telemetry-batch-size', type=int, default=256)
+    parser.add_argument(
+        '--v4-deep-value-telemetry-bootstrap-samples', type=int, default=2000
+    )
+    parser.add_argument('--v4-deep-value-telemetry-seed', type=int, default=20260814)
+    parser.add_argument('--v4-deep-value-overall-pearson-drop', type=float, default=0.02)
+    parser.add_argument('--v4-deep-value-overall-mse-rise', type=float, default=0.015)
+    parser.add_argument('--v4-deep-value-recent-pearson-drop', type=float, default=0.04)
+    parser.add_argument('--v4-deep-value-recent-mse-rise', type=float, default=0.02)
+    parser.add_argument('--v4-deep-value-warning-iterations', type=int, default=2)
+    parser.add_argument(
+        '--no-v4-deep-value-gate', action='store_true',
+        help='Report frozen deep-value drift without pausing after confirmation.',
+    )
+    parser.add_argument(
         '--anchor-checkpoint',
         type=str,
         help='Exact checkpoint file, or a directory containing one, for fixed-opponent telemetry.',
@@ -571,6 +592,24 @@ def parse_args():
             '--v4-teacher-objective gate requires '
             '--v4-seam-telemetry-interval 1.'
         )
+    for option, value in (
+        ('--v4-deep-value-telemetry-batch-size', args.v4_deep_value_telemetry_batch_size),
+        (
+            '--v4-deep-value-telemetry-bootstrap-samples',
+            args.v4_deep_value_telemetry_bootstrap_samples,
+        ),
+        ('--v4-deep-value-warning-iterations', args.v4_deep_value_warning_iterations),
+    ):
+        if value < 1:
+            parser.error('{} must be positive.'.format(option))
+    for option, value in (
+        ('--v4-deep-value-overall-pearson-drop', args.v4_deep_value_overall_pearson_drop),
+        ('--v4-deep-value-overall-mse-rise', args.v4_deep_value_overall_mse_rise),
+        ('--v4-deep-value-recent-pearson-drop', args.v4_deep_value_recent_pearson_drop),
+        ('--v4-deep-value-recent-mse-rise', args.v4_deep_value_recent_mse_rise),
+    ):
+        if value < 0:
+            parser.error('{} cannot be negative.'.format(option))
     if args.replay_reuse_warmup_iters < 0:
         parser.error('--replay-reuse-warmup-iters cannot be negative.')
     for option, value in (
@@ -927,6 +966,36 @@ def build_coach_args(parsed_args):
         ),
         'v4TeacherObjectiveGateEnabled': not getattr(
             parsed_args, 'no_v4_teacher_objective_gate', False
+        ),
+        'v4DeepValueTelemetrySuite': getattr(
+            parsed_args, 'v4_deep_value_telemetry_suite', None
+        ),
+        'v4DeepValueTelemetryBatchSize': getattr(
+            parsed_args, 'v4_deep_value_telemetry_batch_size', 256
+        ),
+        'v4DeepValueTelemetryBootstrapSamples': getattr(
+            parsed_args, 'v4_deep_value_telemetry_bootstrap_samples', 2000
+        ),
+        'v4DeepValueTelemetrySeed': getattr(
+            parsed_args, 'v4_deep_value_telemetry_seed', 20260814
+        ),
+        'v4DeepValueOverallPearsonDrop': getattr(
+            parsed_args, 'v4_deep_value_overall_pearson_drop', 0.02
+        ),
+        'v4DeepValueOverallMseRise': getattr(
+            parsed_args, 'v4_deep_value_overall_mse_rise', 0.015
+        ),
+        'v4DeepValueRecentPearsonDrop': getattr(
+            parsed_args, 'v4_deep_value_recent_pearson_drop', 0.04
+        ),
+        'v4DeepValueRecentMseRise': getattr(
+            parsed_args, 'v4_deep_value_recent_mse_rise', 0.02
+        ),
+        'v4DeepValueWarningIterations': getattr(
+            parsed_args, 'v4_deep_value_warning_iterations', 2
+        ),
+        'v4DeepValueGateEnabled': not getattr(
+            parsed_args, 'no_v4_deep_value_gate', False
         ),
     })
 
