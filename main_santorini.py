@@ -3,9 +3,13 @@ import logging
 import os
 import random
 
-import coloredlogs
 import numpy as np
 import torch
+
+try:
+    import coloredlogs
+except ImportError:
+    coloredlogs = None
 
 from Coach import Coach, preserve_rng_state
 from santorini.pytorch.NNet import build_nnet
@@ -21,7 +25,13 @@ from utils import dotdict
 
 log = logging.getLogger(__name__)
 
-coloredlogs.install(level='INFO')
+if coloredlogs is not None:
+    coloredlogs.install(level='INFO')
+else:
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(name)s[%(process)d] %(levelname)s %(message)s',
+    )
 
 DEFAULT_ARENA_OPENING_SUITE = './santorini/opening_suites/bootstrap_arena_suite.json'
 DEFAULT_OPENING_BOOK = './santorini/opening_books/bootstrap_result/opening_book.json'
@@ -403,6 +413,27 @@ def parse_args():
     parser.add_argument('--no-telemetry-matches', action='store_true')
     parser.add_argument('--telemetry-sample-size', type=int, default=256)
     parser.add_argument(
+        '--prior-target-kl-warning-threshold',
+        type=float,
+        default=0.15,
+        help=(
+            'Non-gating search-signal watch threshold for the per-iteration '
+            'standard-play mean KL(search target || generating raw prior).'
+        ),
+    )
+    parser.add_argument(
+        '--prior-target-kl-warning-min-positions',
+        type=int,
+        default=256,
+        help='Minimum measured standard positions before the KL watch is eligible.',
+    )
+    parser.add_argument(
+        '--prior-target-kl-warning-iterations',
+        type=int,
+        default=3,
+        help='Consecutive low-signal iterations needed to emit the KL warning.',
+    )
+    parser.add_argument(
         '--symmetry-telemetry-sample-size',
         type=int,
         help=(
@@ -501,6 +532,12 @@ def parse_args():
             parser.error('{} must be a non-negative even number.'.format(option))
     if args.telemetry_placement_temperature < 0:
         parser.error('--telemetry-placement-temperature cannot be negative.')
+    if args.prior_target_kl_warning_threshold < 0:
+        parser.error('--prior-target-kl-warning-threshold cannot be negative.')
+    if args.prior_target_kl_warning_min_positions < 1:
+        parser.error('--prior-target-kl-warning-min-positions must be positive.')
+    if args.prior_target_kl_warning_iterations < 1:
+        parser.error('--prior-target-kl-warning-iterations must be positive.')
     if (
         args.symmetry_telemetry_sample_size is not None
         and args.symmetry_telemetry_sample_size < 0
@@ -852,6 +889,15 @@ def build_coach_args(parsed_args):
         'anchorArchitecture': getattr(parsed_args, 'anchor_architecture', 'v1'),
         'startIteration': 0,
         'telemetrySampleSize': getattr(parsed_args, 'telemetry_sample_size', 256),
+        'priorTargetKLWarningThreshold': getattr(
+            parsed_args, 'prior_target_kl_warning_threshold', 0.15
+        ),
+        'priorTargetKLWarningMinPositions': getattr(
+            parsed_args, 'prior_target_kl_warning_min_positions', 256
+        ),
+        'priorTargetKLWarningIterations': getattr(
+            parsed_args, 'prior_target_kl_warning_iterations', 3
+        ),
         'symmetryTelemetrySampleSize': (
             parsed_args.symmetry_telemetry_sample_size
             if parsed_args.symmetry_telemetry_sample_size is not None

@@ -337,6 +337,26 @@ class MCTS():
             ))
         return self.getActionProbFromTree(canonicalBoard, temp=temp)
 
+    def getRawPriorFromTree(self, canonicalBoard):
+        """Return the network prior stored at an expanded search root.
+
+        P2 uses Gumbel search, whose root exploration does not mutate ``Ps``.
+        For PUCT with Dirichlet noise the stored policy is no longer the raw
+        network prior, so return ``None`` rather than report misleading
+        prior-to-target telemetry.
+        """
+        s = self.game.stringRepresentation(canonicalBoard)
+        if s not in self.Ps or s not in self.As:
+            return None
+        if not self.usesGumbelSearch() and s in self.noised_roots:
+            return None
+        policy = np.zeros(self.game.getActionSize(), dtype=np.float64)
+        policy[self.As[s]] = np.asarray(self.Ps[s], dtype=np.float64)
+        total = float(np.sum(policy))
+        if total <= 0:
+            return None
+        return policy / total
+
     def getActionProbFromTree(self, canonicalBoard, temp=1):
         """
         Returns the MCTS visit-count policy for canonicalBoard without running

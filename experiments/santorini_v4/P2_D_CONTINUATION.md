@@ -93,3 +93,21 @@ The bundle is 112,131,832 bytes with SHA-256
 `2d89bcde6a8af1001d1a5a7a45c80b73e7306c448baa63c08723409fe0169b96`.
 Its adjacent `.report.json` records every input digest and the full frozen
 protocol.
+
+## Iteration-11 result and reusable handoff
+
+The job completed all iterations 5-11. Iteration 11 beat iteration 4 by 24-16
+standard and 21-19 placement-inclusive, and beat iteration 1 by 29-11 and
+25-15. The frozen objective ended at 0.77407, only +0.02234 from the iteration-1
+reference; no step, seam, or oracle-ratchet gate fired. Promote iteration 11 as
+the current production head. The first sustained pure-`z` block through
+iteration 14 has since completed without a safety trigger, but did not earn
+promotion: iteration 14 scored 19-21 standard and 22-18 placement-inclusive
+against iteration 11, while its score against the common iteration-1 standard
+suite fell from iteration 11's 29-11 to 20-20. Iteration 11 therefore remains
+the production head pending a larger fresh-suite confirmation. See
+`P2_PURE_Z_12_14.md` for the full review.
+
+Further routine continuations use the reusable notebook and fixed runtime bundle
+documented in `P2_TRAINING_NOTEBOOK.md`; do not create another iteration-specific
+source package.

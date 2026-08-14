@@ -133,6 +133,7 @@ class Coach():
         self._placement_geometry_records = []
         self._placement_policy_geometry = self._newPlacementPolicyGeometry()
         self._policy_target_stats = self._newPolicyTargetStats()
+        self._prior_target_stats = self._newPriorTargetStats()
         self._playout_cap_stats = self._newPlayoutCapStats()
         self._tactical_stats = self._newTacticalStats()
         self._symmetry_telemetry_suite = None
@@ -150,6 +151,12 @@ class Coach():
                 seam_suite_path,
             )
         resume_metadata = dict(self._arg('resumeMetadata', {}) or {})
+        self._prior_target_kl_warning_streak = int(
+            resume_metadata.get('prior_target_kl_warning_streak', 0)
+        )
+        self._prior_target_kl_reference = resume_metadata.get(
+            'standard_prior_target_kl_reference'
+        )
         self._v4_teacher_previous_objective = None
         self._v4_teacher_reference_objective = None
         if self._v4_seam_telemetry_suite is not None:
@@ -591,6 +598,12 @@ class Coach():
             if exact_tactical_policy:
                 training_policy = action_policy = tactical['policy']
                 if full_search:
+                    self._recordPriorTargetSignal(
+                        self.mcts,
+                        canonicalBoard,
+                        training_policy,
+                        exact_tactical=True,
+                    )
                     self._appendTrainingPosition(
                         trainExamples,
                         canonicalBoard,
@@ -617,6 +630,11 @@ class Coach():
                     canonicalBoard,
                     action_temperature,
                     training_policy=training_policy,
+                )
+                self._recordPriorTargetSignal(
+                    self.mcts,
+                    canonicalBoard,
+                    training_policy,
                 )
                 self._appendTrainingPosition(
                     trainExamples,
@@ -721,6 +739,15 @@ class Coach():
                 ):
                     self._recordSearchSymmetryStats(episode['mcts'])
                     if episode['fullSearch']:
+                        self._recordPriorTargetSignal(
+                            episode['mcts'],
+                            episode['canonicalBoard'],
+                            training_policy,
+                            exact_tactical=(
+                                episode['tactical'] is not None
+                                and episode['tactical']['policy'] is not None
+                            ),
+                        )
                         self._appendTrainingPosition(
                             episode['trainExamples'],
                             episode['canonicalBoard'],
@@ -1092,6 +1119,15 @@ class Coach():
                     ):
                         self._recordSearchSymmetryStats(episode['mcts'])
                         if episode['fullSearch']:
+                            self._recordPriorTargetSignal(
+                                episode['mcts'],
+                                episode['canonicalBoard'],
+                                training_policy,
+                                exact_tactical=(
+                                    episode['tactical'] is not None
+                                    and episode['tactical']['policy'] is not None
+                                ),
+                            )
                             self._recordPolicyTarget(
                                 episode['canonicalBoard'], training_policy
                             )
@@ -1199,6 +1235,60 @@ class Coach():
             'oracle_sparring_ratchet_watch': False,
             'oracle_sparring_ratchet_triggered': False,
         }
+
+        signal = self._priorTargetTelemetry()
+        controls.update(signal)
+        threshold = float(self._arg('priorTargetKLWarningThreshold', 0.15))
+        minimum_positions = int(self._arg('priorTargetKLWarningMinPositions', 256))
+        confirmation_iterations = int(
+            self._arg('priorTargetKLWarningIterations', 3)
+        )
+        standard_count = int(signal.get('standard_prior_target_kl_count', 0))
+        standard_mean = signal.get('standard_prior_target_kl_mean')
+        eligible = bool(
+            standard_mean is not None and standard_count >= minimum_positions
+        )
+        low_signal = bool(eligible and standard_mean < threshold)
+        self._prior_target_kl_warning_streak = (
+            int(getattr(self, '_prior_target_kl_warning_streak', 0)) + 1
+            if low_signal else 0
+        )
+        if getattr(self, '_prior_target_kl_reference', None) is None and eligible:
+            self._prior_target_kl_reference = float(standard_mean)
+        kl_reference = getattr(self, '_prior_target_kl_reference', None)
+        controls.update({
+            'prior_target_kl_warning_threshold': threshold,
+            'prior_target_kl_warning_min_positions': minimum_positions,
+            'prior_target_kl_warning_iterations': confirmation_iterations,
+            'prior_target_kl_warning_eligible': eligible,
+            'prior_target_kl_low_signal': low_signal,
+            'prior_target_kl_warning_streak': int(
+                self._prior_target_kl_warning_streak
+            ),
+            'prior_target_kl_warning': bool(
+                low_signal
+                and self._prior_target_kl_warning_streak
+                >= confirmation_iterations
+            ),
+            'standard_prior_target_kl_reference': (
+                float(kl_reference) if kl_reference is not None else None
+            ),
+            'standard_prior_target_kl_reference_ratio': (
+                float(standard_mean / kl_reference)
+                if eligible and kl_reference else None
+            ),
+        })
+        if controls['prior_target_kl_warning']:
+            log.warning(
+                'Search-policy signal watch at iteration %s: standard '
+                'KL(target || raw prior) %.4f stayed below %.4f for %s '
+                'iteration(s). Run a 96-vs-higher-search bake-off before '
+                'changing the 96/32 budget.',
+                iteration,
+                standard_mean,
+                threshold,
+                self._prior_target_kl_warning_streak,
+            )
 
         current_objective = seam_metrics.get('v4_seam_objective')
         previous_objective = self._v4_teacher_previous_objective
@@ -1357,6 +1447,7 @@ class Coach():
             self._placement_geometry_records = []
             self._placement_policy_geometry = self._newPlacementPolicyGeometry()
             self._policy_target_stats = self._newPolicyTargetStats()
+            self._prior_target_stats = self._newPriorTargetStats()
             self._playout_cap_stats = self._newPlayoutCapStats()
             self._tactical_stats = self._newTacticalStats()
             self._search_symmetry_stats = self._newSearchSymmetryStats()
@@ -1582,6 +1673,12 @@ class Coach():
                     'v4_teacher_objective_cumulative_threshold': metrics.get(
                         'v4_teacher_objective_cumulative_threshold'
                     ),
+                    'prior_target_kl_warning_streak': metrics.get(
+                        'prior_target_kl_warning_streak', 0
+                    ),
+                    'standard_prior_target_kl_reference': metrics.get(
+                        'standard_prior_target_kl_reference'
+                    ),
                 }
                 with accumulate_wall_time(phase_timings, 'serialization'):
                     self.nnet.save_checkpoint(
@@ -1618,7 +1715,8 @@ class Coach():
                     log.info(
                         'Iteration %s summary: replay=%s target/actual reuse=%s/%s; '
                         'steps=%s; teacher step=%s; seam delta=%s; oracle=%s/%s; '
-                        'ratchet pairs=%s rolling=%s; wall=%.1fs.',
+                        'ratchet pairs=%s rolling=%s; search KL=%s watch=%s; '
+                        'wall=%.1fs.',
                         i,
                         telemetry_payload.get('replay_examples'),
                         self._formatTelemetryMetric(
@@ -1644,6 +1742,10 @@ class Coach():
                         self._formatTelemetryMetric(
                             telemetry_payload.get('oracle_sparring_rolling_score')
                         ),
+                        self._formatTelemetryMetric(
+                            telemetry_payload.get('standard_prior_target_kl_mean')
+                        ),
+                        telemetry_payload.get('prior_target_kl_warning', False),
                         telemetry_payload.get('wall_total_seconds', 0.0),
                     )
                 if local_iteration == 1 and self._arg('deleteLoadedExamplesAfterFirstIteration', False):
@@ -2019,6 +2121,7 @@ class Coach():
         payload.update(self._placementTelemetry())
         payload.update(self._placementGeometryTelemetry())
         payload.update(self._policyTargetTelemetry())
+        payload.update(self._priorTargetTelemetry())
         payload.update(self._playoutCapTelemetry())
         payload.update(self._tacticalTelemetry())
         payload.update(self._searchSymmetryTelemetry())
@@ -2462,6 +2565,104 @@ class Coach():
             'placement': {'entropy': [], 'support': [], 'one_hot': []},
             'standard': {'entropy': [], 'support': [], 'one_hot': []},
         }
+
+    @staticmethod
+    def _newPriorTargetStats():
+        return {
+            'placement': {
+                'kl': [], 'total_variation': [], 'argmax_agreement': [],
+                'exact_tactical_excluded': 0, 'prior_unavailable': 0,
+            },
+            'standard': {
+                'kl': [], 'total_variation': [], 'argmax_agreement': [],
+                'exact_tactical_excluded': 0, 'prior_unavailable': 0,
+            },
+        }
+
+    def _recordPriorTargetSignal(
+        self,
+        mcts,
+        canonical_board,
+        target_policy,
+        exact_tactical=False,
+    ):
+        """Record search improvement over the generating network's raw prior."""
+        phase = 'placement' if (
+            hasattr(self.game, 'isPlacementPhase')
+            and self.game.isPlacementPhase(canonical_board)
+        ) else 'standard'
+        if not hasattr(self, '_prior_target_stats'):
+            self._prior_target_stats = self._newPriorTargetStats()
+        bucket = self._prior_target_stats[phase]
+        if exact_tactical:
+            bucket['exact_tactical_excluded'] += 1
+            return
+        if not hasattr(mcts, 'getRawPriorFromTree'):
+            bucket['prior_unavailable'] += 1
+            return
+        prior = mcts.getRawPriorFromTree(canonical_board)
+        if prior is None:
+            bucket['prior_unavailable'] += 1
+            return
+        target = np.asarray(target_policy, dtype=np.float64)
+        target_total = float(np.sum(target))
+        if target_total <= 0:
+            bucket['prior_unavailable'] += 1
+            return
+        target = target / target_total
+        prior = np.asarray(prior, dtype=np.float64)
+        positive = target > 0
+        kl = float(np.sum(
+            target[positive] * (
+                np.log(target[positive])
+                - np.log(np.maximum(prior[positive], 1e-30))
+            )
+        ))
+        bucket['kl'].append(max(0.0, kl))
+        bucket['total_variation'].append(
+            0.5 * float(np.sum(np.abs(target - prior)))
+        )
+        bucket['argmax_agreement'].append(
+            int(np.argmax(target) == np.argmax(prior))
+        )
+
+    @staticmethod
+    def _distributionTelemetry(prefix, values):
+        array = np.asarray(values, dtype=np.float64)
+        if not len(array):
+            return {}
+        return {
+            '{}_count'.format(prefix): int(len(array)),
+            '{}_mean'.format(prefix): float(np.mean(array)),
+            '{}_median'.format(prefix): float(np.median(array)),
+            '{}_p10'.format(prefix): float(np.quantile(array, 0.10)),
+            '{}_p90'.format(prefix): float(np.quantile(array, 0.90)),
+        }
+
+    def _priorTargetTelemetry(self):
+        payload = {}
+        combined = {
+            key: [] for key in ('kl', 'total_variation', 'argmax_agreement')
+        }
+        stats = getattr(self, '_prior_target_stats', self._newPriorTargetStats())
+        for phase, bucket in stats.items():
+            for key in combined:
+                combined[key].extend(bucket[key])
+                payload.update(self._distributionTelemetry(
+                    '{}_prior_target_{}'.format(phase, key),
+                    bucket[key],
+                ))
+            payload['{}_prior_target_exact_tactical_excluded'.format(phase)] = int(
+                bucket['exact_tactical_excluded']
+            )
+            payload['{}_prior_target_prior_unavailable'.format(phase)] = int(
+                bucket['prior_unavailable']
+            )
+        for key, values in combined.items():
+            payload.update(self._distributionTelemetry(
+                'prior_target_{}'.format(key), values
+            ))
+        return payload
 
     def _recordPolicyTarget(self, canonical_board, policy):
         phase = 'placement' if (

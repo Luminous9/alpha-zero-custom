@@ -175,11 +175,16 @@ placement-inclusive against iteration 1 while moving the frozen objective only
 +0.00654. The B-versus-D comparison at identical global 1e-4 LR isolates a
 large benefit from the temporary P1c-value bridge.
 
-Arm D iteration 4 is promoted as the current P2 production head. Iteration 1
-remains the immutable rollback and longitudinal anchor. The next authorized job
-continues D at fixed 2x/global 1e-4 through the beta=1 boundary at iteration 11,
-then pauses for milestone review. See `P2_D_CONTINUATION.md`. No diagnostic or
-continuation job touches final-test data or final arena seeds.
+Arm D subsequently completed its bridge through beta 1.0 at iteration 11.
+Iteration 11 is the current P2 production head; iterations 4 and 1 remain the
+rollback and longitudinal anchors. The first sustained pure-`z` block through
+iteration 14 also completed cleanly, but did not earn promotion: its direct
+standard arena against iteration 11 was 19-21, and its common-suite standard
+score against iteration 1 fell from iteration 11's 29-11 to 20-20. Routine
+continuation is paused pending larger fresh-suite confirmations against
+iterations 11 and 1. See `P2_D_CONTINUATION.md` and
+`P2_PURE_Z_12_14.md`. No diagnostic or continuation job touches final-test data
+or final arena seeds.
 
 Production runners use compact console logging because Kaggle's captured
 subprocess output commits terminal carriage-return redraws as separate records.
