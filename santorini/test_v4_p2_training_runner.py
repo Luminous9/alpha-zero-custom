@@ -74,6 +74,29 @@ class V4P2TrainingRunnerTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             _validate_row(row, self.manifest(), 12, 0.76)
 
+    def test_balanced_replay_and_unique_start_contract_validates(self):
+        row = self.row(18)
+        row.update({
+            'replay_sampling_mode': 'phase-balanced-v1',
+            'replay_placement_sampling_fraction': 0.15,
+            'replay_placement_frequency_exponent': 0.5,
+            'unique_neural_starts_accepted': 22,
+        })
+        for ply in range(4):
+            row['replay_placement_ply_{}_sampling_fraction'.format(ply)] = 0.0375
+        self.assertEqual(
+            _validate_row(
+                row,
+                self.manifest(),
+                18,
+                0.76,
+                placement_replay_fraction=0.15,
+                placement_replay_frequency_exponent=0.5,
+                unique_neural_start_fraction=0.10,
+            ),
+            0.765,
+        )
+
     def test_row_requires_live_prior_target_telemetry(self):
         row = self.row(12)
         del row['standard_prior_target_kl_mean']
@@ -120,6 +143,8 @@ class V4P2TrainingRunnerTests(unittest.TestCase):
             'coloredlogs',
             'import main_santorini',
             'prior_target_kl',
+            'PLACEMENT_REPLAY_FRACTION',
+            'UNIQUE_NEURAL_START_FRACTION',
         ):
             self.assertIn(control, source)
 

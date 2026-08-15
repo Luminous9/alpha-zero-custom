@@ -113,7 +113,128 @@ class FourActionBatchCountingNNet(BatchCountingNNet):
         )
 
 
+class MiniPlacementGame:
+    def getInitBoard(self):
+        return np.zeros((2, 5, 5), dtype=np.int8)
+
+    def getActionSize(self):
+        return 25
+
+    def getNextState(self, board, player, action):
+        board = board.copy()
+        count = int(np.count_nonzero(board[0]))
+        if count < 4:
+            board[0].flat[int(action)] = 1 if count < 2 else -1
+            next_count = count + 1
+            next_player = 1 if next_count < 2 or next_count == 4 else -1
+            return board, next_player
+        board[1, 0, 0] = 1
+        return board, -player
+
+    def getValidMoves(self, board, player):
+        return (board[0].reshape(-1) == 0).astype(np.int8)
+
+    def getGameEnded(self, board, player):
+        return -1 if board[1, 0, 0] else 0
+
+    def getCanonicalForm(self, board, player):
+        return board
+
+    def stringRepresentation(self, board):
+        return board.tobytes()
+
+    def isPlacementPhase(self, board):
+        return np.count_nonzero(board[0]) < 4
+
+
+class Uniform25NNet:
+    def predict_batch(self, boards):
+        return (
+            np.full((len(boards), 25), 1 / 25, dtype=np.float32),
+            np.zeros(len(boards), dtype=np.float32),
+        )
+
+
 class TestBatchedMCTSArena(unittest.TestCase):
+    def test_generates_unpaired_placement_stream(self):
+        arena = BatchedMCTSArena(
+            MiniPlacementGame(),
+            Uniform25NNet(),
+            Uniform25NNet(),
+            dotdict({'numMCTSSims': 1, 'cpuct': 1.0}),
+            batch_size=4,
+            quiet=True,
+            placement_temperature=1.0,
+            game_seeds=[7, 8, 9],
+        )
+
+        records = arena.generatePlacements(3)
+
+        self.assertEqual(len(records), 3)
+        self.assertEqual([record['pair_index'] for record in records], [0, 1, 2])
+        self.assertEqual({record['seat_order'] for record in records}, {'placement_source'})
+        self.assertTrue(all(len(record['placement_actions']) == 4 for record in records))
+
+    def test_generates_placements_without_playing_standard_continuations(self):
+        arena = BatchedMCTSArena(
+            MiniPlacementGame(),
+            Uniform25NNet(),
+            Uniform25NNet(),
+            dotdict({'numMCTSSims': 1, 'cpuct': 1.0}),
+            batch_size=4,
+            quiet=True,
+            placement_temperature=1.0,
+            game_seeds=[7, 8],
+        )
+
+        records = arena.generatePlacementGames(4)
+
+        self.assertEqual(len(records), 4)
+        self.assertEqual({record['pair_index'] for record in records}, {0, 1})
+        self.assertEqual(
+            {record['seat_order'] for record in records},
+            {'contestant1_first', 'contestant2_first'},
+        )
+        self.assertTrue(all(len(record['placement_actions']) == 4 for record in records))
+        self.assertTrue(all(np.count_nonzero(record['opening_board'][0]) == 4 for record in records))
+
+    def test_plays_arbitrary_fixed_opening_specifications(self):
+        game = TinyGame()
+        arena = BatchedMCTSArena(
+            game,
+            BatchCountingNNet(),
+            BatchCountingNNet(),
+            dotdict({'numMCTSSims': 1, 'cpuct': 1.0}),
+            batch_size=2,
+            quiet=True,
+            record_placement_diagnostics=True,
+        )
+        result = arena.playGameSpecifications([
+            {
+                'specification_id': 10,
+                'opening_board': np.array([1]),
+                'side_to_player': {1: 1, -1: -1},
+                'game_seed': 3,
+                'game_index': 4,
+                'seat_order': 'contestant1_first',
+            },
+            {
+                'specification_id': 11,
+                'opening_board': np.array([1]),
+                'side_to_player': {1: -1, -1: 1},
+                'game_seed': 4,
+                'game_index': 4,
+                'seat_order': 'contestant2_first',
+            },
+        ])
+
+        self.assertEqual(result, (1, 1, 0))
+        self.assertEqual(
+            {record['specification_id'] for record in arena.game_records},
+            {10, 11},
+        )
+        self.assertTrue(all(record['standard_trajectory'] for record in arena.game_records))
+
     def test_placement_diagnostics_count_symmetries_duplicates_and_trajectories(self):
         arena = BatchedMCTSArena(
             TinyGame(),

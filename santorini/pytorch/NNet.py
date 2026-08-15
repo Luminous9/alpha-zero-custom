@@ -165,13 +165,30 @@ class NNetWrapper(NeuralNet):
     def encode_boards(cls, boards):
         return np.array([cls.encode_board(board) for board in boards], dtype=np.float32)
 
-    def train(self, examples, new_example_count=None, validation_examples=None, iteration=None):
+    def train(
+        self,
+        examples,
+        new_example_count=None,
+        validation_examples=None,
+        iteration=None,
+        sampling_weights=None,
+    ):
         """
         examples: list of examples, each example is of form (board, pi, v)
         """
         runtime_args = self._sync_runtime_args()
         if not examples:
             raise ValueError('Cannot train without training examples.')
+        if sampling_weights is not None:
+            sampling_weights = np.asarray(sampling_weights, dtype=np.float64)
+            if sampling_weights.shape != (len(examples),):
+                raise ValueError('Replay sampling weights must match training examples.')
+            if not np.all(np.isfinite(sampling_weights)) or np.any(sampling_weights < 0):
+                raise ValueError('Replay sampling weights must be finite and non-negative.')
+            weight_sum = float(sampling_weights.sum())
+            if weight_sum <= 0:
+                raise ValueError('Replay sampling weights must have positive mass.')
+            sampling_weights = sampling_weights / weight_sum
         learning_rate = self._learning_rate_for_iteration(iteration, runtime_args)
         optimizer_lrs = self._configure_optimizer_for_iteration(
             learning_rate, runtime_args
@@ -263,7 +280,17 @@ class NNetWrapper(NeuralNet):
 
             t = tqdm(range(steps_this_epoch), desc='Training Net', disable=runtime_args.quiet)
             for _ in t:
-                sample_ids = np.random.randint(len(examples), size=runtime_args.batch_size)
+                if sampling_weights is None:
+                    sample_ids = np.random.randint(
+                        len(examples), size=runtime_args.batch_size
+                    )
+                else:
+                    sample_ids = np.random.choice(
+                        len(examples),
+                        size=runtime_args.batch_size,
+                        replace=True,
+                        p=sampling_weights,
+                    )
                 batch_boards = encoded_boards[sample_ids]
                 batch_pis = target_pis[sample_ids]
                 if runtime_args.on_the_fly_symmetry:
@@ -468,6 +495,11 @@ class NNetWrapper(NeuralNet):
                 'uncapped_training_steps': int(uncapped_training_steps),
                 'virtual_replay_examples': int(virtual_example_count),
                 'training_examples': int(len(examples)),
+                'weighted_replay_sampling': bool(sampling_weights is not None),
+                'replay_sampling_effective_examples': (
+                    float(1.0 / np.sum(sampling_weights ** 2))
+                    if sampling_weights is not None else float(len(examples))
+                ),
                 'symmetry_augmentation_multiplier': int(symmetry_multiplier),
                 'effective_replay_epochs': float(
                     completed_steps * runtime_args.batch_size /

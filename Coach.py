@@ -33,6 +33,11 @@ except ImportError:
     load_compact_replay = save_compact_replay = None
 
 try:
+    from santorini.V4ReplaySampling import prepare_v4_replay
+except ImportError:
+    prepare_v4_replay = None
+
+try:
     from santorini.SantoriniTelemetry import ReferenceSuite
 except ImportError:
     ReferenceSuite = None
@@ -138,6 +143,7 @@ class Coach():
         self._completed_openings = []
         self._completed_opening_symmetries = []
         self._placement_scale_game_counts = {'base': 0, 'exploratory': 0}
+        self._unique_neural_start_stats = self._newUniqueNeuralStartStats()
         self._placement_geometry_records = []
         self._placement_policy_geometry = self._newPlacementPolicyGeometry()
         self._policy_target_stats = self._newPolicyTargetStats()
@@ -291,12 +297,17 @@ class Coach():
     def _arena_batch_size(self):
         return max(1, int(getattr(self.args, 'arenaBatchSize', 1)))
 
-    def _newSelfPlayMCTS(self):
+    def _newSelfPlayMCTS(
+        self,
+        record_placement_scale=True,
+        sample_placement_scale=True,
+    ):
         """Create one episode's search with an independently sampled placement scale."""
         episode_args = dotdict(dict(self.args))
         probability = float(self._arg('placementScaleExplorationProbability', 0.0))
         exploratory = (
-            self._arg('searchMode', 'puct') == 'gumbel'
+            sample_placement_scale
+            and self._arg('searchMode', 'puct') == 'gumbel'
             and probability > 0.0
             and np.random.random() < probability
         )
@@ -308,11 +319,14 @@ class Coach():
             bucket = 'exploratory'
         else:
             bucket = 'base'
-        if hasattr(self, '_placement_scale_game_counts'):
+        if record_placement_scale and hasattr(self, '_placement_scale_game_counts'):
             self._placement_scale_game_counts[bucket] += 1
-        return MCTS(self.game, self.nnet, episode_args)
+        mcts = MCTS(self.game, self.nnet, episode_args)
+        mcts._placement_scale_bucket = bucket
+        return mcts
 
-    def _recordCompletedOpening(self, board):
+    @staticmethod
+    def _openingKeys(board):
         pieces = np.sign(np.asarray(board)[0]).astype(np.int8)
         exact = np.ascontiguousarray(pieces).tobytes()
         symmetries = []
@@ -320,8 +334,144 @@ class Coach():
             rotated = np.rot90(pieces, rotations)
             symmetries.append(np.ascontiguousarray(rotated).tobytes())
             symmetries.append(np.ascontiguousarray(np.fliplr(rotated)).tobytes())
+        return exact, min(symmetries)
+
+    def _recordCompletedOpening(self, board):
+        exact, symmetry = self._openingKeys(board)
         self._completed_openings.append(exact)
-        self._completed_opening_symmetries.append(min(symmetries))
+        self._completed_opening_symmetries.append(symmetry)
+
+    @staticmethod
+    def _newUniqueNeuralStartStats():
+        return {
+            'requested': 0,
+            'accepted': 0,
+            'candidates': 0,
+            'd4_duplicates_rejected': 0,
+        }
+
+    def _generateUniqueNeuralOpenings(self, count):
+        """Generate completed neural-search placements unique modulo D4.
+
+        Candidate placement searches use the normal self-play search, action
+        temperature, and root noise. Rejection is the only diversity pressure:
+        no extra action noise is introduced, and rejected prefixes never enter
+        replay or placement-behavior telemetry.
+        """
+        count = int(count)
+        if count <= 0:
+            return []
+        if not getattr(self.game, 'sequential_placement', False):
+            raise ValueError('Unique neural starts require sequential placement.')
+        max_attempts = count * int(
+            self._arg('uniqueNeuralStartMaxAttemptFactor', 32)
+        )
+        accepted = []
+        seen = set()
+        attempts = 0
+        self._unique_neural_start_stats['requested'] += count
+
+        while len(accepted) < count and attempts < max_attempts:
+            candidate_count = min(
+                self._self_play_batch_size(),
+                max_attempts - attempts,
+                count - len(accepted),
+            )
+            episodes = [{
+                'board': self.game.getInitBoard(),
+                'curPlayer': 1,
+                'episodeStep': 0,
+                'placementActions': [],
+                'mcts': self._newSelfPlayMCTS(record_placement_scale=False),
+            } for _ in range(candidate_count)]
+
+            for _ in range(4):
+                for episode in episodes:
+                    episode['episodeStep'] += 1
+                    episode['canonicalBoard'] = self.game.getCanonicalForm(
+                        episode['board'], episode['curPlayer']
+                    )
+                    episode['temp'] = self._temperature(
+                        episode['canonicalBoard'], episode['episodeStep']
+                    )
+                    episode['fullSearch'], episode['searchSims'] = self._playoutCapSearch(
+                        episode['canonicalBoard']
+                    )
+                    if not episode['fullSearch']:
+                        episode['temp'] = 0
+                    episode['tactical'] = self._prepareTacticalRoot(
+                        episode['mcts'], episode['canonicalBoard']
+                    )
+                    if not (
+                        episode['tactical'] is not None
+                        and episode['tactical']['policy'] is not None
+                    ):
+                        self._prepareSearchRoot(
+                            episode['mcts'],
+                            episode['canonicalBoard'],
+                            episode['searchSims'],
+                        )
+
+                _, action_policies = self._getBatchedSelfPlayPolicies(episodes)
+                for episode, action_policy in zip(episodes, action_policies):
+                    self._recordSearchSymmetryStats(episode['mcts'])
+                    self._recordPlayoutCapSearch(
+                        episode['canonicalBoard'],
+                        episode['fullSearch'],
+                        episode['searchSims'],
+                    )
+                    action = int(np.random.choice(len(action_policy), p=action_policy))
+                    episode['placementActions'].append(action)
+                    episode['board'], episode['curPlayer'] = self.game.getNextState(
+                        episode['board'], episode['curPlayer'], action
+                    )
+
+            for episode in episodes:
+                attempts += 1
+                _, symmetry_key = self._openingKeys(episode['board'])
+                if symmetry_key in seen:
+                    self._unique_neural_start_stats['d4_duplicates_rejected'] += 1
+                    continue
+                seen.add(symmetry_key)
+                bucket = getattr(episode['mcts'], '_placement_scale_bucket', 'base')
+                self._placement_scale_game_counts[bucket] += 1
+                for ply, action in enumerate(episode['placementActions'], start=1):
+                    self._recordPlacementChoice(ply, action)
+                accepted.append({
+                    'board': np.asarray(episode['board']).copy(),
+                    'placement_actions': list(episode['placementActions']),
+                    'd4_key': symmetry_key,
+                })
+
+        self._unique_neural_start_stats['candidates'] += attempts
+        self._unique_neural_start_stats['accepted'] += len(accepted)
+        if len(accepted) != count:
+            raise RuntimeError(
+                'Generated only {} of {} requested D4-unique neural starts after '
+                '{} candidates. Increase --unique-neural-start-max-attempt-factor '
+                'or review placement collapse.'.format(len(accepted), count, attempts)
+            )
+        return accepted
+
+    def _uniqueNeuralStartTelemetry(self):
+        stats = getattr(
+            self, '_unique_neural_start_stats', self._newUniqueNeuralStartStats()
+        )
+        candidates = int(stats['candidates'])
+        return {
+            'unique_neural_start_fraction': float(
+                self._arg('uniqueNeuralStartFraction', 0.0)
+            ),
+            'unique_neural_starts_requested': int(stats['requested']),
+            'unique_neural_starts_accepted': int(stats['accepted']),
+            'unique_neural_start_candidates': candidates,
+            'unique_neural_start_d4_duplicates_rejected': int(
+                stats['d4_duplicates_rejected']
+            ),
+            'unique_neural_start_acceptance_rate': (
+                float(stats['accepted'] / candidates) if candidates else None
+            ),
+        }
 
     def _uses_on_the_fly_symmetry(self):
         return self._arg('symmetryAugmentation', 'expanded') == 'on-the-fly'
@@ -371,6 +521,34 @@ class Coach():
         for example in examples:
             (validation if self._isValidationExample(example) else training).append(example)
         return training, validation
+
+    def _prepareTrainingReplay(self):
+        training_history = []
+        validation = []
+        for window in self.trainExamplesHistory:
+            window_training, window_validation = self._splitTrainingValidation(window)
+            training_history.append(window_training)
+            validation.extend(window_validation)
+
+        placement_fraction = float(self._arg('placementReplayFraction', 0.0))
+        if placement_fraction <= 0.0:
+            return (
+                [example for window in training_history for example in window],
+                validation,
+                None,
+                {'replay_sampling_mode': 'uniform-raw'},
+            )
+        if prepare_v4_replay is None:
+            raise RuntimeError('V4 phase-balanced replay support is unavailable.')
+        examples, weights, metrics = prepare_v4_replay(
+            self.game,
+            training_history,
+            placement_fraction=placement_fraction,
+            frequency_exponent=float(
+                self._arg('placementReplayFrequencyExponent', 0.5)
+            ),
+        )
+        return examples, validation, weights, metrics
 
     def _initial_board(self):
         if self.opening_sampler is not None:
@@ -703,7 +881,7 @@ class Coach():
                 self._recordCompletedPlacementGeometry(placementActions, player_one_result)
                 return [(x[0], x[2], r * ((-1) ** (x[1] != self.curPlayer))) for x in trainExamples]
 
-    def executeEpisodesBatched(self, numEpisodes):
+    def executeEpisodesBatched(self, numEpisodes, initial_openings=None):
         """
         Executes self-play episodes in a batch of active games. MCTS trees stay
         independent per game, but neural-network leaf evaluations are batched
@@ -714,20 +892,39 @@ class Coach():
         launched = 0
         completed = 0
         batch_size = self._self_play_batch_size()
+        if initial_openings is not None:
+            initial_openings = list(initial_openings)
+            if len(initial_openings) != int(numEpisodes):
+                raise ValueError('Initial opening count must match episode count.')
         progress = tqdm(total=numEpisodes, desc="Self Play", disable=self._quiet())
 
         try:
             while completed < numEpisodes:
                 while launched < numEpisodes and len(activeEpisodes) < batch_size:
-                    initial_board = self._initial_board()
+                    fixed_opening = (
+                        initial_openings[launched]
+                        if initial_openings is not None else None
+                    )
+                    initial_board = (
+                        np.asarray(fixed_opening['board']).copy()
+                        if fixed_opening is not None else self._initial_board()
+                    )
                     activeEpisodes.append({
                         'board': initial_board,
                         'curPlayer': 1,
                         'episodeStep': self._initial_episode_step(initial_board),
                         'trainExamples': [],
-                        'placementActions': [],
-                        'mcts': self._newSelfPlayMCTS(),
+                        'placementActions': (
+                            list(fixed_opening.get('placement_actions', []))
+                            if fixed_opening is not None else []
+                        ),
+                        'mcts': self._newSelfPlayMCTS(
+                            record_placement_scale=fixed_opening is None,
+                            sample_placement_scale=fixed_opening is None,
+                        ),
                     })
+                    if fixed_opening is not None:
+                        self._recordCompletedOpening(initial_board)
                     launched += 1
 
                 for episode in activeEpisodes:
@@ -1515,6 +1712,7 @@ class Coach():
             self._completed_openings = []
             self._completed_opening_symmetries = []
             self._placement_scale_game_counts = {'base': 0, 'exploratory': 0}
+            self._unique_neural_start_stats = self._newUniqueNeuralStartStats()
             self._placement_geometry_records = []
             self._placement_policy_geometry = self._newPlacementPolicyGeometry()
             self._policy_target_stats = self._newPolicyTargetStats()
@@ -1539,12 +1737,29 @@ class Coach():
                             sparring_games,
                             self._self_play_batch_size(),
                         )
-                    if ordinary_games and self._self_play_batch_size() > 1:
-                        iterationTrainExamples += self.executeEpisodesBatched(ordinary_games)
-                    elif ordinary_games:
-                        for _ in tqdm(range(ordinary_games), desc="Self Play", disable=self._quiet()):
+                    unique_start_games = int(round(
+                        ordinary_games * float(
+                            self._arg('uniqueNeuralStartFraction', 0.0)
+                        )
+                    ))
+                    unique_openings = self._generateUniqueNeuralOpenings(
+                        unique_start_games
+                    )
+                    empty_board_games = ordinary_games - unique_start_games
+                    if empty_board_games and (
+                        self._self_play_batch_size() > 1 or unique_start_games
+                    ):
+                        iterationTrainExamples += self.executeEpisodesBatched(
+                            empty_board_games
+                        )
+                    elif empty_board_games:
+                        for _ in tqdm(range(empty_board_games), desc="Self Play", disable=self._quiet()):
                             self.mcts = self._newSelfPlayMCTS()  # reset search tree
                             iterationTrainExamples += self.executeEpisode()
+                    if unique_openings:
+                        iterationTrainExamples += self.executeEpisodesBatched(
+                            len(unique_openings), initial_openings=unique_openings
+                        )
                     if sparring_games:
                         iterationTrainExamples += self.executeOracleSparringEpisodes(
                             sparring_games,
@@ -1576,12 +1791,15 @@ class Coach():
                 if not self._saveBestTrainExamples():
                     self._deleteExamplesFile('best.pth.tar.examples')
 
-            # shuffle examples before training
-            trainExamples = []
-            for e in self.trainExamplesHistory:
-                trainExamples.extend(e)
-            replay_example_count = len(trainExamples)
-            trainExamples, validationExamples = self._splitTrainingValidation(trainExamples)
+            # Raw replay remains untouched on disk. Build the possibly
+            # aggregated/weighted training view only after serialization.
+            replay_example_count = sum(len(window) for window in self.trainExamplesHistory)
+            (
+                trainExamples,
+                validationExamples,
+                replaySamplingWeights,
+                replaySamplingMetrics,
+            ) = self._prepareTrainingReplay()
             self._prepareSymmetryTelemetrySuite(validationExamples)
             freshExamples = (
                 list(iterationTrainExamples)
@@ -1589,7 +1807,8 @@ class Coach():
                 else (list(self.trainExamplesHistory[-1]) if self.trainExamplesHistory else [])
             )
             freshTrainingExamples, _ = self._splitTrainingValidation(freshExamples)
-            shuffle(trainExamples)
+            if replaySamplingWeights is None:
+                shuffle(trainExamples)
             telemetry_sample_size = min(int(self._arg('telemetrySampleSize', 256)), len(trainExamples))
             self._telemetry_boards = [trainExamples[index][0] for index in range(telemetry_sample_size)]
 
@@ -1600,6 +1819,34 @@ class Coach():
                         new_example_count=len(freshTrainingExamples),
                         validation_examples=validationExamples,
                         iteration=i,
+                        sampling_weights=replaySamplingWeights,
+                    )
+                metrics.update(replaySamplingMetrics)
+                if replaySamplingWeights is not None:
+                    optimizer_draws = (
+                        int(metrics.get('training_steps', 0))
+                        * int(getattr(self.nnet.net_args, 'batch_size', 1))
+                    )
+                    raw_training_examples = int(
+                        replaySamplingMetrics['replay_raw_examples']
+                    )
+                    weighted_ess = float(
+                        replaySamplingMetrics['replay_sampling_effective_examples']
+                    )
+                    metrics['average_draws_per_training_view_item'] = float(
+                        optimizer_draws / len(trainExamples)
+                    )
+                    metrics['average_draws_per_stored_position'] = float(
+                        optimizer_draws / raw_training_examples
+                    )
+                    metrics['base_replay_epochs'] = float(
+                        optimizer_draws / raw_training_examples
+                    )
+                    metrics['effective_replay_epochs'] = float(
+                        optimizer_draws / raw_training_examples
+                    )
+                    metrics['weighted_effective_replay_epochs'] = float(
+                        optimizer_draws / weighted_ess
                     )
                 with accumulate_wall_time(phase_timings, 'arena_telemetry'):
                     seam_metrics = self._v4SeamTelemetry(i)
@@ -1682,6 +1929,18 @@ class Coach():
                         )
                     ),
                     'validation_fraction': self._arg('validationFraction', 0.0),
+                    'placement_replay_fraction': self._arg(
+                        'placementReplayFraction', 0.0
+                    ),
+                    'placement_replay_frequency_exponent': self._arg(
+                        'placementReplayFrequencyExponent', 0.5
+                    ),
+                    'unique_neural_start_fraction': self._arg(
+                        'uniqueNeuralStartFraction', 0.0
+                    ),
+                    'unique_neural_start_max_attempt_factor': self._arg(
+                        'uniqueNeuralStartMaxAttemptFactor', 32
+                    ),
                     'optimizer': getattr(getattr(self.nnet, 'net_args', None), 'optimizer', None),
                     'learning_rate': metrics.get('learning_rate'),
                     'optimizer_group_learning_rates': metrics.get(
@@ -2225,6 +2484,7 @@ class Coach():
         }
         payload.update(training_metrics or {})
         payload.update(self._placementScaleTelemetry())
+        payload.update(self._uniqueNeuralStartTelemetry())
         payload.update(self._placementTelemetry())
         payload.update(self._placementGeometryTelemetry())
         payload.update(self._policyTargetTelemetry())
@@ -2304,6 +2564,31 @@ class Coach():
                 100.0 * payload['placement_exploratory_scale_game_rate'],
                 payload.get('unique_completed_openings', 'n/a'),
                 payload.get('symmetry_unique_completed_openings', 'n/a'),
+            )
+        if (
+            payload.get('replay_sampling_mode') == 'phase-balanced-v1'
+            and self._quiet()
+        ):
+            log.info(
+                'Replay view: raw=%s (%s placement, %.1f%%) -> %s train item(s); '
+                'placement draw mass=%.1f%% (%s D4 group(s), ESS %.1f).',
+                payload.get('replay_raw_examples'),
+                payload.get('replay_raw_placement_examples'),
+                100.0 * payload.get('replay_raw_placement_fraction', 0.0),
+                payload.get('replay_training_view_examples'),
+                100.0 * payload.get('replay_placement_sampling_fraction', 0.0),
+                payload.get('replay_aggregated_placement_groups'),
+                payload.get('replay_sampling_effective_examples', 0.0),
+            )
+        if payload.get('unique_neural_start_candidates', 0) and self._quiet():
+            log.info(
+                'Unique neural starts: %s/%s accepted from %s candidate(s); '
+                '%s D4 duplicate(s) rejected (%.1f%% acceptance).',
+                payload.get('unique_neural_starts_accepted'),
+                payload.get('unique_neural_starts_requested'),
+                payload.get('unique_neural_start_candidates'),
+                payload.get('unique_neural_start_d4_duplicates_rejected'),
+                100.0 * payload.get('unique_neural_start_acceptance_rate', 0.0),
             )
 
         if symmetry_metrics and self._quiet():

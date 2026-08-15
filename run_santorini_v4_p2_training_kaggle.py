@@ -45,6 +45,14 @@ def parse_args():
     parser.add_argument('--output-dir', required=True)
     parser.add_argument('--num-iterations', type=int, required=True)
     parser.add_argument('--replay-reuse', type=float, default=DEFAULT_REPLAY_REUSE)
+    parser.add_argument('--placement-replay-fraction', type=float, default=0.15)
+    parser.add_argument(
+        '--placement-replay-frequency-exponent', type=float, default=0.5
+    )
+    parser.add_argument('--unique-neural-start-fraction', type=float, default=0.10)
+    parser.add_argument(
+        '--unique-neural-start-max-attempt-factor', type=int, default=32
+    )
     parser.add_argument(
         '--expected-resume-replay-reuse', type=float,
         help='Require the ancestor checkpoint to use this replay dose.',
@@ -180,6 +188,9 @@ def _validate_runtime(manifest_path):
 def _validate_row(
     row, manifest, expected_iteration, previous_objective,
     replay_reuse=DEFAULT_REPLAY_REUSE,
+    placement_replay_fraction=0.0,
+    placement_replay_frequency_exponent=0.5,
+    unique_neural_start_fraction=0.0,
 ):
     reference = float(manifest['lineage']['teacher_objective_reference'])
     if int(row.get('iteration', -1)) != expected_iteration:
@@ -192,6 +203,39 @@ def _validate_row(
         raise RuntimeError('Iteration changed fixed replay reuse.')
     if int(row.get('replay_reuse_warmup_iters', -1)) != 0:
         raise RuntimeError('Iteration enabled replay warm-up.')
+    expected_sampling_mode = (
+        'phase-balanced-v1' if placement_replay_fraction > 0 else 'uniform-raw'
+    )
+    if (
+        row.get('replay_sampling_mode') != expected_sampling_mode
+        and not (
+            placement_replay_fraction == 0
+            and row.get('replay_sampling_mode') is None
+        )
+    ):
+        raise RuntimeError('Iteration used the wrong replay sampling mode.')
+    if placement_replay_fraction > 0:
+        if not _close(
+            row.get('replay_placement_sampling_fraction'),
+            placement_replay_fraction,
+        ):
+            raise RuntimeError('Iteration used the wrong placement replay fraction.')
+        if not _close(
+            row.get('replay_placement_frequency_exponent'),
+            placement_replay_frequency_exponent,
+        ):
+            raise RuntimeError('Iteration used the wrong placement frequency exponent.')
+        for ply in range(4):
+            if not _close(
+                row.get('replay_placement_ply_{}_sampling_fraction'.format(ply)),
+                placement_replay_fraction / 4.0,
+            ):
+                raise RuntimeError('Iteration did not balance placement ply {}.'.format(ply))
+    expected_unique_starts = int(round(
+        (240 - 24) * unique_neural_start_fraction
+    ))
+    if int(row.get('unique_neural_starts_accepted', 0)) != expected_unique_starts:
+        raise RuntimeError('Iteration generated the wrong unique-neural-start quota.')
     if int(row.get('standard_prior_target_kl_count', 0)) < 256:
         raise RuntimeError('Iteration lacks sufficient prior-to-target KL telemetry.')
     if float(row.get('standard_prior_target_kl_mean', -1.0)) < 0.0:
@@ -323,6 +367,14 @@ def main():
         raise ValueError('--num-iterations must be positive.')
     if args.replay_reuse <= 0:
         raise ValueError('--replay-reuse must be positive.')
+    if not 0.0 <= args.placement_replay_fraction < 1.0:
+        raise ValueError('--placement-replay-fraction must be in [0, 1).')
+    if not 0.0 <= args.placement_replay_frequency_exponent <= 1.0:
+        raise ValueError('--placement-replay-frequency-exponent must be in [0, 1].')
+    if not 0.0 <= args.unique_neural_start_fraction <= 1.0:
+        raise ValueError('--unique-neural-start-fraction must be between 0 and 1.')
+    if args.unique_neural_start_max_attempt_factor < 1:
+        raise ValueError('--unique-neural-start-max-attempt-factor must be positive.')
     if args.snapshot_interval < 1:
         raise ValueError('--snapshot-interval must be positive.')
     if args.arena_games < 0 or args.arena_games % 2:
@@ -434,6 +486,16 @@ def main():
             '--self-play-batch-size', '128',
             '--batch-size', '256',
             '--replay-reuse', str(args.replay_reuse),
+            '--placement-replay-fraction', str(args.placement_replay_fraction),
+            '--placement-replay-frequency-exponent', str(
+                args.placement_replay_frequency_exponent
+            ),
+            '--unique-neural-start-fraction', str(
+                args.unique_neural_start_fraction
+            ),
+            '--unique-neural-start-max-attempt-factor', str(
+                args.unique_neural_start_max_attempt_factor
+            ),
             '--replay-reuse-warmup-iters', '0',
             '--validation-fraction', '0.05',
             '--optimizer', 'adamw',
@@ -506,7 +568,14 @@ def main():
                 )
             raise RuntimeError('Expected one telemetry row from iteration {}.'.format(iteration))
         previous_objective = _validate_row(
-            rows[-1], runtime, iteration, previous_objective, args.replay_reuse
+            rows[-1],
+            runtime,
+            iteration,
+            previous_objective,
+            args.replay_reuse,
+            args.placement_replay_fraction,
+            args.placement_replay_frequency_exponent,
+            args.unique_neural_start_fraction,
         )
         completed.append(iteration)
         paused = bool(
@@ -594,6 +663,14 @@ def main():
         },
         'training_contract': {
             'replay_reuse': args.replay_reuse,
+            'placement_replay_fraction': args.placement_replay_fraction,
+            'placement_replay_frequency_exponent': (
+                args.placement_replay_frequency_exponent
+            ),
+            'unique_neural_start_fraction': args.unique_neural_start_fraction,
+            'unique_neural_start_max_attempt_factor': (
+                args.unique_neural_start_max_attempt_factor
+            ),
             'resume_replay_reuse': metadata.get('replay_reuse'),
             'deep_value_reference_iteration': 11,
             'deep_value_warning_iterations': 2,

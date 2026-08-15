@@ -53,17 +53,19 @@ branch, set `RESUME_CHECKPOINT` and `RESUME_REPLAY` explicitly so the notebook
 cannot silently choose the non-promoted iteration-14 state. The evidence and
 next gate are in `P2_PURE_Z_12_14.md`.
 
-## Current dose-branch contract
+## Current replay-design diagnostic
 
-The notebook is currently pinned to the iteration-11-to-17 4x dose experiment,
-including exact start/end checks. It is not a generic continuation of the
-iteration-14 diagnostic branch. The full rationale and gate definitions are in
-`P2_DOSE4_ITER12_17.md`.
+The checked-in parameters run four balanced-replay iterations from iteration
+17 through 21 at the unchanged 4x dose. The balanced arm uses 15% optimizer
+draw mass for D4-aggregated placement states, divides it equally among the four
+placement plies, weights state groups by square-root occurrence count, and
+starts 10% of ordinary games from search-generated D4-unique neural openings.
 
-The runner remains parameterized so it can support a later reviewed branch,
-but changes in reuse require an explicit expected ancestor dose. The current
-notebook supplies `REPLAY_REUSE=4`, `EXPECTED_RESUME_REPLAY_REUSE=2`,
-`EXPECTED_START_ITERATION=11`, and `EXPECTED_END_ITERATION=17`.
+Run a matched control in the second Kaggle session by changing `RUN_NAME` and
+setting `PLACEMENT_REPLAY_FRACTION=0` and
+`UNIQUE_NEURAL_START_FRACTION=0`. Leave all other controls identical. Optional
+expected ancestor/start/end values are filled for this diagnostic; set them to
+`None` only for a later reviewed routine continuation.
 
 ## Frozen normal-training contract
 
@@ -75,6 +77,8 @@ The reusable runner keeps the selected P2 baseline fixed:
 - global AdamW LR 1e-4 and no LR schedule (the selected experiment changes
   fresh-data reuse from the 2x ancestor to a fixed 4x);
 - a rolling 20-iteration replay window;
+- raw replay serialization unchanged, with phase balancing applied only to the
+  optimizer's training view;
 - 10% 5k-node ladder-v2 oracle sparring;
 - the frozen seam suite;
 - +0.05 teacher-objective step and +0.10-from-iteration-1 cumulative review
@@ -140,7 +144,7 @@ is the primary block-progress signal; the latter is the longitudinal anchor.
 ## Runtime identity
 
 <!-- RUNTIME_IDENTITY_START -->
-The current runtime bundle is 65,788,910 bytes with SHA-256
-`3612a2f51da5aeca1c86c82e49a6aebdc9db98116ffd43b2f76f1a9757b052da`.
+The current runtime bundle is 65,812,823 bytes with SHA-256
+`8bbf974f51f28e4e83ca2110c936ab6971dd1aab1235e3c6b5ded381a32a75c7`.
 <!-- RUNTIME_IDENTITY_END -->
 The adjacent `.report.json` records every bundled source and fixed-input digest.

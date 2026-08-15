@@ -138,6 +138,10 @@ class TestMainSantoriniOpenings(unittest.TestCase):
         self.assertTrue(coach_args.inferenceDeduplication)
         self.assertEqual(coach_args.inferenceCacheSize, 4096)
         self.assertFalse(coach_args.searchSymmetryEvaluation)
+        self.assertEqual(coach_args.placementReplayFraction, 0.15)
+        self.assertEqual(coach_args.placementReplayFrequencyExponent, 0.5)
+        self.assertEqual(coach_args.uniqueNeuralStartFraction, 0.10)
+        self.assertEqual(coach_args.uniqueNeuralStartMaxAttemptFactor, 32)
         self.assertEqual(coach_args.rootSymmetrySamples, 1)
         self.assertEqual(coach_args.placementRootSymmetrySamples, 1)
 

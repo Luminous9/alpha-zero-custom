@@ -59,10 +59,7 @@ class BatchedMCTSArena:
         }
 
     def playGames(self, num):
-        self.placement_records = []
-        self.game_records = []
-        for key in self.inference_stats:
-            self.inference_stats[key] = 0
+        self._resetRunState()
         num = int(num / 2)
         oneWon = 0
         twoWon = 0
@@ -88,7 +85,43 @@ class BatchedMCTSArena:
 
         return oneWon, twoWon, draws
 
+    def _resetRunState(self):
+        self.placement_records = []
+        self.game_records = []
+        for key in self.inference_stats:
+            self.inference_stats[key] = 0
+
+    def playGameSpecifications(self, specifications, desc="BatchedArena specifications"):
+        """Play arbitrary fixed-opening games while retaining batched search.
+
+        Each specification declares its own physical-side-to-contestant mapping.
+        This is primarily used to adjudicate unique continuations after a
+        placement-only generation pass.
+        """
+        specifications = list(specifications)
+        self._resetRunState()
+        return self._playGameSpecifications(specifications, desc)
+
     def _playGamesForSides(self, num, side_to_player, desc, seat_order=None):
+        specifications = []
+        for game_index in range(num):
+            specifications.append({
+                'side_to_player': dict(side_to_player),
+                'opening_board': (
+                    self.opening_boards[game_index]
+                    if self.opening_boards is not None else None
+                ),
+                'game_seed': (
+                    self.game_seeds[game_index]
+                    if self.game_seeds is not None else None
+                ),
+                'game_index': game_index,
+                'seat_order': seat_order,
+                'specification_id': None,
+            })
+        return self._playGameSpecifications(specifications, desc)
+
+    def _playGameSpecifications(self, specifications, desc):
         oneWon = 0
         twoWon = 0
         draws = 0
@@ -96,7 +129,7 @@ class BatchedMCTSArena:
         completed = 0
         active = []
         progress = tqdm(
-            total=num,
+            total=len(specifications),
             desc=desc,
             disable=self.quiet,
             file=self.progress_file,
@@ -104,16 +137,16 @@ class BatchedMCTSArena:
         )
 
         try:
-            while completed < num:
-                while launched < num and len(active) < self.batch_size:
-                    opening_board = self.opening_boards[launched] if self.opening_boards is not None else None
-                    game_seed = self.game_seeds[launched] if self.game_seeds is not None else None
+            while completed < len(specifications):
+                while launched < len(specifications) and len(active) < self.batch_size:
+                    specification = specifications[launched]
                     active.append(self._newGame(
-                        side_to_player,
-                        opening_board=opening_board,
-                        game_seed=game_seed,
-                        game_index=launched,
-                        seat_order=seat_order,
+                        specification['side_to_player'],
+                        opening_board=specification.get('opening_board'),
+                        game_seed=specification.get('game_seed'),
+                        game_index=specification.get('game_index', launched),
+                        seat_order=specification.get('seat_order'),
+                        specification_id=specification.get('specification_id'),
                     ))
                     launched += 1
 
@@ -163,6 +196,7 @@ class BatchedMCTSArena:
                     if self.record_placement_diagnostics:
                         self._recordPlacementGame(game_state, winner, game_result)
                     self.game_records.append({
+                        'specification_id': game_state.get('specification_id'),
                         'pair_index': game_state.get('game_index'),
                         'seat_order': game_state.get('seat_order'),
                         'game_seed': game_state.get('game_seed'),
@@ -173,6 +207,7 @@ class BatchedMCTSArena:
                         ),
                         'winner': int(winner),
                         'winner_side': int(game_result),
+                        'standard_trajectory': tuple(game_state['standard_actions']),
                     })
 
                     if winner == 1:
@@ -191,6 +226,133 @@ class BatchedMCTSArena:
 
         return oneWon, twoWon, draws
 
+    def generatePlacementGames(self, num):
+        """Generate paired completed placements without playing continuations."""
+        num = int(num)
+        if num < 2 or num % 2:
+            raise ValueError('Placement generation requires a positive even game count.')
+        if not hasattr(self.game, 'isPlacementPhase'):
+            raise ValueError('Placement generation requires placement-aware rules.')
+        self._resetRunState()
+        pairs = num // 2
+        first = self._generatePlacementsForSides(
+            pairs,
+            {1: 1, -1: -1},
+            'BatchedArena placements (1)',
+            'contestant1_first',
+        )
+        second = self._generatePlacementsForSides(
+            pairs,
+            {1: -1, -1: 1},
+            'BatchedArena placements (2)',
+            'contestant2_first',
+        )
+        return first + second
+
+    def generatePlacements(
+        self,
+        num,
+        side_to_player=None,
+        desc='BatchedArena placements',
+        seat_order='placement_source',
+    ):
+        """Generate one unpaired stream of completed placement boards.
+
+        This is useful for constructing a frozen opening suite from a single
+        placement controller without duplicating every RNG seed through the
+        contestant seat-swap used by :meth:`generatePlacementGames`.
+        """
+        num = int(num)
+        if num < 1:
+            raise ValueError('Placement generation requires a positive count.')
+        if not hasattr(self.game, 'isPlacementPhase'):
+            raise ValueError('Placement generation requires placement-aware rules.')
+        if self.game_seeds is not None and len(self.game_seeds) < num:
+            raise ValueError('Placement generation needs one seed per game.')
+        self._resetRunState()
+        return self._generatePlacementsForSides(
+            num,
+            dict(side_to_player or {1: 1, -1: -1}),
+            desc,
+            seat_order,
+        )
+
+    def _generatePlacementsForSides(self, num, side_to_player, desc, seat_order):
+        launched = 0
+        completed = 0
+        active = []
+        records = []
+        progress = tqdm(
+            total=num,
+            desc=desc,
+            disable=self.quiet,
+            file=self.progress_file,
+            dynamic_ncols=True,
+        )
+        try:
+            while completed < num:
+                while launched < num and len(active) < self.batch_size:
+                    game_seed = (
+                        self.game_seeds[launched]
+                        if self.game_seeds is not None else None
+                    )
+                    state = self._newGame(
+                        side_to_player,
+                        game_seed=game_seed,
+                        game_index=launched,
+                        seat_order=seat_order,
+                    )
+                    if not self._isPlacement(state['board']):
+                        raise ValueError('Placement generation must start in placement.')
+                    active.append(state)
+                    launched += 1
+
+                for game_state in active:
+                    game_state['canonicalBoard'] = self.game.getCanonicalForm(
+                        game_state['board'], game_state['curPlayer']
+                    )
+                actions = self._getBatchedActions(active)
+                still_active = []
+                for game_state, action in zip(active, actions):
+                    if not self._isPlacement(game_state['canonicalBoard']):
+                        raise AssertionError('Placement generator crossed the phase boundary.')
+                    game_state['placement_actions'].append(int(action))
+                    game_state['board'], game_state['curPlayer'] = self.game.getNextState(
+                        game_state['board'], game_state['curPlayer'], int(action)
+                    )
+                    next_canonical = self.game.getCanonicalForm(
+                        game_state['board'], game_state['curPlayer']
+                    )
+                    if self._isPlacement(next_canonical):
+                        still_active.append(game_state)
+                        continue
+                    if self.game.getGameEnded(
+                        game_state['board'], game_state['curPlayer']
+                    ) != 0:
+                        raise ValueError('Placement generated a terminal opening.')
+                    p1, p2 = self._placementLocations(game_state['board'])
+                    records.append({
+                        'pair_index': int(game_state['game_index']),
+                        'seat_order': game_state['seat_order'],
+                        'game_seed': game_state['game_seed'],
+                        'side_to_player': dict(game_state['side_to_player']),
+                        'opening_board': game_state['board'].copy(),
+                        'opening': self._locationSignature(p1, p2),
+                        'labeled_opening_key': self._labeledPlacementKey(
+                            game_state['board']
+                        ),
+                        'symmetry_opening': self._symmetryPlacementSignature(
+                            game_state['board']
+                        ),
+                        'placement_actions': tuple(game_state['placement_actions']),
+                    })
+                    completed += 1
+                    progress.update(1)
+                active = still_active
+        finally:
+            progress.close()
+        return records
+
     def _newGame(
         self,
         side_to_player,
@@ -198,6 +360,7 @@ class BatchedMCTSArena:
         game_seed=None,
         game_index=None,
         seat_order=None,
+        specification_id=None,
     ):
         game_state = {
             'board': opening_board.copy() if opening_board is not None else self.game.getInitBoard(),
@@ -211,7 +374,9 @@ class BatchedMCTSArena:
             'game_seed': game_seed,
             'game_index': game_index,
             'seat_order': seat_order,
+            'specification_id': specification_id,
             'placement_board': None,
+            'placement_actions': [],
             'standard_actions': [],
         }
         if self.standard_controller_nnet is not None:
